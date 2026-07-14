@@ -1,28 +1,33 @@
-# Onet.pl — jak dojść do logowania.
-# Przepływ: strona główna → akceptacja ciasteczek → klik „Logowanie” (popup).
+# Onet.pl — how to reach the login.
+# Flow: home page → accept the cookie banner → click "Log in" (opens a pop-up).
 #
-# Uruchomienie:
+# Run:
 #   uv run guidebot validate examples/onet-login.scenario.yaml
-#   uv run guidebot compile  examples/onet-login.scenario.yaml   # faza AI (Codex CLI)
+#   uv run guidebot compile  examples/onet-login.scenario.yaml   # AI phase (Codex CLI)
 #   uv run guidebot render   examples/onet-login.scenario.yaml --out out/onet-login.mp4
+#
+# Notes:
+# - The cookie banner may live in a cross-origin iframe (iframe support is deferred).
+# - "Log in" opens a real pop-up window (multi-window support is deferred): the click
+#   is recorded, but the pop-up's contents are not yet driven.
 config:
-  title: "Onet.pl — jak wejść na logowanie"
-  viewport: { width: 1366, height: 768 }
+  title: "Onet.pl — how to reach the login"
+  viewport: { width: 1440, height: 900 }
   locale: pl-PL
-  tts: { provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL }
+  tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
 steps:
-  - say: "Pokażę, jak dojść do logowania w portalu Onet. Zaczynamy od strony głównej."
+  - say: "I'll show you how to reach the login on the Onet portal. We start on the home page."
 
   - navigate: "https://www.onet.pl"
 
-  # Baner zgody pojawia się z chwilą opóźnienia — poczekaj, aż będzie widoczny.
+  # The consent banner appears after a short delay — wait until it is visible.
   - wait:
-      until: "aż pojawi się baner zgody na pliki cookie"
+      until: "the cookie consent banner to appear"
       state: visible
       timeout: 20
 
-  - teach: "Najpierw akceptujemy zgodę na pliki cookie, klikając przycisk przejścia do serwisu"
+  - teach: "First we accept the cookie consent by clicking the button that continues to the site"
 
-  - teach: "Aby się zalogować, klikamy odnośnik Logowanie w prawym górnym rogu strony"
+  - teach: "To log in, we click the account icon in the top-right corner of the page"
 
-  - say: "Okno logowania otwiera się w osobnym, wyskakującym oknie — tam podajemy e-mail i hasło."
+  - say: "The login window opens in a separate pop-up window, where we enter the email and password."

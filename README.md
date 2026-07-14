@@ -74,18 +74,18 @@ Useful flags for `compile` and `render`:
 
 ```yaml
 config:
-  title: "Logowanie do systemu"
+  title: "Logging in to the system"
   baseUrl: https://example.com
   viewport: { width: 1440, height: 900 }
-  locale: pl-PL
-  tts: { provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL }
+  locale: en-US
+  tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
 steps:
-  - say: "Witaj. Zaraz pokażę, jak zalogować się do systemu."
+  - say: "Welcome. I'll show you how to log in to the system."
   - navigate: /login
-  - teach: "Aby się zalogować, kliknij przycisk Zaloguj w prawym górnym rogu"
-  - enterText: { into: "pole adresu e-mail", text: "${DEMO_EMAIL}" }
-    say: "Teraz wpisuję swój adres e-mail."
-  - wait: { until: "aż zniknie spinner ładowania", state: hidden, timeout: 10 }
+  - teach: "To log in, click the Log in button in the top-right corner"
+  - enterText: { into: "the email address field", text: "${DEMO_EMAIL}" }
+    say: "Now I'm entering my email address."
+  - wait: { until: "the loading spinner to disappear", state: hidden, timeout: 10 }
 ```
 
 Commands: `say` (narration only), `teach` (the voice reads a whole guiding sentence
