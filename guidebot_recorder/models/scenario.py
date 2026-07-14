@@ -28,12 +28,21 @@ class WaitUntil(BaseModel):
     timeout: float = 10.0
 
 
+class NavigateConfig(BaseModel):
+    """Object form of ``navigate`` with an optional typing override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    type: bool | None = None
+
+
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     say: str | None = None
     teach: str | None = None
-    navigate: str | None = None
+    navigate: str | NavigateConfig | None = None
     click: str | None = None
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
@@ -64,6 +73,18 @@ class Step(BaseModel):
         if kind == "wait" and isinstance(self.wait, WaitUntil):
             return True
         return False
+
+    def navigate_url(self) -> str | None:
+        """Return the URL from either the legacy string or object form."""
+        if isinstance(self.navigate, NavigateConfig):
+            return self.navigate.url
+        return self.navigate
+
+    def navigate_type_override(self) -> bool | None:
+        """Return the per-step typing override, if object ``navigate`` supplies one."""
+        if isinstance(self.navigate, NavigateConfig):
+            return self.navigate.type
+        return None
 
 
 class Scenario(BaseModel):

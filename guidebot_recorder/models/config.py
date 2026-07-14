@@ -52,6 +52,28 @@ class CursorConfig(BaseModel):
     settle: float = 280.0  # ms pause after arrival, before the action fires
 
 
+class ChromeConfig(BaseModel):
+    """Cosmetic browser chrome rendered above the recorded page.
+
+    The whole feature is opt-in.  These values only affect render-time visuals,
+    so they deliberately stay outside :func:`config_hash`.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    enabled: bool = False
+    show_url: bool = Field(default=True, alias="showUrl")
+    type_on_navigate: bool = Field(default=True, alias="typeOnNavigate")
+    height: int = Field(default=56, gt=0)
+    bar_color: str = Field(default="#f3f4f6", alias="barColor")
+    text_color: str = Field(default="#374151", alias="textColor")
+    radius: int = Field(default=12, ge=0)
+    show_lock: bool = Field(default=True, alias="showLock")
+    close_color: str = Field(default="#ff5f57", alias="closeColor")
+    minimize_color: str = Field(default="#febc2e", alias="minimizeColor")
+    maximize_color: str = Field(default="#28c840", alias="maximizeColor")
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
@@ -60,6 +82,7 @@ class Config(BaseModel):
     base_url: str | None = Field(default=None, alias="baseUrl")
     locale: str | None = None
     cursor: CursorConfig = Field(default_factory=CursorConfig)
+    chrome: ChromeConfig = Field(default_factory=ChromeConfig)
 
 
 def config_hash(cfg: Config) -> str:

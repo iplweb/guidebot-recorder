@@ -9,6 +9,7 @@ from guidebot_recorder.models.action import (
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.config import (
     CONFIG_HASH_VERSION,
+    ChromeConfig,
     Config,
     TtsConfig,
     Viewport,
@@ -17,6 +18,7 @@ from guidebot_recorder.models.config import (
 from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.scenario import (
     EnterText,
+    NavigateConfig,
     Scenario,
     Step,
     WaitUntil,
@@ -37,6 +39,7 @@ __all__ = [
     "Fingerprint",
     "WaitState",
     "CONFIG_HASH_VERSION",
+    "ChromeConfig",
     "Config",
     "TtsConfig",
     "Viewport",
@@ -44,6 +47,7 @@ __all__ = [
     "Identity",
     "CompiledScenario",
     "EnterText",
+    "NavigateConfig",
     "Scenario",
     "Step",
     "WaitUntil",

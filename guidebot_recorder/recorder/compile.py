@@ -90,7 +90,7 @@ def _resolve_url(scenario: Scenario, url: str) -> str:
 def _short(step: Step, limit: int = 60) -> str:
     """Short, readable step description for the verbose log."""
     for attr in ("say", "teach", "navigate", "click", "hover"):
-        value = getattr(step, attr)
+        value = step.navigate_url() if attr == "navigate" else getattr(step, attr)
         if value:
             text = str(value)
             return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -242,7 +242,9 @@ async def _compile_step(
     if kind == "say":
         return None
     if kind == "navigate":
-        await recorder.navigate(_resolve_url(scenario, step.navigate))
+        url = step.navigate_url()
+        assert url is not None  # guaranteed by command_kind()
+        await recorder.navigate(_resolve_url(scenario, url))
         return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
