@@ -323,6 +323,19 @@ def test_targetless_scenario_requires_current_aligned_sidecar(tmp_path):
     assert compile_up_to_date(path) is False
 
 
+async def test_target_step_changed_to_say_requires_compile(tmp_path, page):
+    path = tmp_path / "changed-kind.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+    await run_compile(path, page, MockReasoner())
+
+    path.write_text(
+        SCENARIO.replace('- teach: "kliknij Zaloguj"', '- say: "To już narracja"'),
+        encoding="utf-8",
+    )
+
+    assert compile_up_to_date(path) is False
+
+
 async def test_compile_rejects_second_popup_in_session(tmp_path, page):
     second = tmp_path / "second.html"
     second.write_text("<h1>Drugi popup</h1>", encoding="utf-8")

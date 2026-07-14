@@ -173,6 +173,11 @@ def compile_up_to_date(
     if not _compiled_artifact_is_current(cpath, len(scenario.steps)):
         return False
     actions = _load_prior_actions(cpath, len(scenario.steps))
+    if any(
+        not step.requires_target() and actions[index] is not None
+        for index, step in enumerate(scenario.steps)
+    ):
+        return False
     return not _steps_needing_resolution(scenario, actions, chash, force)
 
 
