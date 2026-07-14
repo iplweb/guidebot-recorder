@@ -1,0 +1,34 @@
+[project]
+name = "guidebot-recorder"
+version = "0.1.0"
+description = "Kompilator scenariuszy YAML → deterministyczny film szkoleniowy (Playwright + kursor + lektor TTS)"
+requires-python = ">=3.12"
+dependencies = [
+  "playwright>=1.47",
+  "pydantic>=2.7",
+  "ruamel.yaml>=0.18",
+  "typer>=0.12",
+  "edge-tts>=6.1",
+]
+
+[project.scripts]
+guidebot = "guidebot_recorder.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "network: wymaga sieci (TTS) — domyślnie pomijane w CI",
+  "ffmpeg: wymaga ffmpeg/ffprobe",
+  "integration: pełny e2e compile+render",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["guidebot_recorder"]
