@@ -1,4 +1,4 @@
-"""CachedAction i Fingerprint — zamrożona, wersjonowana akcja (§4.2/§4.3)."""
+"""CachedAction and Fingerprint — a frozen, versioned action (§4.2/§4.3)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.target import Target
 
-#: wersja schematu namiaru — wzrost wymusza re-resolve
+#: reference schema version — a bump forces a re-resolve
 COMPILER_VERSION = 1
 
 ActionKind = Literal["click", "hover", "type", "waitFor"]
@@ -33,7 +33,7 @@ class CachedAction(BaseModel):
 
     action: ActionKind
     target: Target
-    #: brak dla `waitFor: hidden` (nie ma czego porównywać)
+    #: absent for `waitFor: hidden` (nothing to compare against)
     identity: Identity | None = None
     expect: Expect
     state: WaitState | None = None

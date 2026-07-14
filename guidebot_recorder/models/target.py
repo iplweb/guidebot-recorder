@@ -1,7 +1,7 @@
-"""Target — namiar na element (unia dyskryminowana po `strategy`), §4.3 specu.
+"""Target — a reference to an element (union discriminated by `strategy`), spec §4.3.
 
-Jedno źródło prawdy dla: wyjścia Reasonera, pola `scope`, `cachedAction`.
-Locator Playwrighta budowany jest z tych pól wyłącznie w zaufanym kodzie.
+Single source of truth for: the Reasoner's output, the `scope` field, and `cachedAction`.
+The Playwright locator is built from these fields exclusively in trusted code.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # rekurencyjne zawężenie do poddrzewa przodka
+    # recursive narrowing to an ancestor's subtree
     scope: Target | None = None
 
 

@@ -1,8 +1,9 @@
-"""Recorder — Python API sterujące przeglądarką (§6).
+"""Recorder — the Python API that drives the browser (§6).
 
-Jedyne miejsce, które „wie jak": buduje locator z zamrożonych pól `Target`,
-animuje kursor (overlay) i wykonuje akcję Playwrightem. Overlay jest opcjonalny —
-faza `compile` nie potrzebuje animacji, więc może użyć `Recorder(page, None)`.
+The only place that "knows how": it builds a locator from the frozen `Target`
+fields, animates the cursor (overlay), and performs the action via Playwright.
+The overlay is optional — the `compile` phase needs no animation, so it can use
+`Recorder(page, None)`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
 
-# WaitState → stan akceptowany przez Playwright locator.wait_for
+# WaitState → the state accepted by Playwright's locator.wait_for
 _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enabled": "visible"}
 
 
@@ -25,8 +26,8 @@ class Recorder:
 
     async def _point_and_prepare(self, target: Target) -> Locator:
         locator = await build_locator(self.page, target)
-        # przewiń do celu w OBU osiach — element bywa poza kadrem także w poziomie,
-        # a auto-scroll Playwrighta jest pionowo-centryczny
+        # scroll to the target on BOTH axes — an element can be off-screen horizontally
+        # too, and Playwright's auto-scroll is vertically centric
         await locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
         if self.overlay is not None:
             box = await locator.bounding_box()

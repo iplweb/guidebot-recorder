@@ -1,4 +1,4 @@
-"""Testy protokołu providera, klucza cache i TtsCache (Task 14) — FAKE provider, bez sieci."""
+"""Tests for the provider protocol, cache key, and TtsCache (Task 14) — FAKE provider, no network."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _tts(voice: str = "pl-PL-ZofiaNeural") -> TtsConfig:
 
 
 class FakeProvider:
-    """Provider bez sieci: zapisuje deterministyczny plik, liczy wywołania."""
+    """Network-free provider: writes a deterministic file and counts calls."""
 
     adapter_version = 1
 
@@ -72,7 +72,7 @@ async def test_miss_then_hit_does_not_recall_provider(tmp_path):
     assert seg.path.exists()
     assert provider.calls == 1
 
-    # HIT: drugie wywołanie nie woła providera i zwraca ten sam plik/długość
+    # HIT: the second call does not invoke the provider and returns the same file/duration
     seg2 = await cache.get_or_synth("witaj", _tts(), provider)
     assert provider.calls == 1
     assert seg2.path == seg.path
@@ -84,7 +84,7 @@ async def test_hit_reads_from_disk_without_provider(tmp_path):
     provider = FakeProvider()
     await cache.get_or_synth("witaj", _tts(), provider)
 
-    # Nowy provider, który by rzucił, gdyby został wywołany
+    # A new provider that would raise if it were ever called
     class Boom:
         adapter_version = 1
 
@@ -104,7 +104,7 @@ async def test_voice_change_is_a_miss(tmp_path):
     assert provider.calls == 1
 
     await cache.get_or_synth("witaj", _tts(voice="B"), provider)
-    assert provider.calls == 2  # inny voice → inny klucz → MISS
+    assert provider.calls == 2  # different voice → different key → MISS
 
 
 async def test_creates_cache_dir_if_missing(tmp_path):

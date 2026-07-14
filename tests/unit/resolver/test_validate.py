@@ -120,8 +120,8 @@ async def test_build_locator_applies_recursive_scope_and_nth(page):
             "not_enabled",
         ),
         (
-            # display:none jest wykluczony z drzewa dostępności → get_by_role
-            # nie trafia w element → not_found (nie not_visible)
+            # display:none is excluded from the accessibility tree → get_by_role
+            # does not match the element → not_found (not not_visible)
             "<button style='display:none'>Zapisz</button>",
             RoleTarget(role="button", name="Zapisz"),
             "click",

@@ -1,4 +1,4 @@
-"""Wspólne udogodnienia debugowe dla compile/render."""
+"""Shared debugging conveniences for compile/render."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from playwright.async_api import Page
 async def pause_for_inspection(
     page: Page, phase: str, index: int, kind: str, exc: Exception
 ) -> None:
-    """Zatrzymaj i zostaw okno otwarte do inspekcji (headed). Nie maskuje błędu."""
+    """Pause and leave the window open for inspection (headed). Does not mask the error."""
     print(
         f"\n⏸  {phase}: krok {index + 1} ({kind}) padł: {type(exc).__name__}: {exc}\n"
         "   Okno przeglądarki jest otwarte — obejrzyj stronę/DOM. Kliknij ▶ Resume\n"
@@ -17,5 +17,5 @@ async def pause_for_inspection(
     )
     try:
         await page.pause()
-    except Exception:  # noqa: BLE001 — pauza to udogodnienie, nie może maskować błędu kroku
+    except Exception:  # noqa: BLE001 — the pause is a convenience; it must not mask the step's error
         pass

@@ -1,9 +1,9 @@
-"""Protokół providera TTS + cache pre-syntezy narracji (§8).
+"""TTS provider protocol + narration pre-synthesis cache (§8).
 
-Klucz cache = hash z pełnej sekcji ``config.tts`` (provider/voice/lang/model/speed)
-+ tekst + ``ttsAdapterVersion`` (wersja adaptera providera) + ``cacheSchemaVersion``.
-Sam upgrade adaptera/providera przy niezmienionym ``config.tts`` również unieważnia
-cache — dlatego wersje wchodzą do klucza jako salt.
+Cache key = hash of the full ``config.tts`` section (provider/voice/lang/model/speed)
++ text + ``ttsAdapterVersion`` (provider adapter version) + ``cacheSchemaVersion``.
+Upgrading the adapter/provider alone, with ``config.tts`` unchanged, also invalidates
+the cache — which is why the versions enter the key as salt.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from typing import Protocol, runtime_checkable
 
 from guidebot_recorder.models.config import TtsConfig
 
-#: wersja układu plików cache (nazwa/format meta). Zmiana → nowy klucz, pełna ressynteza.
+#: cache file layout version (meta name/format). A change → new key, full re-synthesis.
 CACHE_SCHEMA_VERSION = 1
 
 
 @dataclass
 class Segment:
-    """Zsyntetyzowany fragment narracji: tekst, plik audio, długość w sekundach."""
+    """A synthesized narration segment: text, audio file, duration in seconds."""
 
     text: str
     path: Path
@@ -31,16 +31,16 @@ class Segment:
 
 @runtime_checkable
 class TtsProvider(Protocol):
-    """Provider syntezy mowy.
+    """Speech synthesis provider.
 
-    ``adapter_version`` uczestniczy w kluczu cache (§8) — bump przy zmianie
-    zachowania syntezy przy niezmienionym ``config.tts``.
+    ``adapter_version`` participates in the cache key (§8) — bump it when the
+    synthesis behavior changes while ``config.tts`` stays unchanged.
     """
 
     adapter_version: int
 
     async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
-        """Zsyntetyzuj ``text`` do pliku ``out``; zwróć długość w sekundach."""
+        """Synthesize ``text`` into the file ``out``; return the duration in seconds."""
         ...
 
 
@@ -50,10 +50,10 @@ def cache_key(
     adapter_version: int,
     cache_schema_version: int,
 ) -> str:
-    """SHA-256 z kanonicznej projekcji: sekcja ``config.tts`` + tekst + wersje.
+    """SHA-256 of the canonical projection: the ``config.tts`` section + text + versions.
 
-    Wrażliwy na provider/voice/lang/model/speed, treść oraz salt wersji
-    (adapter + schemat cache).
+    Sensitive to provider/voice/lang/model/speed, the content, and the version salt
+    (adapter + cache schema).
     """
     projection = {
         "adapter_version": adapter_version,
@@ -72,7 +72,7 @@ def cache_key(
 
 
 class TtsCache:
-    """Cache pre-syntezy na dysku: HIT z cache bez wołania providera (§8, Faza 0)."""
+    """On-disk pre-synthesis cache: a cache HIT skips calling the provider (§8, Phase 0)."""
 
     def __init__(self, dir: Path) -> None:
         self.dir = Path(dir)
@@ -89,10 +89,11 @@ class TtsCache:
         tts: TtsConfig,
         provider: TtsProvider,
     ) -> Segment:
-        """Zwróć segment z cache (HIT) lub zsyntetyzuj przez ``provider`` (MISS).
+        """Return a segment from the cache (HIT) or synthesize it via ``provider`` (MISS).
 
-        HIT wymaga istnienia pliku audio **oraz** meta z długością — wtedy provider
-        nie jest wołany. MISS: synteza, zapis meta z długością, zwrot segmentu.
+        A HIT requires both the audio file **and** the meta with a duration to exist —
+        only then is the provider skipped. MISS: synthesize, write the meta with the
+        duration, and return the segment.
         """
         key = cache_key(text, tts, provider.adapter_version, CACHE_SCHEMA_VERSION)
         audio = self._audio_path(key)

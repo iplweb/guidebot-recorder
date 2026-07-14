@@ -1,171 +1,171 @@
 # Guidebot-recorder — design (spec v4)
 
-Data: 2026-07-14
-Status: zaakceptowany do napisania planu implementacji
-Rewizja: v4 — po trzech rundach self-review. Runda 1: Fable + Codex (v1). Runda 2:
-Fable (v2). Runda 3: Codex (v3). v4 = konsolidacja + normatywny model danych (§4.3).
-Dziennik zmian w §17.
+Date: 2026-07-14
+Status: accepted for writing the implementation plan
+Revision: v4 — after three rounds of self-review. Round 1: Fable + Codex (v1). Round 2:
+Fable (v2). Round 3: Codex (v3). v4 = consolidation + normative data model (§4.3).
+Changelog in §17.
 
-## 1. Cel i zakres
+## 1. Purpose and scope
 
-Narzędzie, które z tekstowego opisu scenariusza (YAML) generuje **film
-szkoleniowy**: bot wchodzi na stronę, przechodzi daną funkcję krok po kroku
-(Playwright), pokazuje kursor i kliknięcia, a lektor (TTS) tłumaczy, co się
-dzieje. Produktem wyjściowym jest **plik `.mp4` z narracją głosową**.
+A tool that, from a textual scenario description (YAML), generates a **training
+video**: a bot navigates to a site, walks through a given feature step by step
+(Playwright), shows the cursor and clicks, while a narrator (TTS) explains what is
+happening. The output product is an **`.mp4` file with voice narration**.
 
-Rdzeń pomysłu to **kompilator**: scenariusz pisany intencjami po ludzku
-(„kliknij Zaloguj") zostaje **skompilowany** przez AI do postaci z zamrożonymi,
-konkretnymi namiarami na elementy. Dzięki temu właściwe renderowanie filmu jest
-**deterministyczne w warstwie akcji** (patrz §2, granica gwarancji) i nie
-wymaga LLM-a: przeglądarka przechodzi całą funkcję od początku do końca jednym
-ciągiem, na świeżej sesji, bez doczepiania się w trakcie.
+The core idea is a **compiler**: a scenario written in human intentions
+("click Log in") is **compiled** by AI into a form with frozen, concrete
+element references. Thanks to this, the actual video rendering is
+**deterministic in the action layer** (see §2, guarantee boundary) and does not
+require an LLM: the browser walks through the entire feature from start to finish in
+a single run, on a fresh session, without attaching mid-way.
 
-### Zakres v1
-- Faza `compile` (intencje → wkompilowane akcje) z resolverem AI.
-- Faza `render` (film `.mp4` z lektorem).
+### v1 scope
+- The `compile` phase (intentions → compiled actions) with the AI resolver.
+- The `render` phase (`.mp4` video with narrator).
 
-### Zaprojektowane, ale odłożone (v-next)
-- Faza `record` — nagrywanie własnych kliknięć użytkownika wprost do scenariusza
-  (bez AI). Format kroku i model danych projektujemy tak, by `record` wpiął się
-  później bez przeróbek.
+### Designed but deferred (v-next)
+- The `record` phase — recording the user's own clicks directly into the scenario
+  (without AI). The step format and the data model are designed so that `record`
+  plugs in later without rework.
 
-## 2. Model kompilatora — dwie fazy
+## 2. Compiler model — two phases
 
 ```
-[intencja YAML]   --compile (AI/Codex)-->  ┐
-[record (v-next)] --przechwyć-->            ├─> [scenario.yaml z akcjami] --render--> [film .mp4]
-[ręczna edycja]   -------------------------┘        (0×LLM, świeża przeglądarka, 1 przejście)
+[intention YAML]  --compile (AI/Codex)-->  ┐
+[record (v-next)] --capture-->              ├─> [scenario.yaml with actions] --render--> [.mp4 video]
+[manual edit]     -------------------------┘        (0×LLM, fresh browser, 1 pass)
 ```
 
-### Granica gwarancji determinizmu
-**Deterministyczne są: akcje, ich typy i namiary na elementy** (zamrożone w
-`cachedAction`) oraz **treść i długość narracji** (audio z cache, §8). **Nie są
-gwarantowane co do klatki:** czasy ładowania stron, latencja sieci, animacje CSS
-aplikacji docelowej. Powtarzalność renderu opiera się dodatkowo na przypiętym
-**środowisku** (§16) i **`config`** scenariusza (viewport, język — §3.1).
-„0×LLM" w renderze oznacza brak wywołań AI; nie oznacza braku I/O sieciowego do
-aplikacji docelowej.
+### Determinism guarantee boundary
+**Deterministic are: the actions, their types and element references** (frozen in
+`cachedAction`) and **the content and length of the narration** (audio from cache, §8).
+**Not guaranteed frame-by-frame:** page load times, network latency, CSS animations
+of the target application. Render repeatability additionally relies on a pinned
+**environment** (§16) and the scenario's **`config`** (viewport, language — §3.1).
+"0×LLM" in render means no AI calls; it does not mean no network I/O to the
+target application.
 
-### Faza `compile` (`guidebot compile scenario.yaml`)
-- Uruchamia scenariusz na **świeżej sesji** i wykonuje kroki **sekwencyjnie od
-  początku** (patrz algorytm §5.6), bo resolver potrzebuje snapshotu strony *w
-  stanie danego kroku*. Wszystkie akcje są realnie wykonywane (skutki uboczne —
-  patrz wymagania wobec środowiska §16).
-- Dla kroku wymagającego namiaru bez ważnego `cachedAction` woła
-  **ElementResolver** (LLM/agent). Wynik — struktura namiaru + typ akcji —
-  zostaje **wpisany w ten sam plik** pod danym krokiem jako `cachedAction`.
-- To **jedyna** faza, w której działa AI. LLM **zwraca wyłącznie dane** (§5.5);
-  wszystkie akcje w przeglądarce wykonuje Playwright.
-- Edycja pliku jest **w miejscu** (round-trip, §4).
+### The `compile` phase (`guidebot compile scenario.yaml`)
+- Runs the scenario on a **fresh session** and executes the steps **sequentially from
+  the start** (see the algorithm in §5.6), because the resolver needs a snapshot of the
+  page *in the state of the given step*. All actions are really executed (side effects —
+  see the requirements on the environment §16).
+- For a step requiring a reference without a valid `cachedAction`, it calls
+  **ElementResolver** (LLM/agent). The result — the reference structure + action type —
+  is **written into the same file** under the given step as `cachedAction`.
+- This is the **only** phase in which AI runs. The LLM **returns data only** (§5.5);
+  all browser actions are performed by Playwright.
+- File editing is **in place** (round-trip, §4).
 
-### Faza `render` (`guidebot render scenario.yaml`)
-- **Faza 0 — przygotowanie audio (offline):** zanim otworzymy nagrywaną
-  przeglądarkę, syntezujemy i **cache'ujemy całą narrację** (§8). Render nie woła
-  TTS „na żywo".
-- **0×LLM.** Czyta wkompilowane `cachedAction`, odtwarza kroki czystym
-  Playwrightem. Przed każdą akcją **waliduje namiar na żywej stronie** (§5.4,
-  render-time): jeśli locator nie trafia lub trafiony element nie zgadza się z
-  zamrożoną **tożsamością** (`Identity`, §4.3) → **twardy błąd** „re-compile"
-  (render nie ma prawa wołać LLM-a).
-- Świeża przeglądarka, całość jednym przejściem, brak doczepiania się.
-- `--auto-heal`: **zarezerwowana nazwa, w v1 niezaimplementowana** (błąd „not
-  implemented"). Docelowo osobna komenda naprawcza aktualizuje cache i restartuje
-  render od kroku zero — nigdy LLM w trakcie nagrywania.
+### The `render` phase (`guidebot render scenario.yaml`)
+- **Phase 0 — audio preparation (offline):** before we open the recorded
+  browser, we synthesize and **cache the entire narration** (§8). Render does not call
+  TTS "live".
+- **0×LLM.** Reads the compiled `cachedAction`, replays the steps with plain
+  Playwright. Before each action it **validates the reference against the live page**
+  (§5.4, render-time): if the locator does not hit or the hit element does not match the
+  frozen **identity** (`Identity`, §4.3) → **hard error** "re-compile" (render has no
+  right to call the LLM).
+- Fresh browser, everything in a single pass, no attaching mid-way.
+- `--auto-heal`: **a reserved name, not implemented in v1** (error "not
+  implemented"). Ultimately a separate repair command updates the cache and restarts
+  the render from step zero — never an LLM during recording.
 
-## 3. Format scenariusza (YAML deklaratywny)
+## 3. Scenario format (declarative YAML)
 
-Scenariusz to `config` (§3.1) + lista `steps`. YAML jest **formatem autorskim**;
-pod spodem jest wspólne Python API (`Recorder`, §6), a runner YAML-a to jeden
-frontend nad nim.
+A scenario is `config` (§3.1) + a list of `steps`. YAML is the **authoring
+format**; underneath there is a common Python API (`Recorder`, §6), and the YAML
+runner is one frontend on top of it.
 
-### 3.1 Nagłówek `config`
+### 3.1 The `config` header
 ```yaml
 config:
-  title: "Logowanie do systemu"
-  baseUrl: https://app.example.com     # opcjonalny prefiks dla navigate
-  viewport: { width: 1280, height: 720 }  # = rozmiar wideo; wymagany dla powtarzalności
-  locale: pl-PL                        # locale kontekstu Playwrighta; wchodzi do configHash
+  title: "System login"
+  baseUrl: https://app.example.com     # optional prefix for navigate
+  viewport: { width: 1280, height: 720 }  # = video size; required for repeatability
+  locale: pl-PL                        # Playwright context locale; feeds into configHash
   tts: { provider: elevenlabs, voice: "pl-PL-Marek", lang: pl-PL }
 ```
-`viewport` jest wymagany — determinuje zarówno powtarzalność namiarów, jak i
-rozmiar `.mp4`. `locale` ustawia locale kontekstu przeglądarki (i język aplikacji,
-jeśli sterowany locale/nagłówkiem) i wchodzi do `configHash` (§4.3). **Nieznane
-klucze** w `config` i w krokach = **twardy błąd** (schemat zamknięty).
+`viewport` is required — it determines both the repeatability of references and the
+size of the `.mp4`. `locale` sets the browser context locale (and the application
+language, if driven by locale/header) and feeds into `configHash` (§4.3). **Unknown
+keys** in `config` and in steps = **hard error** (closed schema).
 
-### 3.2 Komendy
+### 3.2 Commands
 
-| Komenda | Znaczenie | Akcja | Namiar (cache) |
+| Command | Meaning | Action | Reference (cache) |
 |---|---|---|---|
-| `say` | Czysta narracja, nic nie robi | — | nie |
-| `teach` | Lektor mówi całe zdanie-przewodnik; LLM wyłuskuje z niego akcję i ją wykonuje | tak (wnioskowana) | tak |
-| `enterText` | Wpisanie tekstu w pole (jawna wartość) | type | tak (na `into`) |
-| `navigate` | Przejście pod URL | goto | nie |
-| `wait` | Pauza czasowa **lub** warunek na elemencie | — | tak, jeśli warunek elementowy |
-| `click` / `hover` | Jawny escape-hatch (akcja bez narracji lub gdy narracja ≠ akcja) | click/hover | tak |
+| `say` | Pure narration, does nothing | — | no |
+| `teach` | The narrator speaks a whole guide sentence; the LLM extracts an action from it and executes it | yes (inferred) | yes |
+| `enterText` | Type text into a field (explicit value) | type | yes (on `into`) |
+| `navigate` | Go to a URL | goto | no |
+| `wait` | Time pause **or** a condition on an element | — | yes, if an element condition |
+| `click` / `hover` | Explicit escape hatch (action without narration, or when narration ≠ action) | click/hover | yes |
 
-**Reguły struktury kroku** (walidowane przez pydantic, §12):
-- **dokładnie jedna komenda na krok** (błąd, gdy np. `click` + `navigate` razem);
-- opcjonalne pola towarzyszące: `say` (własna narracja przy `enterText`/`click`/
-  `hover`), `cachedAction` (dokładany przez compile).
+**Step structure rules** (validated by pydantic, §12):
+- **exactly one command per step** (error when e.g. `click` + `navigate` together);
+- optional accompanying fields: `say` (custom narration for `enterText`/`click`/
+  `hover`), `cachedAction` (added by compile).
 
-**Substytucja zmiennych:** `${ENV_VAR}` rozwijana **wyłącznie w polach wartości**
-`enterText.text` i `navigate`. **Zabroniona w polach narracyjnych/instrukcyjnych**
-(`say`, `teach`, `enterText.into`, `wait.until`) — inaczej sekret mógłby zostać
-wypowiedziany przez lektora, trafić do klucza cache audio (§8), promptu resolvera
-lub `compiledFrom`. Literalne `${` zapisujemy jako `$${`. Rozwijanie następuje w
-compile/render tuż przed użyciem — **sekrety nie trafiają do repo**. Brak zmiennej
-→ twardy błąd.
+**Variable substitution:** `${ENV_VAR}` is expanded **only in the value fields**
+`enterText.text` and `navigate`. **Forbidden in narrative/instruction fields**
+(`say`, `teach`, `enterText.into`, `wait.until`) — otherwise a secret could be
+spoken by the narrator, land in the audio cache key (§8), the resolver prompt,
+or `compiledFrom`. A literal `${` is written as `$${`. Expansion happens in
+compile/render right before use — **secrets do not land in the repo**. A missing
+variable → hard error.
 
-### 3.3 `teach` — workhorse
-Wartość `teach` to **całe zdanie-przewodnik** („Aby się zalogować, należy kliknąć
-przycisk Zaloguj w prawym górnym rogu"). Lektor wypowiada je w całości, a
-kompilator:
-1. **wyłuskuje część wykonawczą** ze zdania,
-2. **wnioskuje typ akcji** (click / hover),
-3. **rozwiązuje cel** do semantycznego namiaru (§5),
-4. zapisuje wszystko w `cachedAction`.
+### 3.3 `teach` — the workhorse
+The value of `teach` is a **whole guide sentence** ("To log in, click the
+Log in button in the top-right corner"). The narrator speaks it in full, while the
+compiler:
+1. **extracts the executable part** from the sentence,
+2. **infers the action type** (click / hover),
+3. **resolves the target** into a semantic reference (§5),
+4. writes everything into `cachedAction`.
 
-Ograniczenia (kontrakt resolvera musi je sygnalizować):
-- **0 akcji w zdaniu** (np. „Przyjrzyj się panelowi") → błąd compile „użyj `say`";
-- **>1 akcja** (np. „kliknij A, potem B") → błąd compile „rozbij na kroki";
-- **instrukcja czysto przestrzenna bez uchwytu semantycznego** → patrz §5.5.
+Limitations (the resolver contract must signal them):
+- **0 actions in the sentence** (e.g. "Take a look at the panel") → compile error "use `say`";
+- **>1 action** (e.g. "click A, then B") → compile error "split into steps";
+- **a purely spatial instruction without a semantic handle** → see §5.5.
 
-`teach` obsługuje kliki/hovery. **Wpisywania** się przez `teach` nie robi (brak
-jawnej wartości) — od tego jest `enterText`.
+`teach` handles clicks/hovers. **Typing** is not done via `teach` (no explicit
+value) — that is what `enterText` is for.
 
 ### 3.4 `wait`
-Forma dyskryminowana:
+Discriminated form:
 ```yaml
-- wait: 2.0                              # sekundy (bez namiaru)
-- wait: { until: "aż pojawi się tabela wyników", state: visible, timeout: 10 }
+- wait: 2.0                              # seconds (no reference)
+- wait: { until: "until the results table appears", state: visible, timeout: 10 }
 ```
-Wariant warunkowy kompiluje się do `cachedAction` z `action: waitFor` (§4.2) i
-zamrożonym stanem oczekiwanym (`state: visible | hidden | enabled`). Jest
-**wyjątkiem od pre-walidacji** render-time (§5.4): element z definicji może jeszcze
-nie istnieć — walidacja tożsamości następuje **po** spełnieniu warunku; przekroczony
-`timeout` → twardy błąd.
+The conditional variant compiles to a `cachedAction` with `action: waitFor` (§4.2)
+and a frozen expected state (`state: visible | hidden | enabled`). It is an
+**exception to render-time pre-validation** (§5.4): the element may not yet exist by
+definition — identity validation happens **after** the condition is met; an exceeded
+`timeout` → hard error.
 
-### Przykład — po `compile` (ten sam plik)
+### Example — after `compile` (the same file)
 ```yaml
 config:
-  title: "Logowanie"
+  title: "Login"
   viewport: { width: 1280, height: 720 }
   tts: { provider: elevenlabs, voice: "pl-PL-Marek", lang: pl-PL }
 steps:
-  - say: "Witaj. Zaraz pokażę, jak zalogować się do systemu."
+  - say: "Welcome. I'll now show you how to log in to the system."
   - navigate: https://app.example.com
-  - teach: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu"
+  - teach: "To log in, click the Log in button in the top-right corner"
     cachedAction:
       action: click
       strategy: role
       role: button
-      name: "Zaloguj"
+      name: "Log in"
       exact: true
       identity: { tag: button, ancestryDigest: "h7f3…", identityVersion: 1 }
       expect: navigation
-      fingerprint: { commandKind: teach, compilerVersion: 1, compiledFrom: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu", expect: navigation, configHash: "c19a…" }
-  - enterText: { into: "pole email", text: "${DEMO_EMAIL}" }
-    say: "Teraz wpisuję swój adres e-mail."
+      fingerprint: { commandKind: teach, compilerVersion: 1, compiledFrom: "To log in, click the Log in button in the top-right corner", expect: navigation, configHash: "c19a…" }
+  - enterText: { into: "email field", text: "${DEMO_EMAIL}" }
+    say: "Now I'm typing in my email address."
     cachedAction:
       action: type
       strategy: role
@@ -174,410 +174,411 @@ steps:
       exact: true
       identity: { tag: input, testid: "email", ancestryDigest: "a02c…", identityVersion: 1 }
       expect: none
-      fingerprint: { commandKind: enterText, compilerVersion: 1, compiledFrom: "pole email", expect: none, configHash: "c19a…" }
+      fingerprint: { commandKind: enterText, compilerVersion: 1, compiledFrom: "email field", expect: none, configHash: "c19a…" }
 ```
 
-## 4. Kompilacja in-place (jeden plik)
+## 4. In-place compilation (single file)
 
-- **Jeden plik** — brak osobnego artefaktu „compiled".
-- **Round-trip** przez `ruamel.yaml`: kompilator **mutuje bezpośrednio
-  `CommentedMap`** (nie przepuszcza całości przez model pydantic przy zapisie),
-  dokładając wyłącznie klucz `cachedAction`. Zachowanie formatowania, kolejności i
-  komentarzy.
-- **Wspierany podzbiór YAML** jest zdefiniowany (block/flow, cudzysłowy) i pokryty
-  **golden-diff testami**; kotwice/aliasy poza zakresem.
-- **Zapis atomowy:** plik tymczasowy w tym samym katalogu → walidacja → `rename`.
-- **Idempotencja:** `compile` woła LLM tylko dla kroków bez ważnego
-  `cachedAction`. `--force` przelicza wszystko.
-- **Wykrywanie nieaktualności (drift), §4.1.**
+- **Single file** — no separate "compiled" artifact.
+- **Round-trip** via `ruamel.yaml`: the compiler **mutates the `CommentedMap`
+  directly** (it does not pass the whole thing through the pydantic model on write),
+  adding only the `cachedAction` key. Preserves formatting, ordering and comments.
+- The **supported subset of YAML** is defined (block/flow, quotes) and covered by
+  **golden-diff tests**; anchors/aliases are out of scope.
+- **Atomic write:** a temporary file in the same directory → validation → `rename`.
+- **Idempotency:** `compile` calls the LLM only for steps without a valid
+  `cachedAction`. `--force` recomputes everything.
+- **Staleness (drift) detection, §4.1.**
 
-### 4.1 Fingerprint i dryf
-`cachedAction.fingerprint` zawiera: `commandKind` (rodzaj komendy), pola celu
-(`compiledFrom`), `compilerVersion` oraz `configHash` (skrót istotnych pól
-`config`, min. `viewport` i `tts.lang`). Krok jest re-resolvowany, gdy:
-- zmienił się tekst instrukcji (`compiledFrom` ≠ aktualny),
-- zmienił się **rodzaj komendy** (`click`→`hover` nie zachowa starego cache),
-- zmienił się `configHash` (np. viewport 1280→768 może schować element do menu),
-- wzrosła `compilerVersion` (zmiana schematu namiaru).
+### 4.1 Fingerprint and drift
+`cachedAction.fingerprint` contains: `commandKind` (kind of command), the target
+fields (`compiledFrom`), `compilerVersion`, and `configHash` (a digest of the
+relevant `config` fields, at minimum `viewport` and `tts.lang`). A step is
+re-resolved when:
+- the instruction text changed (`compiledFrom` ≠ current),
+- the **command kind** changed (`click`→`hover` will not keep the old cache),
+- `configHash` changed (e.g. viewport 1280→768 may hide the element into a menu),
+- `compilerVersion` increased (a change in the reference schema).
 
-**Uwaga:** fingerprint wykrywa zmiany *w scenariuszu/config*, nie *dryf strony*.
-Przed dryfem strony chroni **walidacja render-time** (§5.4), która porównuje
-zamrożone, **niezależne od locatora atrybuty tożsamości** (§4.2) trafionego
-elementu; niezgodność → twardy błąd „re-compile". Sama zgodność `role`/`name` nie
-wystarcza — locator jest z nich budowany, więc takie porównanie byłoby
-tautologiczne.
+**Note:** the fingerprint detects changes *in the scenario/config*, not *page
+drift*. Page drift is guarded by **render-time validation** (§5.4), which compares
+the frozen, **locator-independent identity attributes** (§4.2) of the hit element;
+a mismatch → hard error "re-compile". Matching `role`/`name` alone is not
+sufficient — the locator is built from them, so such a comparison would be
+tautological.
 
-### 4.2 Schemat `cachedAction` (strukturalny, wersjonowany)
-`action`: `click | hover | type | waitFor` — zamrożony typ akcji.
+### 4.2 The `cachedAction` schema (structural, versioned)
+`action`: `click | hover | type | waitFor` — the frozen action type.
 
-**Namiar — unia dyskryminowana po `strategy`** (pydantic), każda strategia niesie
-własne pola:
-- `strategy: role` → `role`, `name`, `exact` (domyślnie `true`), opcjonalnie `nth`.
+**Reference — a union discriminated by `strategy`** (pydantic), each strategy
+carrying its own fields:
+- `strategy: role` → `role`, `name`, `exact` (defaults to `true`), optionally `nth`.
 - `strategy: text` → `text`, `exact`.
 - `strategy: label` → `label`, `exact`.
 - `strategy: testid` → `testid`.
-- opcjonalny `scope` (dla każdej strategii) = **zagnieżdżony namiar** o tej samej
-  strukturze, zawężający wyszukiwanie do poddrzewa przodka.
+- optional `scope` (for each strategy) = a **nested reference** with the same
+  structure, narrowing the search to an ancestor subtree.
 
-**Atrybuty tożsamości** (zamrożone, niezależne od locatora — do walidacji
-render-time §5.4): `tag`, `testid` (jeśli jest), `href` (dla linków), skrót
-`ancestryDigest`. Wykrywają podmianę elementu o tej samej dostępnej nazwie.
+**Identity attributes** (frozen, locator-independent — for render-time validation
+§5.4): `tag`, `testid` (if present), `href` (for links), the `ancestryDigest`
+digest. They detect a swap of an element with the same accessible name.
 
-**`waitFor`** dodatkowo niesie `state: visible | hidden | enabled` (§3.4) i jest
-zwolniony z pre-walidacji istnienia.
+**`waitFor`** additionally carries `state: visible | hidden | enabled` (§3.4) and is
+exempt from existence pre-validation.
 
 `fingerprint` (§4.1).
 
-**Brak `locator` jako stringu-wyrażenia.** Locator Playwrighta jest budowany
-**wyłącznie w zaufanym kodzie** z pól strukturalnych — zero eval/parsowania.
+**No `locator` as an expression string.** The Playwright locator is built
+**only in trusted code** from the structural fields — zero eval/parsing.
 
-### 4.3 Model danych — jedno źródło prawdy (normatywny)
-Poniższe typy to **jeden wspólny model pydantic**, do którego odwołują się:
-wyjście Reasonera (§5.2), pole `scope`, `cachedAction` i walidacja render-time.
-Jest to jedyna definicja — sekcje §2, §5.4, §9 odwołują się do niej, nie
-powtarzają jej. Zmiana modelu → wzrost `compilerVersion`.
+### 4.3 Data model — one source of truth (normative)
+The types below are **one common pydantic model** referenced by: the Reasoner
+output (§5.2), the `scope` field, `cachedAction`, and render-time validation. This
+is the sole definition — sections §2, §5.4, §9 refer to it, they do not repeat it.
+A change to the model → an increase of `compilerVersion`.
 
-**`Target` (rekurencyjny, dyskryminowany po `strategy`):** pola per strategia jak
-w §4.2 (`role/name/exact/nth`, `text/exact`, `label/exact`, `testid`) + opcjonalny
-`scope: Target` (ta sama struktura, zawężenie do poddrzewa przodka). Ścisły JSON
-Reasonera pokrywa **całą** tę unię.
+**`Target` (recursive, discriminated by `strategy`):** per-strategy fields as in
+§4.2 (`role/name/exact/nth`, `text/exact`, `label/exact`, `testid`) + optional
+`scope: Target` (the same structure, narrowing to an ancestor subtree). The
+Reasoner's strict JSON covers **the entire** union.
 
-**`Identity` (zamrożona tożsamość, niezależna od locatora):**
-- `tag` (lowercase), `testid?`, `href?` (znormalizowany do absolutnego URL),
-  `ancestryDigest` (SHA-256 z listy `(tag, role)` przodków do korzenia),
+**`Identity` (frozen identity, locator-independent):**
+- `tag` (lowercase), `testid?`, `href?` (normalized to an absolute URL),
+  `ancestryDigest` (SHA-256 of the list of `(tag, role)` of ancestors up to the root),
   `identityVersion`.
-- **Równość (jedyna procedura, używana w compile ORAZ render):** wszystkie obecne
-  pola równe + `identityVersion` równa. `role`/`name` **nie** są kryterium (locator
-  jest z nich budowany — porównanie byłoby tautologiczne).
+- **Equality (the single procedure, used in compile AND render):** all present
+  fields equal + `identityVersion` equal. `role`/`name` are **not** a criterion (the
+  locator is built from them — the comparison would be tautological).
 
-**`cachedAction`:** `action` + spłaszczony `Target` + `Identity` + `expect` +
-(`state` gdy `waitFor`) + `fingerprint`.
+**`cachedAction`:** `action` + a flattened `Target` + `Identity` + `expect` +
+(`state` when `waitFor`) + `fingerprint`.
 
-**`fingerprint`:** obejmuje **wszystkie zamrożone pola wpływające na zachowanie**:
+**`fingerprint`:** covers **all frozen fields that affect behavior**:
 `commandKind`, `compiledFrom`, `expect`, `state` (waitFor), `compilerVersion`,
-`configHash`. Zmiana któregokolwiek → re-resolve lub odświeżenie pola.
+`configHash`. A change to any of them → re-resolve or a field refresh.
 
-**`configHash`:** kanoniczna projekcja `config` — `viewport.{width,height}`,
-`locale` (§3.1), `tts.lang` — serializacja z posortowanymi kluczami → SHA-256;
+**`configHash`:** a canonical projection of `config` — `viewport.{width,height}`,
+`locale` (§3.1), `tts.lang` — serialized with sorted keys → SHA-256;
 `configHashVersion`.
 
-**`expect`:** opcjonalne pole **towarzyszące krokowi w źródle** (nadpisuje
-heurystykę compile) **oraz** kopiowane do `cachedAction`. Źródło > heurystyka;
-wchodzi do `fingerprint`.
+**`expect`:** an optional field **accompanying the step in the source** (overrides
+the compile heuristic) **and** copied into `cachedAction`. Source > heuristic;
+feeds into `fingerprint`.
 
-**Cykl życia `waitFor`:**
-- compile rozwiązuje `Target` na stanie, w którym element **istnieje** (czeka na
-  pojawienie wg instrukcji), zamraża `Target` + `Identity`;
-- render czeka na `state` do `timeout`:
-  - `visible`/`enabled` → po spełnieniu waliduje tożsamość (§4.3 równość),
-  - `hidden` → asercja **nieobecności/ukrycia**; walidacja tożsamości **pominięta**
-    (nie ma czego porównywać);
-- `waitFor` jest zwolniony z pre-walidacji istnienia (§5.4).
+**`waitFor` lifecycle:**
+- compile resolves `Target` in the state where the element **exists** (it waits for
+  its appearance per the instruction), freezes `Target` + `Identity`;
+- render waits for `state` up to `timeout`:
+  - `visible`/`enabled` → after it is met, validates identity (§4.3 equality),
+  - `hidden` → asserts **absence/being hidden**; identity validation is **skipped**
+    (there is nothing to compare);
+- `waitFor` is exempt from existence pre-validation (§5.4).
 
-## 5. Resolver (tylko w `compile`, wołany rzadko)
+## 5. Resolver (only in `compile`, called rarely)
 
 ### 5.1 PageContext
-Playwright wyciąga **accessibility-snapshot** aktualnej strony i buduje
-**ograniczoną listę kandydatów** (elementy interaktywne + nagłówki), każdy z:
-stabilnym ID, `role`, dostępną nazwą, **bounding-box**, ancestry (skrótowo),
-widocznością/enabled. **Strategia przycinania** (viewport-only + interaktywne)
-utrzymuje rozmiar wejścia w ryzach na dużych stronach.
+Playwright extracts an **accessibility snapshot** of the current page and builds a
+**limited list of candidates** (interactive elements + headings), each with:
+a stable ID, `role`, accessible name, **bounding box**, ancestry (in brief),
+visibility/enabled. The **pruning strategy** (viewport-only + interactive) keeps the
+input size in check on large pages.
 
-### 5.2 Reasoner (wymienny backend)
-Mapuje `(kandydaci, instrukcja) → {action, Target}` (Target = wspólny model §4.3,
-wyraża każdą strategię `role/text/label/testid` + `scope`) albo **sygnał błędu**
-(0 akcji, >1 akcji, brak uchwytu semantycznego). Ścisły JSON pokrywa całą unię
-`Target`. Wybierany w configu.
-- **Default: `codex exec`** — subskrypcja, zero kosztu API.
-- Alternatywy (odłożone aż default działa): `claude -p`, `opencode`, Claude
+### 5.2 Reasoner (pluggable backend)
+Maps `(candidates, instruction) → {action, Target}` (Target = the common model §4.3,
+expressing every strategy `role/text/label/testid` + `scope`) or an **error signal**
+(0 actions, >1 actions, no semantic handle). The strict JSON covers the entire
+`Target` union. Selected in the config.
+- **Default: `codex exec`** — subscription, zero API cost.
+- Alternatives (deferred until the default works): `claude -p`, `opencode`, the Claude
   Messages API.
 
-### 5.3 Kontrakt wywołania `codex exec` (§5.2 default)
-- wywołanie **przypięte, read-only / bez narzędzi plikowych** (agent tylko
-  rozumuje nad tekstem),
-- wejście: **zredagowany** snapshot kandydatów (bez sekretów/wartości pól),
-- wyjście: **ścisły, obramowany JSON** wg schematu (framed markers), parsowany
-  rygorystycznie; osobne `stderr`,
-- **timeout + anulowanie**, **ograniczona liczba prób**,
-- odporność na prompt-injection: tekst ze strony jest *danymi*, nie instrukcją.
+### 5.3 The `codex exec` call contract (§5.2 default)
+- the call is **pinned, read-only / no file tools** (the agent only reasons
+  over text),
+- input: a **redacted** candidate snapshot (no secrets/field values),
+- output: **strict, framed JSON** per the schema (framed markers), parsed
+  rigorously; separate `stderr`,
+- **timeout + cancellation**, a **bounded number of attempts**,
+- resistance to prompt injection: text from the page is *data*, not an instruction.
 
-Mechanizm domyślny: **snapshot→agent (tekst)**. **CDP-attach** (interaktywne
-badanie strony przez agenta) — odłożony, aż ścieżka domyślna działa.
+Default mechanism: **snapshot→agent (text)**. **CDP-attach** (interactive
+investigation of the page by the agent) — deferred until the default path works.
 
-### 5.4 Trust-but-verify (dwa poziomy)
-**Compile-time** (przed zapisem do cache): trafiony locator musi:
-- trafiać w **dokładnie 1** element (`exact: true` domyślnie — chroni przed
-  substring-match `get_by_role(name=)`),
-- być **widoczny** i **enabled/edytowalny** stosownie do akcji,
-- mieć **typ zgodny z akcją** (np. `type` tylko na `textbox`).
-Niepowodzenie → **re-prompt** (max 2 próby), potem **twardy błąd** z listą
-kandydatów do doprecyzowania przez autora.
+### 5.4 Trust-but-verify (two levels)
+**Compile-time** (before writing to cache): the hit locator must:
+- hit **exactly 1** element (`exact: true` by default — protects against the
+  substring match of `get_by_role(name=)`),
+- be **visible** and **enabled/editable** as appropriate for the action,
+- have a **type consistent with the action** (e.g. `type` only on a `textbox`).
+Failure → **re-prompt** (max 2 attempts), then a **hard error** with a list of
+candidates for the author to disambiguate.
 
-**Ponowne użycie istniejącego `cachedAction`** (§5.6) waliduje dodatkowo **równość
-`Identity`** (§4.3), nie tylko unikalność/typ. Zamiennik trafiony tym samym
-locatorem, ale o innej tożsamości → traktuj jak brak cache i **re-resolve** (inaczej
-render dostawałby w kółko „re-compile").
+**Reuse of an existing `cachedAction`** (§5.6) additionally validates **`Identity`
+equality** (§4.3), not just uniqueness/type. A replacement hit by the same locator
+but with a different identity → treat it as a cache miss and **re-resolve**
+(otherwise render would keep getting "re-compile" over and over).
 
-**Render-time** (§2): przed akcją locator musi trafiać w 1 element, a jego
-**atrybuty tożsamości** (`tag`/`testid`/`href`/`ancestryDigest`, §4.2) muszą
-zgadzać się z zamrożonymi (porównanie samego `role`/`name` byłoby tautologiczne —
-locator jest z nich zbudowany). Niezgodność → twardy błąd „re-compile".
-**Wyjątek `waitFor`:** pre-walidacja istnienia pominięta; czekamy na `state` do
-`timeout`, dopiero potem walidujemy tożsamość — timeout → twardy błąd.
+**Render-time** (§2): before an action the locator must hit 1 element, and its
+**identity attributes** (`tag`/`testid`/`href`/`ancestryDigest`, §4.2) must match the
+frozen ones (comparing `role`/`name` alone would be tautological — the locator is
+built from them). A mismatch → hard error "re-compile".
+**`waitFor` exception:** existence pre-validation is skipped; we wait for `state` up
+to `timeout`, and only then validate identity — a timeout → hard error.
 
-### 5.5 Rola LLM — granica i wykonanie akcji
-LLM/agent działa **wyłącznie w `compile`** i **zwraca tylko dane** (namiar + typ).
-**Nigdy** nie steruje przeglądarką — walidację i wszystkie akcje (compile i
-render) wykonuje Playwright. Instrukcje czysto przestrzenne bez uchwytu
-semantycznego (np. sam „w prawym górnym rogu" bez nazwy) resolver rozwiązuje przez
-geometrię kandydatów (§5.1) do namiaru z `nth`/`scope`; jeśli się nie da —
-**jawny błąd** „instrukcja nieobsługiwana, doprecyzuj".
+### 5.5 The LLM's role — boundary and action execution
+The LLM/agent runs **only in `compile`** and **returns data only** (reference + type).
+It **never** drives the browser — validation and all actions (compile and render)
+are performed by Playwright. Purely spatial instructions without a semantic handle
+(e.g. just "in the top-right corner" with no name) are resolved by the resolver via
+candidate geometry (§5.1) into a reference with `nth`/`scope`; if that is not
+possible — an **explicit error** "unsupported instruction, please clarify".
 
-### 5.6 Algorytm `compile`
+### 5.6 The `compile` algorithm
 ```
-otwórz świeżą sesję; ustaw viewport z config
-dla każdego kroku po kolei:
-  say                        → no-op (narracja liczy się dopiero w render)
-  wait: N (sekundy)          → wykonaj pauzę (potrzebne, by strona doszła do stanu)
-  navigate                   → wykonaj goto (Playwright)
-  krok wymagający namiaru (teach / enterText / click / hover / wait:until):
-     jeśli cachedAction ważny wg fingerprinta ORAZ przechodzi walidację
-        compile-time na żywej stronie → użyj go
-     w przeciwnym razie (brak / drift / NIE TRAFIA na dzisiejszej stronie):
-        zbierz kandydatów (PageContext)
-        Reasoner → dane; waliduj compile-time (§5.4); re-prompt/błąd
-        zapisz cachedAction do pliku (atomowo, §4)
-  wykonaj akcję Playwrightem (by odsłonić stan dla kolejnych kroków)
-  zastosuj regułę gotowości (§7.1) przed następnym krokiem
+open a fresh session; set viewport from config
+for each step in order:
+  say                        → no-op (narration counts only in render)
+  wait: N (seconds)          → perform the pause (needed for the page to reach its state)
+  navigate                   → perform goto (Playwright)
+  step requiring a reference (teach / enterText / click / hover / wait:until):
+     if cachedAction is valid per the fingerprint AND passes compile-time
+        validation on the live page → use it
+     otherwise (missing / drift / DOES NOT HIT on today's page):
+        collect candidates (PageContext)
+        Reasoner → data; validate compile-time (§5.4); re-prompt/error
+        write cachedAction to the file (atomically, §4)
+  perform the action with Playwright (to expose the state for subsequent steps)
+  apply the readiness rule (§7.1) before the next step
 ```
-**Kluczowe:** „ważny fingerprint" nie wystarcza — jeśli zamrożony namiar **nie
-trafia na aktualnej stronie**, compile traktuje to jak brak cache i
-**re-resolvuje** (inaczej compile padałby absurdalnym „zrób compile"). Faza compile
-jest jedynym miejscem, gdzie wolno wołać LLM.
+**Crucial:** "valid fingerprint" is not enough — if the frozen reference **does not
+hit on the current page**, compile treats it as a cache miss and **re-resolves**
+(otherwise compile would fail with an absurd "do a compile"). The compile phase is
+the only place where the LLM may be called.
 
-## 6. Silnik `Recorder` (Python API) i frontendy
+## 6. The `Recorder` engine (Python API) and frontends
 
-- **`Recorder`** — jedyne miejsce, które „wie jak": `navigate / say / enter_text /
-  click / hover / wait`. Sedno.
-- **YAML runner** — iteruje kroki i woła `Recorder`; obsługuje `teach` i
-  wkompilowane `cachedAction`.
-- **Python API (v1):** przyjmuje **wyłącznie jawne, strukturalne namiary**
-  (`click(role="button", name="Zaloguj")`). **Nie** ma `teach`/rozwiązywania LLM
-  ani in-place cache — te są wyłącznie ścieżką YAML+compile. (Pełny frontend
-  skryptowy z zamrażaniem namiarów — odłożony.)
+- **`Recorder`** — the only place that "knows how": `navigate / say / enter_text /
+  click / hover / wait`. The core.
+- **YAML runner** — iterates the steps and calls `Recorder`; handles `teach` and the
+  compiled `cachedAction`.
+- **Python API (v1):** accepts **only explicit, structural references**
+  (`click(role="button", name="Log in")`). It has **no** `teach`/LLM resolution
+  nor in-place cache — those are exclusively the YAML+compile path. (A full scripting
+  frontend with reference freezing — deferred.)
 
-## 7. Wizualizacja kursora i kliknięć — overlay w DOM
+## 7. Cursor and click visualization — DOM overlay
 
-Playwright steruje programowo i **nie renderuje** kursora. Wstrzykujemy **sztuczny
-kursor** (HTML/SVG) + animacje: płynny ruch do celu, „ripple" przy kliknięciu,
-highlight elementu.
+Playwright drives programmatically and **does not render** the cursor. We inject an
+**artificial cursor** (HTML/SVG) + animations: smooth movement to the target, a
+"ripple" on click, element highlight.
 
-- **Overlay tylko w `render`** (w compile zanieczyszczałby accessibility-snapshot).
-- **Re-inject przy każdej nawigacji:** `add_init_script`, bo pełne przejście
-  niszczy DOM. Pozycja kursora utrzymywana **po stronie Pythona** i odtwarzana po
-  załadowaniu nowego dokumentu.
-- **Re-check przed każdym krokiem:** rerender SPA może wymienić poddrzewo DOM (wraz
-  z kursorem) **bez** nawigacji, więc przed każdym krokiem tanio sprawdzamy obecność
-  kursora i w razie potrzeby wstrzykujemy go ponownie.
-- **`pointer-events: none`** na overlayu (inaczej przechwyci kliki bota); brak
-  wpływu na layout.
-- Element poza ekranem: **najpierw scroll do celu i oczekiwanie na stabilny
-  bounding-box**, dopiero potem ruch kursora + ripple w **momencie realnej akcji**.
+- **Overlay only in `render`** (in compile it would pollute the accessibility snapshot).
+- **Re-inject on every navigation:** `add_init_script`, because a full pass
+  destroys the DOM. The cursor position is kept **on the Python side** and restored
+  after the new document loads.
+- **Re-check before each step:** an SPA rerender may replace a DOM subtree (along
+  with the cursor) **without** navigation, so before each step we cheaply check for the
+  cursor's presence and re-inject it if needed.
+- **`pointer-events: none`** on the overlay (otherwise it would intercept the bot's
+  clicks); no layout impact.
+- Off-screen element: **first scroll to the target and wait for a stable bounding
+  box**, only then move the cursor + ripple at the **moment of the real action**.
 
-### 7.1 Reguła gotowości
-Każdy krok akcji niesie zamrożone pole `expect: navigation | idle | none`
-(dokładane przez compile do `cachedAction`; heurystyka compile: porównanie URL po
-akcji + `networkidle`, z możliwością nadpisania w scenariuszu). Zachowanie po akcji:
-- `navigation` → `wait_for_load_state` po przejściu,
-- `idle` → `wait_for_load_state('networkidle')` (rerender SPA bez nawigacji),
-- `none` → tylko krótki settle.
-Po `navigate` zawsze `navigation`. To jest **jawny kontrakt zakończenia** — bez
-zgadywania: determinuje stan strony widziany przez resolver następnego kroku
-(compile) oraz stabilność (render).
+### 7.1 Readiness rule
+Every action step carries a frozen `expect: navigation | idle | none` field (added
+by compile to `cachedAction`; the compile heuristic: comparing the URL after the
+action + `networkidle`, with the option to override in the scenario). Behavior after
+the action:
+- `navigation` → `wait_for_load_state` after the transition,
+- `idle` → `wait_for_load_state('networkidle')` (SPA rerender without navigation),
+- `none` → only a short settle.
+After `navigate`, always `navigation`. This is an **explicit completion contract** —
+without guessing: it determines the page state seen by the next step's resolver
+(compile) and the stability (render).
 
-## 8. Narracja (TTS) i montaż audio
+## 8. Narration (TTS) and audio assembly
 
-- **Pre-cache (Faza 0 renderu):** przed otwarciem nagrywanej przeglądarki
-  syntezujemy i **walidujemy** każdy segment narracji, zapisując do cache (katalog
-  build, np. `.guidebot/audio/<hash>.wav`; **klucz = hash: pełna sekcja `config.tts`
-  (provider, voice, lang, model/speed) + tekst + `ttsAdapterVersion` +
-  `cacheSchemaVersion`** — sam upgrade adaptera/providera przy niezmienionym
-  `config.tts` też unieważnia cache). Render czyta z cache → brak
-  wywołań sieciowych i „głuchych klatek" w trakcie nagrywania; awaria TTS ujawnia
-  się **przed** renderem.
-- **Model czasu — narracja steruje tempem:** długość każdego segmentu `T` jest
-  **znana z cache** przed odtworzeniem. Krok z narracją: mów (start audio) →
-  czekaj `T` → wykonaj akcję.
-- **Montaż (K2 — wideo Playwrighta + audio bed):**
-  - render nagrywa wideo wbudowane (`context.record_video`, WebM VFR),
-  - offsety segmentów kotwiczymy do **jednego monotonicznego zegara**, którego
-    **punkt zero = pierwsza klatka wideo** (nie utworzenie kontekstu, które
-    następuje wcześniej — inaczej cała narracja miałaby stały offset); kotwicę
-    ustala `ffprobe` (`start_time`/PTS) albo marker wizualny w pierwszej klatce
-    overlaya (wybór w §16),
-  - po zamknięciu kontekstu **probujemy** finalne wideo (ffprobe: długość),
-  - budujemy **audio bed** = cisze-wypełniacze + segmenty na wyliczonych offsetach,
-  - **ffmpeg** miksuje bed z wideo z jawnie określonymi: sample rate, kodekami,
-    `-shortest`/pad na końcu, trim/pad do długości wideo.
-  - **Świadomy kompromis:** WebM VFR daje sync **przybliżony** (nie co do klatki);
-    dopuszczalny, bo tempo narzuca narracja i pauzy `T`. Dokładny post-sync
-    odłożony (§14).
-- **`enterText`/akcja bez `say`:** krótka, **konfigurowalna** pauza (domyślnie np.
-  0.5 s) zamiast pełnej ciszy sterowanej audio.
+- **Pre-cache (render Phase 0):** before opening the recorded browser, we
+  synthesize and **validate** each narration segment, saving it to cache (a build
+  directory, e.g. `.guidebot/audio/<hash>.wav`; **key = hash: the full `config.tts`
+  section (provider, voice, lang, model/speed) + text + `ttsAdapterVersion` +
+  `cacheSchemaVersion`** — even an adapter/provider upgrade with an unchanged
+  `config.tts` also invalidates the cache). Render reads from cache → no network
+  calls and no "dead frames" during recording; a TTS failure surfaces **before**
+  render.
+- **Timing model — narration drives the pace:** the length of each segment `T` is
+  **known from cache** before playback. A step with narration: speak (start audio) →
+  wait `T` → perform the action.
+- **Assembly (K2 — Playwright video + audio bed):**
+  - render records built-in video (`context.record_video`, WebM VFR),
+  - segment offsets are anchored to **a single monotonic clock** whose
+    **zero point = the first video frame** (not context creation, which happens
+    earlier — otherwise the whole narration would have a constant offset); the anchor
+    is established by `ffprobe` (`start_time`/PTS) or a visual marker in the first
+    overlay frame (choice in §16),
+  - after the context closes we **probe** the final video (ffprobe: length),
+  - we build an **audio bed** = filler silences + segments at the computed offsets,
+  - **ffmpeg** mixes the bed with the video with explicitly specified: sample rate,
+    codecs, `-shortest`/pad at the end, trim/pad to the video length.
+  - **A conscious tradeoff:** WebM VFR gives **approximate** sync (not
+    frame-accurate); acceptable, because the pace is dictated by the narration and the
+    `T` pauses. Exact post-sync is deferred (§14).
+- **`enterText`/action without `say`:** a short, **configurable** pause (default e.g.
+  0.5 s) instead of full audio-driven silence.
 
-## 9. Przepływ pojedynczego kroku `teach` (render)
+## 9. Flow of a single `teach` step (render)
 ```
-krok: teach: "Aby się zalogować, należy kliknąć Zaloguj w prawym górnym rogu"
-       cachedAction: {action: click, strategy: role, role: button, name: "Zaloguj", exact: true}
+step: teach: "To log in, click Log in in the top-right corner"
+       cachedAction: {action: click, strategy: role, role: button, name: "Log in", exact: true}
 
-RENDER (audio już w cache, długość T znana):
-1. overlay: (opcjonalny napis/dymek), start audio segmentu
-2. czekaj T                                   ← narracja steruje tempem
-3. zbuduj locator z pól cachedAction (zaufany kod)
-4. walidacja render-time: 1 trafienie + zgodność tożsamości (`Identity`, §4.3/§5.4) — inaczej błąd
-5. scroll do celu, czekaj na stabilny bbox
-6. overlay: ruch kursora + ripple + highlight w momencie akcji
-7. Playwright wykonuje cachedAction.action (click)
-8. reguła gotowości (§7.1); offset segmentu zapisany do audio bed (§8)
+RENDER (audio already in cache, length T known):
+1. overlay: (optional caption/bubble), start the segment audio
+2. wait T                                     ← narration drives the pace
+3. build the locator from the cachedAction fields (trusted code)
+4. render-time validation: 1 hit + identity match (`Identity`, §4.3/§5.4) — else error
+5. scroll to the target, wait for a stable bbox
+6. overlay: cursor movement + ripple + highlight at the moment of the action
+7. Playwright performs cachedAction.action (click)
+8. readiness rule (§7.1); segment offset recorded to the audio bed (§8)
 ```
 
-## 10. Artefakty i układ projektu
+## 10. Artifacts and project layout
 ```
-moje-szkolenie/
-  login.scenario.yaml      # source + wkompilowane akcje (jeden plik, w git)
-  .guidebot/audio/         # cache TTS (build, poza git)
-  out/login.mp4            # generowane przez `render`
+my-training/
+  login.scenario.yaml      # source + compiled actions (single file, in git)
+  .guidebot/audio/         # TTS cache (build, outside git)
+  out/login.mp4            # generated by `render`
 
-guidebot_recorder/         # pakiet aplikacji (uv + pyproject)
+guidebot_recorder/         # application package (uv + pyproject)
   scenario/    # schema (pydantic) + loader + round-trip (ruamel) + ${ENV} + config
-  recorder/    # Recorder (Python API) + YAML runner + reguła gotowości
-  resolver/    # PageContext (kandydaci+geometria) + Reasoner (codex/...) + walidacja
-  overlay/     # injektowany JS: sztuczny kursor + animacje (re-inject)
-  tts/         # interfejs TTS + providerzy + cache
-  video/       # nagrywanie + audio bed + mux (ffmpeg/ffprobe)
+  recorder/    # Recorder (Python API) + YAML runner + readiness rule
+  resolver/    # PageContext (candidates+geometry) + Reasoner (codex/...) + validation
+  overlay/     # injected JS: artificial cursor + animations (re-inject)
+  tts/         # TTS interface + providers + cache
+  video/       # recording + audio bed + mux (ffmpeg/ffprobe)
   cli.py       # compile / render / validate
 ```
 
-## 11. Obsługa błędów (fail-loud, nigdy po cichu)
-- **compile — 0/>1 kandydat, zła tożsamość, niezgodny typ:** re-prompt (max 2) →
-  twardy błąd + lista kandydatów.
-- **compile — `teach` 0/>1 akcji / instrukcja nieobsługiwana:** błąd z podpowiedzią.
-- **render — brak/niezgodny `cachedAction`, locator nie trafia lub zła tożsamość:**
-  twardy błąd „re-compile".
-- **TTS padło:** błąd w Fazie 0 (przed nagrywaniem), nie cichy film bez głosu.
-- **`${ENV_VAR}` brak:** twardy błąd.
-- **Nawigacja/timeout Playwrighta:** propagujemy.
-- **`--auto-heal` w v1:** błąd „not implemented".
+## 11. Error handling (fail-loud, never silently)
+- **compile — 0/>1 candidates, wrong identity, inconsistent type:** re-prompt (max 2)
+  → hard error + candidate list.
+- **compile — `teach` 0/>1 actions / unsupported instruction:** error with a hint.
+- **render — missing/inconsistent `cachedAction`, locator does not hit or wrong identity:**
+  hard error "re-compile".
+- **TTS failed:** error in Phase 0 (before recording), not a silent video without voice.
+- **`${ENV_VAR}` missing:** hard error.
+- **Playwright navigation/timeout:** we propagate it.
+- **`--auto-heal` in v1:** error "not implemented".
 
-## 12. Testy
-- **Unit:** schema/loader + `${ENV}`; round-trip (golden-diff: dokładanie
-  `cachedAction` zachowuje komentarze/kolejność/podzbiór YAML, zapis atomowy);
-  Reasoner z **zamockowanym agentem**; walidacja compile-time (unikalność, exact,
-  widoczność/enabled, zgodność typu); fingerprint/drift; walidator „jedna komenda
-  na krok".
-- **Integracja:** statyczny **HTML w repo** + Playwright → `compile` + `render`.
-  Asercje **mocne, nie tylko „mp4 istnieje"**: ślad wykonanych akcji, tożsamość
-  klikniętego elementu, obecność kursora w próbkowanych klatkach, offset i długość
-  audio w granicach, powtórzony render pod przypiętym środowiskiem daje zgodny
-  wynik.
-- **CI:** LLM/agent **zawsze mockowany**; realny resolver tylko w teście „na
-  żądanie".
+## 12. Tests
+- **Unit:** schema/loader + `${ENV}`; round-trip (golden-diff: adding
+  `cachedAction` preserves comments/ordering/the YAML subset, atomic write);
+  Reasoner with a **mocked agent**; compile-time validation (uniqueness, exact,
+  visibility/enabled, type consistency); fingerprint/drift; the "one command
+  per step" validator.
+- **Integration:** static **HTML in the repo** + Playwright → `compile` + `render`.
+  **Strong** assertions, **not just "the mp4 exists"**: a trace of the executed actions,
+  the identity of the clicked element, the presence of the cursor in sampled frames,
+  the audio offset and length within bounds, a repeated render under a pinned
+  environment yields a consistent result.
+- **CI:** the LLM/agent is **always mocked**; the real resolver only in an
+  "on-demand" test.
 
 ## 13. Stack
 Python 3.12+, `uv`, Playwright (Python), `pydantic`, `ruamel.yaml`, `typer`,
-`ffmpeg`/`ffprobe`. TTS i Reasoner za interfejsami (wymienne backendy).
-**Zależność zewnętrzna:** domyślny Reasoner (`codex exec`) wymaga zainstalowanego
-Codex CLI (`npm i -g @openai/codex`); jego brak = **czytelny błąd konfiguracji** z
-podpowiedzią instalacji lub wskazania innego backendu (nigdy cichy fallback).
+`ffmpeg`/`ffprobe`. TTS and Reasoner behind interfaces (pluggable backends).
+**External dependency:** the default Reasoner (`codex exec`) requires an installed
+Codex CLI (`npm i -g @openai/codex`); its absence = a **readable configuration error**
+with a hint to install it or to point to another backend (never a silent fallback).
 
-## 14. Odłożone (YAGNI)
-- Faza `record` (nagrywanie własnych akcji) — zaprojektowana, nieimplementowana.
-- Pełny Python-frontend z zamrażaniem namiarów (v1 = tylko jawne locatory, §6).
-- Hybryda „Python wewnątrz YAML".
-- `--auto-heal` (zarezerwowane, „not implemented").
-- Dodatkowi providerzy Reasonera + CDP-attach (aż default `codex exec` działa).
-- Scenariusze multi-tab / iframe.
-- Dokładny post-sync audio (rozciąganie do znaczników, sync co do klatki).
-- Maskowanie wartości wrażliwych na ekranie/napisach (v1 chroni tylko repo przez
+## 14. Deferred (YAGNI)
+- The `record` phase (recording one's own actions) — designed, not implemented.
+- A full Python frontend with reference freezing (v1 = explicit locators only, §6).
+- The "Python inside YAML" hybrid.
+- `--auto-heal` (reserved, "not implemented").
+- Additional Reasoner providers + CDP-attach (until the default `codex exec` works).
+- Multi-tab / iframe scenarios.
+- Exact audio post-sync (stretching to markers, frame-accurate sync).
+- Masking of sensitive values on screen/captions (v1 protects only the repo via
   `${ENV_VAR}`).
-- Dyktowanie narracji w trakcie `record`.
+- Dictating narration during `record`.
 
-## 15. Środowisko docelowe — wymagania (dot. `compile` i powtarzalnego `render`)
-`compile` i `render` **realnie wykonują akcje** na aplikacji docelowej (logowanie,
-wpisy). Dlatego:
-- wskazane **konto/środowisko testowe** o **resetowalnym stanie** (fixtures),
-- dane wejściowe przez `${ENV_VAR}` (§3.2),
-- **przypięty** viewport/język (`config`) dla powtarzalności namiarów i rozmiaru
-  wideo.
-Bez resetowalnego stanu re-compile środkowego kroku może zależeć od skutków
-wcześniejszych — algorytm §5.6 zawsze odgrywa od kroku zero na świeżej sesji.
+## 15. Target environment — requirements (regarding `compile` and repeatable `render`)
+`compile` and `render` **really execute actions** on the target application (login,
+entries). Therefore:
+- an indicated **test account/environment** with a **resettable state** (fixtures),
+- input data via `${ENV_VAR}` (§3.2),
+- a **pinned** viewport/language (`config`) for the repeatability of references and
+  video size.
+Without a resettable state, re-compiling a middle step may depend on the effects of
+earlier ones — the §5.6 algorithm always replays from step zero on a fresh session.
 
-## 16. Kwestie do rozstrzygnięcia w implementacji
-- Konkretny provider TTS na start (interfejs wymienny).
-- Dokładny format framowania JSON w `codex exec` i redakcja snapshotu.
-- Wartości domyślne overlay (prędkość kursora, styl ripple/highlight, pauza dla
-  akcji bez `say`) — z możliwością nadpisania w `config`.
-- Parametry ffmpeg (kodeki, sample rate) i próg akceptowalnego dryfu sync.
+## 16. Matters to be settled during implementation
+- The concrete TTS provider to start with (interface pluggable).
+- The exact JSON framing format in `codex exec` and snapshot redaction.
+- Overlay defaults (cursor speed, ripple/highlight style, pause for actions
+  without `say`) — with the option to override in `config`.
+- ffmpeg parameters (codecs, sample rate) and the threshold of acceptable sync drift.
 
-## 17. Dziennik zmian (v1 → v2, po self-review)
-- **K1:** dodano pre-cache TTS (Faza 0), render bez wywołań TTS na żywo.
-- **K2:** wybrano mechanizm montażu (wideo Playwrighta + audio bed, sync
-  przybliżony); dodano kotwiczenie do monotonicznego zegara, probe, trim/pad.
-- **K3:** `cachedAction` strukturalny/wersjonowany; usunięto `locator`-string.
-- **I1/§15:** dodano wymagania wobec środowiska i skutki uboczne compile.
-- **I2/§5.5:** doprecyzowano — LLM zwraca tylko dane, Playwright wykonuje.
-- **I3/§4.1:** fingerprint (rodzaj komendy + wersja) + walidacja render-time dryfu.
-- **I4/§5.4:** `exact: true` domyślnie + widoczność/enabled/zgodność typu + asercja
-  tożsamości w renderze.
-- **I5/§5.1,5.5:** kandydaci z geometrią/ancestry; obsługa/odrzucenie instrukcji
-  przestrzennych.
-- **I6/§5.3:** kontrakt `codex exec` (read-only, framed JSON, timeout, retry,
-  redakcja).
-- **I7/§3.4:** `wait` = czas + warunek elementowy (z cache).
-- **I8/§7:** overlay re-inject, `pointer-events:none`, scroll+stabilny bbox.
-- **I9/§3.1:** nagłówek `config` (viewport wymagany).
-- **I10/§4:** mutacja `CommentedMap`, podzbiór YAML, zapis atomowy, golden-diff.
-- **I11/§5.1:** przycinanie snapshotu.
-- **I12/§6:** Python API v1 tylko z jawnymi locatorami.
-- **Sekrety/§3.2:** substytucja `${ENV_VAR}`.
-- **Drobne:** limit re-prompt; `teach` 0/>1 akcji; „jedna komenda na krok";
-  `--auto-heal` „not implemented"; mocniejsze testy integracyjne.
+## 17. Changelog (v1 → v2, after self-review)
+- **K1:** added TTS pre-cache (Phase 0), render without live TTS calls.
+- **K2:** chose the assembly mechanism (Playwright video + audio bed, approximate
+  sync); added anchoring to a monotonic clock, probe, trim/pad.
+- **K3:** `cachedAction` structural/versioned; removed the `locator` string.
+- **I1/§15:** added requirements on the environment and compile side effects.
+- **I2/§5.5:** clarified — the LLM returns data only, Playwright executes.
+- **I3/§4.1:** fingerprint (command kind + version) + render-time drift validation.
+- **I4/§5.4:** `exact: true` by default + visibility/enabled/type consistency + identity
+  assertion in render.
+- **I5/§5.1,5.5:** candidates with geometry/ancestry; handling/rejection of spatial
+  instructions.
+- **I6/§5.3:** the `codex exec` contract (read-only, framed JSON, timeout, retry,
+  redaction).
+- **I7/§3.4:** `wait` = time + element condition (with cache).
+- **I8/§7:** overlay re-inject, `pointer-events:none`, scroll+stable bbox.
+- **I9/§3.1:** the `config` header (viewport required).
+- **I10/§4:** `CommentedMap` mutation, YAML subset, atomic write, golden-diff.
+- **I11/§5.1:** snapshot pruning.
+- **I12/§6:** Python API v1 with explicit locators only.
+- **Secrets/§3.2:** `${ENV_VAR}` substitution.
+- **Minor:** re-prompt limit; `teach` 0/>1 actions; "one command per step";
+  `--auto-heal` "not implemented"; stronger integration tests.
 
-### Dziennik zmian (v2 → v3, po drugiej rundzie — Fable; Codex round-2 nie wystartował: CLI niezainstalowany)
-- **§4.2/§3.4:** dodano `action: waitFor` + `state`; `wait:until` ma miejsce w
-  schemacie i jest zwolniony z pre-walidacji istnienia.
-- **§4.2:** `cachedAction` jako **unia dyskryminowana po `strategy`** (role/text/
-  label/testid) + definicja `scope` (zagnieżdżony namiar).
-- **§4.2/§5.4:** dodano **atrybuty tożsamości** niezależne od locatora
-  (`tag`/`testid`/`href`/`ancestryDigest`) — koniec tautologicznej walidacji
-  render-time (porównywała `role`/`name`, z których locator jest budowany).
-- **§5.6:** jawna gałąź **re-resolve**, gdy fingerprint „ważny", ale namiar nie
-  trafia na aktualnej stronie; `wait:N` wykonywany w compile, `say` no-op.
-- **§4.1:** fingerprint obejmuje `configHash` (viewport/lang).
-- **§7.1:** zdefiniowany kontrakt zakończenia `expect: navigation | idle | none`.
-- **§7:** re-check kursora przed każdym krokiem (rerender SPA bez nawigacji).
-- **§8:** klucz cache TTS = pełna sekcja `config.tts` + tekst; nazwany punkt zero
-  monotonicznego zegara (pierwsza klatka wideo).
-- **§3.2:** `${ENV_VAR}` tylko w polach wartości, zakaz w narracji/instrukcji,
+### Changelog (v2 → v3, after the second round — Fable; Codex round-2 did not start: CLI not installed)
+- **§4.2/§3.4:** added `action: waitFor` + `state`; `wait:until` has a place in the
+  schema and is exempt from existence pre-validation.
+- **§4.2:** `cachedAction` as a **union discriminated by `strategy`** (role/text/
+  label/testid) + the definition of `scope` (nested reference).
+- **§4.2/§5.4:** added **identity attributes** independent of the locator
+  (`tag`/`testid`/`href`/`ancestryDigest`) — the end of tautological render-time
+  validation (which compared `role`/`name`, from which the locator is built).
+- **§5.6:** an explicit **re-resolve** branch when the fingerprint is "valid" but the
+  reference does not hit on the current page; `wait:N` executed in compile, `say` a no-op.
+- **§4.1:** the fingerprint covers `configHash` (viewport/lang).
+- **§7.1:** a defined completion contract `expect: navigation | idle | none`.
+- **§7:** cursor re-check before each step (SPA rerender without navigation).
+- **§8:** TTS cache key = the full `config.tts` section + text; a named zero point of
+  the monotonic clock (the first video frame).
+- **§3.2:** `${ENV_VAR}` only in value fields, forbidden in narration/instruction,
   escape `$${`.
-- **§13:** odnotowano zależność od Codex CLI dla domyślnego Reasonera.
+- **§13:** noted the dependency on the Codex CLI for the default Reasoner.
 
-### Dziennik zmian (v3 → v4, po trzeciej rundzie — Codex na v3)
-Konsolidacja: charakter uwag przeszedł z wad projektowych w niespójności
-wewnątrz specu (spot-fixy v3 nie zostały wszędzie propagowane). Domknięcie klasowe:
-- **§4.3 (nowa, normatywna):** jedno źródło prawdy — `Target` (wspólna unia dla
-  Reasonera, `scope`, `cachedAction`), `Identity` (kanoniczna równość), `fingerprint`
-  (wszystkie zamrożone pola wpływające na zachowanie: `expect`, `state`),
-  `configHash` (kanoniczna projekcja + wersja), cykl życia `waitFor`.
-- **Propagacja tożsamości:** §2, §9 i przykłady w §3.2 odwołują się teraz do
-  `Identity` (§4.3), nie do tautologicznego `role`/`name`.
-- **§5.2:** kontrakt Reasonera zwraca pełną unię `Target` (nie tylko `role/name`).
-- **§5.4:** ponowne użycie cache waliduje **równość `Identity`** → koniec pętli
-  „render→re-compile→render" przy podmianie elementu (NEW-DEFECT Codeksa).
-- **§3.1:** dodano `config.locale` (locale przeglądarki, w `configHash`); nieznane
-  klucze = twardy błąd (schemat zamknięty).
-- **§8:** klucz cache TTS z saltem wersji adaptera/schematu.
-- **Pozostała precyzja** (dokładna normalizacja `href`/`testid`, wejścia
-  `ancestryDigest`, pełna gramatyka YAML) świadomie przeniesiona do **planu
-  implementacji** — Pydantic + TDD przypną to weryfikowalnie (malejący zwrot z
-  dalszej prozy).
+### Changelog (v3 → v4, after the third round — Codex on v3)
+Consolidation: the nature of the remarks shifted from design flaws to inconsistencies
+within the spec (v3 spot-fixes were not propagated everywhere). Class-level closure:
+- **§4.3 (new, normative):** one source of truth — `Target` (a common union for the
+  Reasoner, `scope`, `cachedAction`), `Identity` (canonical equality), `fingerprint`
+  (all frozen fields that affect behavior: `expect`, `state`), `configHash`
+  (canonical projection + version), the `waitFor` lifecycle.
+- **Identity propagation:** §2, §9 and the examples in §3.2 now refer to
+  `Identity` (§4.3), not to the tautological `role`/`name`.
+- **§5.2:** the Reasoner contract returns the full `Target` union (not just `role/name`).
+- **§5.4:** cache reuse validates **`Identity` equality** → the end of the
+  "render→re-compile→render" loop on element swap (Codex's NEW-DEFECT).
+- **§3.1:** added `config.locale` (browser locale, in `configHash`); unknown
+  keys = hard error (closed schema).
+- **§8:** the TTS cache key with an adapter/schema version salt.
+- **Remaining precision** (the exact normalization of `href`/`testid`, the
+  `ancestryDigest` inputs, the full YAML grammar) deliberately moved to the
+  **implementation plan** — Pydantic + TDD will pin it down verifiably (diminishing
+  returns from further prose).

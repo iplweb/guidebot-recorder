@@ -1,6 +1,6 @@
-"""Domyślny provider TTS oparty o edge-tts (bez klucza API).
+"""Default TTS provider based on edge-tts (no API key).
 
-Synteza przez ``edge_tts.Communicate`` (zapis mp3), długość ustalana przez ffprobe.
+Synthesis via ``edge_tts.Communicate`` (writes mp3); duration determined by ffprobe.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from guidebot_recorder.models.config import TtsConfig
 
 
 class EdgeTtsProvider:
-    """Provider TTS Microsoft Edge (``edge-tts``)."""
+    """Microsoft Edge TTS provider (``edge-tts``)."""
 
-    #: bump przy zmianie zachowania syntezy przy niezmienionym config.tts (§8)
+    #: bump when synthesis behavior changes while config.tts stays unchanged (§8)
     adapter_version = 1
 
     async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
-        """Zsyntetyzuj ``text`` głosem ``tts.voice`` do pliku ``out`` (mp3).
+        """Synthesize ``text`` with voice ``tts.voice`` into the file ``out`` (mp3).
 
-        Zwraca długość w sekundach (ffprobe). Fail-loud: pusty wynik → błąd.
+        Returns the duration in seconds (ffprobe). Fail-loud: an empty result → error.
         """
         out = Path(out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ class EdgeTtsProvider:
 
 
 async def _ffprobe_duration(path: Path) -> float:
-    """Długość pliku audio w sekundach przez ``ffprobe`` (fail-loud)."""
+    """Audio file duration in seconds via ``ffprobe`` (fail-loud)."""
     proc = await asyncio.create_subprocess_exec(
         "ffprobe",
         "-v",

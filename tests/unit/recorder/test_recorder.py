@@ -24,13 +24,13 @@ async def test_click_executes_and_moves_cursor(page):
     await rec.click(RoleTarget(role="button", name="Zaloguj"))
 
     assert await page.locator("button").text_content() == "clicked"
-    # kursor przesunięty w okolice środka przycisku (nie pozostał w (0,0))
+    # cursor moved to roughly the center of the button (did not stay at (0,0))
     assert overlay.pos != (0.0, 0.0)
 
 
 async def test_enter_text_fills(page):
     await page.set_content('<label for="e">E-mail</label><input id="e">')
-    rec = Recorder(page, overlay=None)  # compile-mode: bez overlay
+    rec = Recorder(page, overlay=None)  # compile-mode: no overlay
 
     await rec.enter_text(RoleTarget(role="textbox", name="E-mail"), "user@x.pl")
 
@@ -54,4 +54,4 @@ async def test_click_scrolls_to_horizontally_offscreen_element(page):
 async def test_apply_readiness_none_is_noop(page):
     await page.set_content("<p>ok</p>")
     rec = Recorder(page, overlay=None)
-    await rec.apply_readiness("none")  # nie rzuca
+    await rec.apply_readiness("none")  # does not raise
