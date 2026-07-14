@@ -1,13 +1,17 @@
-"""Scenario i Step (§3) — walidator „dokładnie jedna komenda na krok"."""
+"""Scenario and Step (§3) — validates "exactly one command per step".
+
+The source scenario carries intents only; resolved actions live in a separate
+CompiledScenario (``*.compiled.yaml``), not inline on the step.
+"""
 
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from guidebot_recorder.models.action import CachedAction, Expect, WaitState
+from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
 
-#: komendy „główne" (akcja/krok); `say` może im towarzyszyć jako narracja
+#: "primary" commands (an action/step); `say` may accompany one as narration
 PRIMARY_COMMANDS = ("teach", "navigate", "click", "hover", "enter_text", "wait")
 
 
@@ -35,7 +39,6 @@ class Step(BaseModel):
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     wait: float | WaitUntil | None = None
     expect: Expect | None = None
-    cached_action: CachedAction | None = Field(default=None, alias="cachedAction")
 
     @model_validator(mode="after")
     def _exactly_one_command(self) -> Step:

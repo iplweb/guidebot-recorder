@@ -4,32 +4,39 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 
-Kompiluj tekstowy scenariusz YAML do **deterministycznego filmu szkoleniowego**:
-bot wchodzi na stronę, przechodzi daną funkcję krok po kroku (Playwright),
-pokazuje kursor i kliknięcia, a lektor (TTS) tłumaczy, co się dzieje. Wynik to
-plik `.mp4` z narracją.
+Compile a text scenario (YAML) into a **deterministic training video**: a bot
+opens a page, walks through a flow step by step (Playwright), shows the cursor and
+clicks, and a voice-over (TTS) narrates what happens. The result is an `.mp4` with
+narration.
 
-## Jak to działa — kompilator dwufazowy
+## How it works — a two-phase compiler
 
-Scenariusz piszesz **intencjami po ludzku** („kliknij Zaloguj”). Osobna faza
-**kompilacji** zamienia je na zamrożone, konkretne namiary na elementy, wpisując
-je w ten sam plik. Dzięki temu właściwe **renderowanie jest deterministyczne** i
-nie wymaga LLM-a — przeglądarka przechodzi całą funkcję jednym ciągiem, tak samo
-przy każdym uruchomieniu.
+You write the scenario as **plain-language intents** ("click Log in"). A separate
+**compile** phase turns those into frozen, concrete element references and writes
+them to a **separate `*.compiled.yaml`** next to your source — the source scenario
+stays clean and readable. Rendering is then **deterministic** and needs no LLM: the
+browser walks the whole flow in a single pass, identically on every run.
 
 ```
-scenario.yaml (intencje) ──compile (AI)──▶ scenario.yaml (+ zamrożone akcje) ──render (0×LLM)──▶ film.mp4
+login.scenario.yaml ──compile (AI)──▶ login.compiled.yaml ──render (0×LLM)──▶ login.mp4
+   (intents, yours)                      (frozen actions)                     (the film)
 ```
 
-- **`compile`** — jedyna faza z AI. Resolver (domyślnie przez [Codex CLI]) mapuje
-  instrukcję na semantyczny locator Playwrighta, waliduje unikalność i zamraża
-  tożsamość elementu. Uruchamiany raz (i ponownie tylko przy zmianie strony).
-- **`render`** — bez LLM. Czyta zamrożone akcje, animuje sztuczny kursor (ruch,
-  „ripple”, highlight), nagrywa wideo, a narrację TTS miksuje do finalnego `.mp4`.
+- **`compile`** — the only AI phase. The resolver (by default via [Codex CLI]) maps
+  each instruction to a semantic Playwright locator, checks it is unique, and freezes
+  the element's identity into `login.compiled.yaml`. Re-running is incremental: steps
+  whose intent is unchanged are reused (no LLM); only new/changed steps are resolved.
+  Editing only narration (`say`) needs no browser at all.
+- **`render`** — no LLM. Reads the frozen actions, animates a synthetic cursor
+  (move, ripple, highlight), records video, and muxes the TTS narration into the
+  final `.mp4`.
 
-## Instalacja
+Both the source and the compiled file are meant to be committed to git, so `render`
+is reproducible in CI and a diff shows when a page changed and a reference drifted.
 
-Wymaga **Python 3.12+**, [uv], **ffmpeg** oraz przeglądarki Chromium (Playwright).
+## Install
+
+Requires **Python 3.12+**, [uv], **ffmpeg**, and the Chromium browser (Playwright).
 
 ```bash
 uv sync
@@ -37,52 +44,62 @@ uv run playwright install chromium
 # ffmpeg: macOS `brew install ffmpeg`, Debian/Ubuntu `apt install ffmpeg`
 ```
 
-Faza `compile` używa domyślnie [Codex CLI] (`npm i -g @openai/codex`) — działa na
-subskrypcji, bez klucza API. Resolver jest wymienny (interfejs `Reasoner`).
+The `compile` phase uses [Codex CLI] by default (`npm i -g @openai/codex`) — it runs
+on your subscription, no API key. The resolver is pluggable (the `Reasoner` interface).
 
-## Użycie
+## Usage
 
 ```bash
-# 1. sprawdź schemat scenariusza
+# 1. validate the scenario schema (no browser)
 uv run guidebot validate examples/login.scenario.yaml
 
-# 2. skompiluj intencje → zamrożone akcje (faza AI, wpisuje w ten sam plik)
+# 2. compile intents → login.compiled.yaml (AI phase)
 uv run guidebot compile examples/login.scenario.yaml
 
-# 3. zrenderuj deterministyczny film z lektorem
+# 3. render the deterministic voice-over video
 uv run guidebot render examples/login.scenario.yaml --out out/login.mp4
 ```
 
-### Scenariusz
+Useful flags for `compile` and `render`:
+
+| Flag | Effect |
+|---|---|
+| `--headed` | Show the browser window instead of running headless |
+| `--verbose` / `-v` | Progress bar + per-step log |
+| `--timeout <s>` | Playwright action timeout in seconds (default 15) |
+| `--pause-on-error` | On failure, freeze the open window for inspection (headed) |
+| `--force` | (`compile`) re-resolve every step, ignoring the cache |
+
+### Scenario (source)
 
 ```yaml
 config:
   title: "Logowanie do systemu"
   baseUrl: https://example.com
-  viewport: { width: 1280, height: 720 }
+  viewport: { width: 1440, height: 900 }
   locale: pl-PL
   tts: { provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL }
 steps:
   - say: "Witaj. Zaraz pokażę, jak zalogować się do systemu."
   - navigate: /login
-  - teach: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu"
+  - teach: "Aby się zalogować, kliknij przycisk Zaloguj w prawym górnym rogu"
   - enterText: { into: "pole adresu e-mail", text: "${DEMO_EMAIL}" }
     say: "Teraz wpisuję swój adres e-mail."
+  - wait: { until: "aż zniknie spinner ładowania", state: hidden, timeout: 10 }
 ```
 
-Komendy: `say` (sama narracja), `teach` (lektor mówi całe zdanie-przewodnik, a bot
-wykonuje wyłuskaną z niego akcję), `enterText`, `navigate`, `wait` (czas lub
-warunek na elemencie), oraz `click`/`hover` jako jawne escape-hatche. Wartości
-sekretów podstawiaj przez `${ENV_VAR}` — nie trafiają do repo.
+Commands: `say` (narration only), `teach` (the voice reads a whole guiding sentence
+and the bot performs the action extracted from it), `enterText`, `navigate`, `wait`
+(seconds or an element condition), plus `click`/`hover` as explicit escape hatches.
+Substitute secrets with `${ENV_VAR}` — they never land in the repo.
 
 ## Status
 
-Wczesna wersja (beta). Ścieżki AI (`compile` przez Codex) i realny głos (edge-tts)
-są zaimplementowane i testowane jednostkowo; pełny pakiet testów obejmuje
-deterministyczny render end-to-end (Playwright + ffmpeg) z zamockowanym resolverem
-i cichym TTS.
+Early (beta). The AI path (`compile` via Codex) and the real voice (edge-tts) are
+implemented and unit-tested; the full test suite covers deterministic end-to-end
+rendering (Playwright + ffmpeg) with a mocked resolver and a silent TTS provider.
 
-## Licencja
+## License
 
 [MIT](LICENSE) © 2026 Michał Pasternak
 

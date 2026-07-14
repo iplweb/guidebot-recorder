@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from playwright.async_api import async_playwright
 
-from guidebot_recorder.recorder.compile import run_compile
+from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.reasoner import CodexReasoner
 from guidebot_recorder.scenario.loader import load_scenario
@@ -39,7 +39,10 @@ def compile_cmd(
     timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
 ) -> None:
-    """Skompiluj intencje → `cachedAction` (in-place, faza AI)."""
+    """Skompiluj intencje → `*.compiled.yaml` (faza AI)."""
+    if not force and compile_up_to_date(path):
+        typer.echo("nic do skompilowania (aktualne)")
+        return
 
     async def _run() -> None:
         async with async_playwright() as pw:

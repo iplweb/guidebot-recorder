@@ -18,7 +18,7 @@ from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.reasoner import ReasonerResult
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.video.mux import probe_duration
 
 pytestmark = [
@@ -108,9 +108,9 @@ async def test_end_to_end_compile_then_render(tmp_path):
         await run_compile(path, page, reasoner)
         await page.context.close()
 
-        loaded = load_scenario(path)
-        teach_ca = loaded.scenario.steps[2].cached_action
-        enter_ca = loaded.scenario.steps[3].cached_action
+        compiled = load_compiled(compiled_path(path))
+        teach_ca = compiled.actions[2]
+        enter_ca = compiled.actions[3]
         assert teach_ca.action == "click"
         assert teach_ca.identity.tag == "button"
         assert enter_ca.action == "type"

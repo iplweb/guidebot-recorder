@@ -1,11 +1,14 @@
-"""Faza `compile` — algorytm §5.6.
+"""The `compile` phase — algorithm §5.6.
 
-Uruchamia scenariusz sekwencyjnie na świeżej sesji, dla kroków z namiarem woła
-Reasonera (tylko gdy brak ważnego cache), waliduje, zamraża `cachedAction` w tym
-samym pliku. LLM zwraca wyłącznie dane; akcje wykonuje Playwright.
+Runs the scenario sequentially on a fresh session; for steps that need a target it
+calls the Reasoner (only when there is no valid cache), validates, and freezes the
+``cachedAction``. The LLM only returns data; Playwright performs the actions.
 
-Viewport ustawiany jest z `config` — MUSI zgadzać się z fazą render, inaczej
-zamrożone pozycje elementów nie pasują (element „outside of the viewport”).
+The source scenario is read-only: resolved actions are written to a separate
+``*.compiled.yaml`` (a list aligned by index to the steps).
+
+The viewport is taken from ``config`` — it MUST match the render phase, otherwise
+the frozen element positions do not line up ("element outside of the viewport").
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from playwright.async_api import Page
 from tqdm import tqdm
 
 from guidebot_recorder.models.action import ActionKind, CachedAction, Expect, Fingerprint
+from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.config import config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.models.target import (
@@ -37,8 +41,8 @@ from guidebot_recorder.resolver.validate import (
     reuse_is_valid,
     validate_compile_time,
 )
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario
-from guidebot_recorder.scenario.roundtrip import atomic_write, inject_cached_action
 
 _MAX_REPROMPT = 2
 
@@ -60,7 +64,7 @@ def _instruction(step: Step) -> str:
 
 def _action_for(kind: str, resolved: ActionKind) -> ActionKind:
     if kind == "teach":
-        return resolved  # click / hover — wnioskowany przez LLM
+        return resolved  # click / hover — inferred by the LLM
     if kind == "click":
         return "click"
     if kind == "hover":
@@ -84,7 +88,7 @@ def _resolve_url(scenario: Scenario, url: str) -> str:
 
 
 def _short(step: Step, limit: int = 60) -> str:
-    """Krótki, czytelny opis kroku do logu verbose."""
+    """Short, readable step description for the verbose log."""
     for attr in ("say", "teach", "navigate", "click", "hover"):
         value = getattr(step, attr)
         if value:
@@ -109,6 +113,53 @@ def _target_desc(target: Target) -> str:
     return str(target)
 
 
+def _load_prior_actions(cpath: Path, n_steps: int) -> list[CachedAction | None]:
+    """Load existing compiled actions for reuse, aligned by index to the current steps.
+
+    Steps appended at the end stay ``None`` (to be resolved). If a step is inserted
+    or removed mid-scenario the indices shift and the per-step fingerprint check
+    (:func:`_can_reuse`) will simply re-resolve the affected steps — correctness is
+    never traded for the incremental speed-up.
+    """
+    result: list[CachedAction | None] = [None] * n_steps
+    if not cpath.exists():
+        return result
+    try:
+        prior = load_compiled(cpath)
+    except Exception:  # noqa: BLE001 — a corrupt/stale compiled file just means recompile
+        return result
+    for i in range(min(len(prior.actions), n_steps)):
+        result[i] = prior.actions[i]
+    return result
+
+
+def _steps_needing_resolution(
+    scenario: Scenario, actions: list[CachedAction | None], chash: str, force: bool
+) -> list[int]:
+    """Indices of target steps whose frozen action is missing or stale."""
+    return [
+        i
+        for i, step in enumerate(scenario.steps)
+        if step.requires_target() and not _can_reuse(actions[i], step, chash, force)
+    ]
+
+
+def compile_up_to_date(
+    path: Path | str, env: Mapping[str, str] | None = None, *, force: bool = False
+) -> bool:
+    """True if every target step already has a valid frozen action — no browser needed.
+
+    Lets the CLI skip launching Chromium entirely when the only edits were to
+    non-target steps (e.g. ``say`` narration) or nothing at all.
+    """
+    if force:
+        return False
+    scenario = load_scenario(path, env)
+    chash = config_hash(scenario.config)
+    actions = _load_prior_actions(compiled_path(Path(path)), len(scenario.steps))
+    return not _steps_needing_resolution(scenario, actions, chash, force)
+
+
 async def run_compile(
     path: Path | str,
     page: Page,
@@ -121,16 +172,18 @@ async def run_compile(
     verbose: bool = False,
 ) -> None:
     path = Path(path)
-    loaded = load_scenario(path, env)
-    scenario = loaded.scenario
+    scenario = load_scenario(path, env)
     cfg = scenario.config
     chash = config_hash(cfg)
-    # KLUCZOWE: ten sam viewport co render, inaczej zamrożone pozycje nie pasują.
+    # CRUCIAL: the same viewport as render, otherwise frozen positions do not match.
     await page.set_viewport_size({"width": cfg.viewport.width, "height": cfg.viewport.height})
     page.set_default_timeout(timeout * 1000)
     recorder = Recorder(page, overlay=None)
 
     steps = scenario.steps
+    cpath = compiled_path(path)
+    actions = _load_prior_actions(cpath, len(steps))
+
     bar = tqdm(total=len(steps), desc="compile", unit="krok", disable=not verbose)
     try:
         for index, step in enumerate(steps):
@@ -138,17 +191,16 @@ async def run_compile(
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(steps)}] {kind}: {_short(step)}")
             try:
-                await _compile_step(
+                actions[index] = await _compile_step(
                     page,
                     recorder,
                     scenario,
-                    loaded,
-                    path,
                     chash,
                     index,
                     step,
                     kind,
                     reasoner,
+                    actions[index],
                     force=force,
                     verbose=verbose,
                 )
@@ -158,41 +210,55 @@ async def run_compile(
                 if pause_on_error:
                     await pause_for_inspection(page, "compile", index, kind, exc)
                 raise
+            # persist incrementally so partial progress survives a later failure
+            write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
             bar.update(1)
     finally:
         bar.close()
+
+
+def _can_reuse(cached_in: CachedAction | None, step: Step, chash: str, force: bool) -> bool:
+    """Reuse only if the frozen fingerprint still matches the source and config."""
+    if force or cached_in is None:
+        return False
+    fp = cached_in.fingerprint
+    return fp.compiled_from == _instruction(step) and fp.config_hash == chash
 
 
 async def _compile_step(
     page: Page,
     recorder: Recorder,
     scenario: Scenario,
-    loaded,
-    path: Path,
     chash: str,
     index: int,
     step: Step,
     kind: str,
     reasoner: Reasoner,
+    cached_in: CachedAction | None,
     *,
     force: bool,
     verbose: bool,
-) -> None:
+) -> CachedAction | None:
     if kind == "say":
-        return
+        return None
     if kind == "navigate":
         await recorder.navigate(_resolve_url(scenario, step.navigate))
-        return
+        return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
-        return
+        return None
 
-    # krok wymagający namiaru
-    cached = step.cached_action
-    if not force and cached is not None and await reuse_is_valid(page, cached):
-        action, target, state, expect = cached.action, cached.target, cached.state, cached.expect
-        identity = cached.identity
+    # step that needs a target
+    if _can_reuse(cached_in, step, chash, force) and await reuse_is_valid(page, cached_in):
+        action, target, state, expect = (
+            cached_in.action,
+            cached_in.target,
+            cached_in.state,
+            cached_in.expect,
+        )
+        cached_out = cached_in
         fresh = False
+        identity = cached_in.identity
         if verbose:
             tqdm.write("   ↳ reuse (cache)")
     else:
@@ -213,17 +279,18 @@ async def _compile_step(
             raise RuntimeError(f"nie udało się zwalidować namiaru dla: {instruction!r}")
         action, target, locator = resolved
         state = step.wait.state if isinstance(step.wait, WaitUntil) else None
-        # tożsamość zamrażamy PRZED wykonaniem akcji; waitFor:hidden jej nie ma
+        # freeze identity BEFORE the action (the DOM may change); waitFor:hidden has none
         if action == "waitFor" and state == "hidden":
             identity = None
         else:
             identity = await capture_identity(locator)
         fresh = True
         expect = None
+        cached_out = None  # built after the action, once we know `expect`
         if verbose:
             tqdm.write(f"   ↳ {action} → {_target_desc(target)}")
 
-    # wykonaj akcję (odsłania stan dla kolejnych kroków)
+    # perform the action (reveals the state for later steps)
     url_before = page.url
     if action == "click":
         await recorder.click(target)
@@ -238,7 +305,7 @@ async def _compile_step(
 
     if fresh:
         expect = heuristic_expect(url_before, url_after)
-        action_model = CachedAction(
+        cached_out = CachedAction(
             action=action,
             target=target,
             identity=identity,
@@ -252,7 +319,6 @@ async def _compile_step(
                 state=state,
             ),
         )
-        inject_cached_action(loaded.doc, index, action_model)
-        atomic_write(path, loaded.doc)
 
     await recorder.apply_readiness(expect)
+    return cached_out

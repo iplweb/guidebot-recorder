@@ -1,8 +1,10 @@
-"""Faza `render` — deterministyczne odtworzenie + montaż filmu (§8/§9).
+"""The `render` phase — deterministic replay + film assembly (§8/§9).
 
-Faza 0: pre-synteza całej narracji do cache (brak wywołań TTS „na żywo").
-Render: 0×LLM, świeża przeglądarka, jedno przejście; narracja steruje tempem.
-Montaż: wideo Playwrighta + audio bed (ffmpeg), sync przybliżony (decyzja K2).
+Phase 0: pre-synthesize all narration into the cache (no "live" TTS calls).
+Render: 0×LLM, fresh browser, single pass; narration drives the pace.
+Assembly: Playwright video + audio bed (ffmpeg), approximate sync (decision K2).
+
+Resolved actions are read from the separate ``*.compiled.yaml`` sidecar.
 """
 
 from __future__ import annotations
@@ -15,11 +17,13 @@ from urllib.parse import urljoin
 from playwright.async_api import Browser, Page
 from tqdm import tqdm
 
+from guidebot_recorder.models.action import CachedAction
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import pause_for_inspection
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
@@ -27,7 +31,7 @@ from guidebot_recorder.video.mux import mux, probe_duration
 
 
 class RenderError(RuntimeError):
-    """Krok wymaga (re-)compile: brak `cachedAction` lub niezgodna tożsamość."""
+    """A step needs (re-)compile: missing action or mismatched identity."""
 
 
 def _narration(step: Step) -> str | None:
@@ -60,9 +64,16 @@ async def run_render(
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    loaded = load_scenario(path)
-    scenario = loaded.scenario
+    scenario = load_scenario(path)
     cfg = scenario.config
+
+    cpath = compiled_path(path)
+    try:
+        compiled = load_compiled(cpath)
+    except FileNotFoundError as exc:
+        raise RenderError(f"brak pliku compiled ({cpath.name}) — uruchom `compile`") from exc
+    if len(compiled.actions) != len(scenario.steps):
+        raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
@@ -101,7 +112,17 @@ async def run_render(
                 tqdm.write(f"[{index + 1}/{len(scenario.steps)}] {kind}")
             try:
                 await _render_step(
-                    page, recorder, overlay, scenario, step, kind, index, segments, placed, anchor
+                    page,
+                    recorder,
+                    overlay,
+                    scenario,
+                    step,
+                    kind,
+                    index,
+                    compiled.actions[index],
+                    segments,
+                    placed,
+                    anchor,
                 )
             except Exception as exc:
                 if verbose:
@@ -131,6 +152,7 @@ async def _render_step(
     step: Step,
     kind: str,
     index: int,
+    cached: CachedAction | None,
     segments: dict[int, Segment],
     placed: list[Placed],
     anchor: float,
@@ -138,7 +160,7 @@ async def _render_step(
     seg = segments.get(index)
     if seg is not None:
         placed.append(Placed(segment=seg, offset=time.monotonic() - anchor))
-        await asyncio.sleep(seg.duration)  # narracja steruje tempem
+        await asyncio.sleep(seg.duration)  # narration drives the pace
 
     if kind == "say":
         return
@@ -150,7 +172,6 @@ async def _render_step(
         await recorder.wait_seconds(float(step.wait))
         return
 
-    cached = step.cached_action
     if cached is None:
         raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
     if cached.action != "waitFor" and not await reuse_is_valid(page, cached):

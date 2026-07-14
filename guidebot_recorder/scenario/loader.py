@@ -1,35 +1,25 @@
-"""Wczytanie YAML → (Scenario, round-trip doc) (Task 7, §4).
+"""Load a scenario YAML into a validated ``Scenario`` (with ``${ENV}`` expanded).
 
-`load_scenario` zwraca `LoadedScenario` z:
-- `scenario`: zwalidowany model pydantic (z rozwiniętymi `${ENV}`),
-- `doc`: surowy `CommentedMap` (round-trip handle do zapisu in-place, §4) —
-  BEZ substytucji `${ENV}`, żeby sekrety nie trafiły do repo przy zapisie.
+The source file is read-only: resolved actions are written to a separate
+``*.compiled.yaml`` (see ``scenario.compiled``), so no round-trip handle is kept.
+``${ENV}`` substitution (§3.2) is applied only while building the model; a missing
+variable raises ``KeyError``.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
 
 from guidebot_recorder.models.scenario import Scenario
 from guidebot_recorder.scenario.env import substitute_scenario_values
 
 
-@dataclass
-class LoadedScenario:
-    """Wynik wczytania: zwalidowany model + round-trip handle do zapisu."""
-
-    scenario: Scenario
-    doc: CommentedMap
-
-
 def _to_plain(node):
-    """Zrzuć strukturę ruamel do czystych typów Pythona (dla pydantic)."""
+    """Reduce a ruamel structure to plain Python types (for pydantic)."""
     if isinstance(node, Mapping):
         return {str(k): _to_plain(v) for k, v in node.items()}
     if isinstance(node, list | tuple):
@@ -45,21 +35,15 @@ def _to_plain(node):
     return str(node)
 
 
-def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> LoadedScenario:
-    """Wczytaj scenariusz YAML z `path`.
-
-    `env=None` → używa `os.environ`. Substytucja `${ENV}` (§3.2) stosowana tylko
-    przy budowie `Scenario`; brak zmiennej → KeyError. `doc` pozostaje surowy.
-    """
+def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Scenario:
+    """Load and validate the source scenario at ``path`` (``env`` defaults to os.environ)."""
     path = Path(path)
     if env is None:
         env = os.environ
 
-    yaml = YAML(typ="rt")
-    doc = yaml.load(path.read_text(encoding="utf-8"))
+    yaml = YAML(typ="safe")
+    data = yaml.load(path.read_text(encoding="utf-8"))
 
-    raw = _to_plain(doc)
+    raw = _to_plain(data)
     substituted = substitute_scenario_values(raw, env)
-    scenario = Scenario.model_validate(substituted)
-
-    return LoadedScenario(scenario=scenario, doc=doc)
+    return Scenario.model_validate(substituted)

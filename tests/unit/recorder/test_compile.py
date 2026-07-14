@@ -6,7 +6,7 @@ from playwright.async_api import async_playwright
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.resolver.reasoner import ReasonerResult
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 
 SCENARIO = textwrap.dedent(
     """\
@@ -49,8 +49,8 @@ async def test_compile_fills_cached_action(tmp_path, page):
 
     await run_compile(path, page, reasoner)
 
-    loaded = load_scenario(path)
-    ca = loaded.scenario.steps[1].cached_action
+    compiled = load_compiled(compiled_path(path))
+    ca = compiled.actions[1]
     assert ca is not None
     assert ca.action == "click"
     assert isinstance(ca.target, RoleTarget)
