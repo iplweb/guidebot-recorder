@@ -1,0 +1,158 @@
+# Rozwiązywanie problemów
+
+Diagnostykę zacznij od widocznej, pełnej kompilacji:
+
+```bash
+uv run guidebot compile scenarios/flow.scenario.yaml \
+  --force --headed --pause-on-error --verbose
+```
+
+## Codex nie działa
+
+```bash
+npm install -g @openai/codex
+codex --version
+codex login
+codex login status
+```
+
+Guidebot uruchamia lokalne `codex`; sama aplikacja lub rozszerzenie IDE nie gwarantuje
+programu w `PATH`. Używa zapisanej sesji Codex i nie ma osobnej konfiguracji logowania.
+
+## Compile mówi, że wszystko jest aktualne po zmianie strony
+
+Szybka ścieżka poprawnie sprawdza źródło, compiler v2, liczbę slotów, rodzaj targetowej
+komendy, instrukcję i config hash, ale nie otwiera strony. Nie zobaczy zmiany DOM,
+danych, cookies ani wpływu zmienionego kroku `navigate`. Użyj `--force`.
+
+## Sidecar ma wersję 1 albo render mówi „compiled jest nieaktualny”
+
+Plik bez wersji jest traktowany jako v1. Render v2 przed TTS sprawdza nazwę źródła,
+wersję, wyrównanie akcji i fingerprinty. Nie poprawiaj pliku ręcznie:
+
+```bash
+uv run guidebot validate scenarios/flow.scenario.yaml
+uv run guidebot compile scenarios/flow.scenario.yaml --force --headed -v
+```
+
+Przejrzyj i commituj nowy sidecar. Podczas renderu zwykłe akcje dodatkowo sprawdzają
+tożsamość na żywo; warunkowy `waitFor` jest wyjątkiem.
+
+## Reasoner nie znajduje elementu
+
+1. Dopasuj viewport i `locale` do oczekiwanego układu.
+2. Opisz rolę, widoczną nazwę, etykietę, sekcję lub funkcję elementu.
+3. Umieść jedną akcję i jeden target w kroku.
+4. Dodaj liczbowy `wait` przed treścią pojawiającą się później.
+5. Sprawdź stan przez `--headed --pause-on-error -v`.
+6. Upewnij się, że element nie jest w iframe.
+
+Snapshot jest ograniczony do 200 semantycznych kandydatów i zwykle do elementów
+widocznych w viewportcie. Guidebot może przewinąć do już rozwiązanego targetu, ale nie
+ma źródłowej komendy `scroll`.
+
+## `teach` → `type` jest odrzucane
+
+Jawny `inputText` musi być niepustym, dokładnym fragmentem instrukcji `teach`. Guidebot
+odrzuca placeholder ENV, słowa sugerujące sekret oraz targety wyglądające na hasło,
+token, PIN, kod jednorazowy lub dane karty. Dla takich wartości użyj `enterText.text`
+z ENV. Po zmianie literału ponownie skompiluj target.
+
+## Popup nie działa
+
+Popup musi otworzyć się wskutek konkretnej akcji `click`. Nie dodawaj kroku
+„przełącz okno” — przełączenie i powrót są automatyczne.
+
+Błąd jest zamierzony, gdy:
+
+- okno otwiera się przed kliknięciem, za późno albo poza akcją;
+- jedno kliknięcie otwiera kilka okien;
+- w scenariuszu pojawia się drugi popup, nawet po zamknięciu pierwszego;
+- popup zamyka się asynchronicznie, a nie wskutek kroku;
+- strona główna zostaje zamknięta;
+- render oczekiwał `opens_popup`, lecz okno się nie pojawiło.
+
+Po zmianie zachowania popupu uruchom `compile --force`. Obsługiwany film może mieć
+sekwencję `main → popup → main`; natywne karty Chromium nie są nagrywane.
+
+## Język strony nadal jest niewłaściwy
+
+Compile i render przekazują to samo `config.locale` do świeżego kontekstu. Jeżeli
+aplikacja wybiera język przez host, ścieżkę, konto, cookie albo redirect, ustaw również
+ten stan. Dla różniących się UI użyj pełnych scenariuszy w
+[render-set](localized-render-sets.md), a nie tylko `translations`.
+
+## Brakuje tłumaczenia albo ścieżki audio
+
+Każdy narracyjny krok musi mieć dokładnie klucze wszystkich `audioTracks[].lang`.
+Nie dodawaj `translations` do kroku bez `say`/`teach`. Każda ścieżka musi mieć unikalne
+`lang` i `trackLanguage`; przy wielu ścieżkach `trackLanguage` jest wymagane również
+dla domyślnego `tts`. Standardowe CLI wymaga providera `edge` na wszystkich
+ścieżkach. Zobacz [Wiele ścieżek audio](multilingual-audio.md).
+
+## `render-set` zatrzymuje się przed Chromium
+
+To preflight bezpieczeństwa. Sprawdź, czy:
+
+- klucz wariantu równa się `config.locale` i `config.tts.lang`;
+- wariant ma `tts.trackLanguage`, nie ma `audioTracks` i używa tego samego providera;
+- ścieżki są względne, bez `..`, dysku Windows, backslasha i ucieczki przez symlink;
+- scenariusze, sidecary, outputy i `.guidebot_video/<stem>` nie kolidują;
+- wszystkie sidecary są aktualne po udanym `compile-set`;
+- stockowy `render-set` ma provider `edge`.
+
+Nie ma `validate-set`; pełny manifest jest ładowany przez oba polecenia zestawu. Błąd
+drugiego wariantu nie usuwa gotowego pierwszego i nie uruchamia trzeciego.
+
+## `${ZMIENNA}` nie jest rozwijane
+
+Substytucja działa tylko w tekstowym `navigate`, `navigate.url` i `enterText.text`.
+Nie działa w manifeście, `baseUrl`, narracji ani opisie targetu. Wyeksportuj zmienną w
+procesie; `.env` nie jest ładowany. `$${` oznacza literalne `${`.
+
+## TTS, ffmpeg albo ffprobe zgłasza błąd
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+Edge TTS wymaga sieci przy braku segmentu w `.guidebot/audio/`. Adapter używa do
+syntezy `voice`; `model` i `speed` są obecnie ignorowane, choć należą do klucza cache.
+Cache przechowuje tekst narracji w JSON. Standardowe CLI odrzuca provider inny niż
+`edge` zamiast go ignorować.
+
+Po udanym renderze WAV-y pozostają w
+`<output-dir>/.guidebot_video/<stem>/bed-<trackLanguage>.wav`. Publikacja MP4 i pełnego
+zestawu WAV jest atomowa; błąd nie powinien zastąpić poprzedniego mastera.
+
+## Warunkowy `wait` zachowuje się inaczej niż oczekiwano
+
+- Target zwykle musi istnieć i być widoczny już podczas compile; poprzedź go liczbową
+  pauzą, jeśli pojawia się później.
+- `hidden` może poprawnie nie mieć zamrożonej tożsamości.
+- `enabled` obecnie czeka na widoczność, a nie osobno na stan aktywności.
+- Dla przejścia SPA bez zmiany URL dodaj jawny wait po akcji.
+
+## Obecne ograniczenia
+
+- Codex CLI jest jedynym wbudowanym reasonerem; brak `--reasoner` i `--model`.
+- Chromium jest jedyną przeglądarką standardowego CLI.
+- Jedna sesja obsługuje najwyżej jeden popup otwarty przez kliknięcie; brak jawnego
+  przełączania kart i obsługi iframe.
+- Brak route discovery, ręcznego recordera i auto-heal.
+- Edge TTS jest jedynym adapterem standardowego CLI.
+- Render-set jest sekwencyjny, bez filtrowania wariantu i transakcji całego zestawu.
+- Candidate snapshot jest ograniczony do 200 elementów i zorientowany na viewport.
+- ENV nie maskuje wartości w filmie ani logach aplikacji.
+- `.guidebot/audio/` i `.guidebot_video/` pozostają do ręcznego usunięcia.
+
+## Dokumentacja nie buduje się
+
+```bash
+uv sync --group docs
+uv run --group docs mkdocs build --strict
+```
+
+Polski i angielski mają osobne pliki bez fallbacku. Brak tłumaczenia, linku lub wpisu
+nawigacji należy poprawić, a nie ukrywać.
