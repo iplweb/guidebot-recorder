@@ -20,9 +20,12 @@ _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enable
 
 
 class Recorder:
-    def __init__(self, page: Page, overlay: Overlay | None) -> None:
+    def __init__(self, page: Page, overlay: Overlay | None, settle_ms: float = 280) -> None:
         self.page = page
         self.overlay = overlay
+        # Pause (ms) after the cursor lands and ripples, before the action fires —
+        # gives the viewer a beat to register *where* the cursor stopped.
+        self.settle_ms = settle_ms
 
     async def _point_and_prepare(self, target: Target) -> Locator:
         locator = await build_locator(self.page, target)
@@ -36,6 +39,7 @@ class Recorder:
                 cy = box["y"] + box["height"] / 2
                 await self.overlay.move_to(self.page, cx, cy)
                 await self.overlay.ripple(self.page)
+                await self.page.wait_for_timeout(self.settle_ms)
         return locator
 
     async def navigate(self, url: str) -> None:

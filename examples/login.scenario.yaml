@@ -9,6 +9,19 @@ config:
   viewport: { width: 1280, height: 720 }
   locale: en-US
   tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+  # Optional — the cursor shown during `render`. All fields have defaults;
+  # omit the whole block to keep the built-in look and motion.
+  # cursor:
+  #   width: 34            # px; keep height ≈ width * 4/3 to avoid distortion
+  #   height: 46
+  #   color: "#ef4444"     # arrow fill
+  #   outline: "#ffffff"   # arrow outline
+  #   glow: "rgba(239,68,68,.75)"   # halo colour
+  #   easing: "cubic-bezier(.45,.05,.25,1)"   # glide curve
+  #   speed: 1.15          # px per ms — higher = faster glide
+  #   minDuration: 320     # ms floor for very short moves
+  #   maxDuration: 1400    # ms ceiling for cross-screen sweeps
+  #   settle: 280          # ms pause after arrival, before the click
 steps:
   - say: "Welcome. I'll show you how to log in to the system."
   - navigate: /login

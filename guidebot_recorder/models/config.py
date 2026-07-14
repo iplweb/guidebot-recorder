@@ -26,6 +26,32 @@ class TtsConfig(BaseModel):
     speed: float | None = None
 
 
+class CursorConfig(BaseModel):
+    """Cosmetic settings for the synthetic cursor shown during ``render``.
+
+    Purely visual — these never affect the compiled targets, so they are *not*
+    part of :func:`config_hash` and changing them does not require a recompile.
+    Every field has a sensible default; omit the whole ``cursor:`` block to keep
+    the built-in look and motion.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # --- Appearance (injected into cursor.js). width:height default keeps 3:4 ---
+    width: int = 34
+    height: int = 46
+    color: str = "#ef4444"  # arrow fill
+    outline: str = "#ffffff"  # arrow stroke — reads on any background
+    glow: str = "rgba(239,68,68,.75)"  # halo, aids tracking while moving
+    easing: str = "cubic-bezier(.45,.05,.25,1)"  # glide curve (ease-in-out)
+
+    # --- Motion timing (Python side). Duration scales with travel distance ---
+    speed: float = 1.15  # px per ms — higher = faster glide
+    min_duration: float = Field(default=320.0, alias="minDuration")  # ms floor
+    max_duration: float = Field(default=1400.0, alias="maxDuration")  # ms ceiling
+    settle: float = 280.0  # ms pause after arrival, before the action fires
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
@@ -33,6 +59,7 @@ class Config(BaseModel):
     tts: TtsConfig
     base_url: str | None = Field(default=None, alias="baseUrl")
     locale: str | None = None
+    cursor: CursorConfig = Field(default_factory=CursorConfig)
 
 
 def config_hash(cfg: Config) -> str:

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 import pytest
 from playwright.async_api import Page, async_playwright
 
+from guidebot_recorder.models.config import CursorConfig
 from guidebot_recorder.overlay.overlay import Overlay
 
 
@@ -57,6 +58,21 @@ async def test_install_registers_cursor_for_future_documents(page: Page) -> None
 
     assert await page.evaluate("!!window.__guidebot_cursor") is True
     assert await page.locator("[data-guidebot-cursor]").count() == 1
+
+
+async def test_cursor_config_drives_size_and_glide(page: Page) -> None:
+    overlay = Overlay(
+        CursorConfig(width=50, height=68, speed=2.0, min_duration=0, max_duration=9999)
+    )
+    await overlay.install(page)
+
+    size = await page.locator("[data-guidebot-cursor]").evaluate(
+        "el => [el.getBoundingClientRect().width, el.getBoundingClientRect().height]"
+    )
+    assert size == [50, 68]
+
+    # distance-proportional: 200px at 2.0 px/ms → ~100ms (defaults would clamp to 320)
+    assert overlay._glide_duration((0.0, 0.0), (200.0, 0.0)) == pytest.approx(100.0)
 
 
 async def test_move_to_updates_dom_and_python_position(page: Page) -> None:

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import math
 from importlib.resources import files
 
 from playwright.async_api import Page
+
+from guidebot_recorder.models.config import CursorConfig
 
 _API_IS_READY = """() => {
     const api = window.__guidebot_cursor;
@@ -31,10 +35,32 @@ class Overlay:
     restores this Python-side position before the next recorded step.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cursor: CursorConfig | None = None) -> None:
         self.pos: tuple[float, float] = (0.0, 0.0)
-        self._script = (
-            files("guidebot_recorder.overlay").joinpath("cursor.js").read_text(encoding="utf-8")
+        self.cursor = cursor or CursorConfig()
+        body = files("guidebot_recorder.overlay").joinpath("cursor.js").read_text(encoding="utf-8")
+        # Prepend the appearance config as a global the injected script reads.
+        # Timing (speed/min/max) stays Python-side in _glide_duration.
+        appearance = {
+            "width": self.cursor.width,
+            "height": self.cursor.height,
+            "fill": self.cursor.color,
+            "stroke": self.cursor.outline,
+            "glow": self.cursor.glow,
+            "easing": self.cursor.easing,
+        }
+        prelude = f"window.__guidebot_cursor_config = {json.dumps(appearance)};\n"
+        self._script = prelude + body
+
+    def _glide_duration(self, start: tuple[float, float], end: tuple[float, float]) -> float:
+        """Duration (ms) for a move: proportional to travel distance, clamped.
+
+        A fixed duration makes long jumps look like a snap; scaling with
+        distance keeps a constant perceived hand speed.
+        """
+        distance = math.dist(start, end)
+        return max(
+            self.cursor.min_duration, min(self.cursor.max_duration, distance / self.cursor.speed)
         )
 
     async def install(self, page: Page) -> None:
@@ -54,11 +80,16 @@ class Overlay:
         page: Page,
         x: float,
         y: float,
-        ms: float = 600,
+        ms: float | None = None,
     ) -> None:
-        """Move the cursor to viewport coordinates ``(x, y)``."""
+        """Move the cursor to viewport coordinates ``(x, y)``.
+
+        When ``ms`` is ``None`` the duration is derived from the travel
+        distance (constant perceived speed); pass an explicit value to force it
+        (e.g. ``ms=0`` for an instant snap on position restore).
+        """
         target = (float(x), float(y))
-        duration = float(ms)
+        duration = self._glide_duration(self.pos, target) if ms is None else float(ms)
         await self.ensure(page)
         await page.evaluate(
             "([targetX, targetY, duration]) => "

@@ -7,6 +7,20 @@
   const CURSOR_SELECTOR = "[data-guidebot-cursor]";
   const MAX_Z_INDEX = "2147483647";
 
+  // --- Cursor appearance ---------------------------------------------------
+  // Values come from the YAML `config.cursor` block (injected as a global by
+  // the Python Overlay); each falls back to a built-in default. The pointer
+  // keeps a 3:4 aspect ratio (viewBox 24x32) unless width/height override it.
+  const CFG = window.__guidebot_cursor_config || {};
+  const CURSOR_WIDTH = CFG.width ?? 34;
+  const CURSOR_HEIGHT = CFG.height ?? 46;
+  const CURSOR_FILL = CFG.fill ?? "#ef4444"; // vivid red body
+  const CURSOR_STROKE = CFG.stroke ?? "#ffffff"; // white outline → any background
+  const CURSOR_GLOW = CFG.glow ?? "rgba(239,68,68,.75)"; // halo, aids tracking
+  // Easing for the glide. An ease-in-out (gentle start, long settle) reads as a
+  // deliberate, hand-like move rather than a snap.
+  const MOVE_EASING = CFG.easing ?? "cubic-bezier(.45,.05,.25,1)";
+
   const previous = window[API_KEY];
   if (
     previous &&
@@ -62,21 +76,23 @@
 
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 32");
-    svg.setAttribute("width", "24");
-    svg.setAttribute("height", "32");
+    svg.setAttribute("width", String(CURSOR_WIDTH));
+    svg.setAttribute("height", String(CURSOR_HEIGHT));
     svg.setAttribute("aria-hidden", "true");
     svg.style.cssText = [
       "display:block",
       "overflow:visible",
       "pointer-events:none",
-      "filter:drop-shadow(0 1px 2px rgba(0,0,0,.55))",
+      // dark drop shadow for contrast on light backgrounds + a coloured glow
+      // so the pointer stays easy to track while it is moving
+      `filter:drop-shadow(0 1px 2px rgba(0,0,0,.55)) drop-shadow(0 0 7px ${CURSOR_GLOW})`,
     ].join(";");
 
     const pointer = document.createElementNS("http://www.w3.org/2000/svg", "path");
     pointer.setAttribute("d", "M2 1.5 2.4 24l5.5-5.2 4.3 10 4.1-1.8-4.3-9.8 7.6-.2Z");
-    pointer.setAttribute("fill", "#ffffff");
-    pointer.setAttribute("stroke", "#111827");
-    pointer.setAttribute("stroke-width", "1.6");
+    pointer.setAttribute("fill", CURSOR_FILL);
+    pointer.setAttribute("stroke", CURSOR_STROKE);
+    pointer.setAttribute("stroke-width", "2");
     pointer.setAttribute("stroke-linejoin", "round");
     svg.appendChild(pointer);
     shadow.appendChild(svg);
@@ -93,8 +109,8 @@
     setImportant(cursor, "display", "block");
     setImportant(cursor, "visibility", "visible");
     setImportant(cursor, "opacity", "1");
-    setImportant(cursor, "width", "24px");
-    setImportant(cursor, "height", "32px");
+    setImportant(cursor, "width", `${CURSOR_WIDTH}px`);
+    setImportant(cursor, "height", `${CURSOR_HEIGHT}px`);
     setImportant(cursor, "margin", "0");
     setImportant(cursor, "padding", "0");
     setImportant(cursor, "border", "0");
@@ -164,7 +180,7 @@
     setImportant(
       cursor,
       "transition",
-      `left ${duration}ms cubic-bezier(.22,.61,.36,1), top ${duration}ms cubic-bezier(.22,.61,.36,1)`,
+      `left ${duration}ms ${MOVE_EASING}, top ${duration}ms ${MOVE_EASING}`,
     );
     setImportant(cursor, "left", `${targetX}px`);
     setImportant(cursor, "top", `${targetY}px`);

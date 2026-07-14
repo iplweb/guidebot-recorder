@@ -97,9 +97,9 @@ async def run_render(
     page = await context.new_page()
     page.set_default_timeout(timeout * 1000)
     video = page.video
-    overlay = Overlay()
+    overlay = Overlay(cfg.cursor)
     await overlay.install(page)
-    recorder = Recorder(page, overlay)
+    recorder = Recorder(page, overlay, settle_ms=cfg.cursor.settle)
 
     placed: list[Placed] = []
     anchor = time.monotonic()
