@@ -1,0 +1,67 @@
+"""Recorder — Python API sterujące przeglądarką (§6).
+
+Jedyne miejsce, które „wie jak": buduje locator z zamrożonych pól `Target`,
+animuje kursor (overlay) i wykonuje akcję Playwrightem. Overlay jest opcjonalny —
+faza `compile` nie potrzebuje animacji, więc może użyć `Recorder(page, None)`.
+"""
+
+from __future__ import annotations
+
+from playwright.async_api import Locator, Page
+
+from guidebot_recorder.models.action import Expect, WaitState
+from guidebot_recorder.models.target import Target
+from guidebot_recorder.overlay.overlay import Overlay
+from guidebot_recorder.resolver.validate import build_locator
+
+# WaitState → stan akceptowany przez Playwright locator.wait_for
+_WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enabled": "visible"}
+
+
+class Recorder:
+    def __init__(self, page: Page, overlay: Overlay | None) -> None:
+        self.page = page
+        self.overlay = overlay
+
+    async def _point_and_prepare(self, target: Target) -> Locator:
+        locator = await build_locator(self.page, target)
+        await locator.scroll_into_view_if_needed()
+        if self.overlay is not None:
+            box = await locator.bounding_box()
+            if box is not None:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                await self.overlay.move_to(self.page, cx, cy)
+                await self.overlay.ripple(self.page)
+        return locator
+
+    async def navigate(self, url: str) -> None:
+        await self.page.goto(url)
+        await self.apply_readiness("navigation")
+
+    async def click(self, target: Target) -> None:
+        locator = await self._point_and_prepare(target)
+        await locator.click()
+
+    async def hover(self, target: Target) -> None:
+        locator = await self._point_and_prepare(target)
+        await locator.hover()
+
+    async def enter_text(self, target: Target, text: str) -> None:
+        locator = await self._point_and_prepare(target)
+        await locator.fill(text)
+
+    async def wait_seconds(self, seconds: float) -> None:
+        await self.page.wait_for_timeout(seconds * 1000)
+
+    async def wait_for(self, target: Target, state: WaitState, timeout: float) -> None:
+        locator = await build_locator(self.page, target)
+        await locator.wait_for(state=_WAIT_STATE[state], timeout=timeout * 1000)
+
+    async def apply_readiness(self, expect: Expect) -> None:
+        if expect == "navigation":
+            await self.page.wait_for_load_state()
+        elif expect == "idle":
+            await self.page.wait_for_load_state("networkidle")
+        else:
+            await self.page.wait_for_timeout(100)
