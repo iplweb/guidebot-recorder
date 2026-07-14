@@ -29,15 +29,30 @@ def validate_cmd(path: Path) -> None:
 
 
 @app.command("compile")
-def compile_cmd(path: Path) -> None:
+def compile_cmd(
+    path: Path,
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    force: bool = typer.Option(False, "--force", help="Przelicz wszystkie kroki, ignoruj cache"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
+) -> None:
     """Skompiluj intencje → `cachedAction` (in-place, faza AI)."""
 
     async def _run() -> None:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
+            browser = await pw.chromium.launch(headless=not headed)
             page = await browser.new_page()
             try:
-                await run_compile(path, page, CodexReasoner())
+                await run_compile(
+                    path,
+                    page,
+                    CodexReasoner(),
+                    force=force,
+                    pause_on_error=pause_on_error,
+                    verbose=verbose,
+                )
             finally:
                 await browser.close()
 
@@ -49,6 +64,11 @@ def compile_cmd(path: Path) -> None:
 def render_cmd(
     path: Path,
     out: Path = typer.Option(..., "--out", "-o", help="Ścieżka wyjściowa .mp4"),
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
 ) -> None:
     """Zrenderuj deterministyczny film `.mp4` z lektorem (0×LLM)."""
@@ -58,9 +78,17 @@ def render_cmd(
 
     async def _run() -> None:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
+            browser = await pw.chromium.launch(headless=not headed)
             try:
-                await run_render(path, out, EdgeTtsProvider(), Path(".guidebot/audio"), browser)
+                await run_render(
+                    path,
+                    out,
+                    EdgeTtsProvider(),
+                    Path(".guidebot/audio"),
+                    browser,
+                    pause_on_error=pause_on_error,
+                    verbose=verbose,
+                )
             finally:
                 await browser.close()
 

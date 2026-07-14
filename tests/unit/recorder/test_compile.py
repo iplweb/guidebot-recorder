@@ -71,3 +71,26 @@ async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     second = MockReasoner()
     await run_compile(path, page, second)
     assert second.calls == 0  # reuse — LLM nie wołany
+
+
+async def test_compile_sets_viewport_from_config(tmp_path, page):
+    # config.viewport = 800x600; compile MUSI go ustawić (spójność z render)
+    path = tmp_path / "login.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+
+    await run_compile(path, page, MockReasoner())
+
+    assert page.viewport_size == {"width": 800, "height": 600}
+
+
+async def test_compile_force_reresolves(tmp_path, page):
+    path = tmp_path / "login.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+
+    first = MockReasoner()
+    await run_compile(path, page, first)
+    assert first.calls == 1
+
+    forced = MockReasoner()
+    await run_compile(path, page, forced, force=True)
+    assert forced.calls == 1  # --force ignoruje cache i woła reasonera ponownie

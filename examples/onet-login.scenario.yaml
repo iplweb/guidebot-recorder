@@ -1,0 +1,28 @@
+# Onet.pl — jak dojść do logowania.
+# Przepływ: strona główna → akceptacja ciasteczek → klik „Logowanie” (popup).
+#
+# Uruchomienie:
+#   uv run guidebot validate examples/onet-login.scenario.yaml
+#   uv run guidebot compile  examples/onet-login.scenario.yaml   # faza AI (Codex CLI)
+#   uv run guidebot render   examples/onet-login.scenario.yaml --out out/onet-login.mp4
+config:
+  title: "Onet.pl — jak wejść na logowanie"
+  viewport: { width: 1366, height: 768 }
+  locale: pl-PL
+  tts: { provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL }
+steps:
+  - say: "Pokażę, jak dojść do logowania w portalu Onet. Zaczynamy od strony głównej."
+
+  - navigate: "https://www.onet.pl"
+
+  # Baner zgody pojawia się z chwilą opóźnienia — poczekaj, aż będzie widoczny.
+  - wait:
+      until: "aż pojawi się baner zgody na pliki cookie"
+      state: visible
+      timeout: 20
+
+  - teach: "Najpierw akceptujemy zgodę na pliki cookie, klikając przycisk przejścia do serwisu"
+
+  - teach: "Aby się zalogować, klikamy odnośnik Logowanie w prawym górnym rogu strony"
+
+  - say: "Okno logowania otwiera się w osobnym, wyskakującym oknie — tam podajemy e-mail i hasło."
