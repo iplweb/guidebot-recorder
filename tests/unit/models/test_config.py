@@ -23,7 +23,7 @@ def test_hash_changes_on_locale():
 
 
 def test_base_url_alias_from_yaml():
-    # spec §3.1/§3.2 używa `baseUrl:` w YAML
+    # spec §3.1/§3.2 uses `baseUrl:` in YAML
     cfg = Config.model_validate(
         {
             "title": "t",

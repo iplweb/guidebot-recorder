@@ -1,4 +1,4 @@
-"""Config scenariusza + config_hash (§3.1/§4.3)."""
+"""Scenario config + config_hash (§3.1/§4.3)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
-#: wersja kanonicznej projekcji configu do hasha
+#: version of the canonical config projection used for the hash
 CONFIG_HASH_VERSION = 1
 
 
@@ -36,9 +36,9 @@ class Config(BaseModel):
 
 
 def config_hash(cfg: Config) -> str:
-    """SHA-256 z kanonicznej projekcji: viewport, locale, tts.lang.
+    """SHA-256 of the canonical projection: viewport, locale, tts.lang.
 
-    Zmiana viewportu/locale/języka TTS unieważnia namiary (fingerprint, §4.1).
+    Changing the viewport/locale/TTS language invalidates the references (fingerprint, §4.1).
     """
     projection = {
         "v": CONFIG_HASH_VERSION,

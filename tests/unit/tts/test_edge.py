@@ -1,4 +1,4 @@
-"""Test EdgeTtsProvider (Task 15) — wymaga sieci, opt-in (@pytest.mark.network)."""
+"""Test EdgeTtsProvider (Task 15) — requires network, opt-in (@pytest.mark.network)."""
 
 from __future__ import annotations
 

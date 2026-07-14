@@ -1,8 +1,8 @@
-"""Identity — zamrożona tożsamość elementu, niezależna od locatora (§4.3).
+"""Identity — a frozen element identity, independent of the locator (§4.3).
 
-Chroni przed dryfem strony: render porównuje tożsamość trafionego elementu z
-zamrożoną. `role`/`name` NIE są kryterium (locator jest z nich budowany —
-porównanie byłoby tautologiczne).
+Guards against page drift: render compares the identity of the matched element
+against the frozen one. `role`/`name` are NOT criteria (the locator is built from
+them — the comparison would be tautological).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class Identity(BaseModel):
     identity_version: int = 1
 
     def matches(self, other: Identity) -> bool:
-        """Równość: wszystkie obecne pola równe ORAZ `identity_version` równa."""
+        """Equality: all present fields equal AND `identity_version` equal."""
         return (
             self.identity_version == other.identity_version
             and self.tag == other.tag
