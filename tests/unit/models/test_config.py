@@ -20,3 +20,16 @@ def test_hash_changes_on_viewport():
 
 def test_hash_changes_on_locale():
     assert config_hash(_cfg(locale="pl-PL")) != config_hash(_cfg(locale="en-US"))
+
+
+def test_base_url_alias_from_yaml():
+    # spec §3.1/§3.2 używa `baseUrl:` w YAML
+    cfg = Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1, "height": 1},
+            "tts": {"provider": "e", "voice": "v", "lang": "pl"},
+            "baseUrl": "https://app.example.com",
+        }
+    )
+    assert cfg.base_url == "https://app.example.com"

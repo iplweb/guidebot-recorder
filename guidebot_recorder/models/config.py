@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 #: wersja kanonicznej projekcji configu do hasha
 CONFIG_HASH_VERSION = 1
@@ -27,11 +27,11 @@ class TtsConfig(BaseModel):
 
 
 class Config(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
     viewport: Viewport
     tts: TtsConfig
-    base_url: str | None = None
+    base_url: str | None = Field(default=None, alias="baseUrl")
     locale: str | None = None
 
 
