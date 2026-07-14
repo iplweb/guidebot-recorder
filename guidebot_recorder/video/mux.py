@@ -76,9 +76,10 @@ def probe_duration(path: Path) -> float:
 def mux(video: Path, audio: Path, out: Path) -> None:
     """Combine *video* and *audio* into *out*.
 
-    Video is stream-copied (no re-encode); audio is encoded to AAC at the
-    canonical 48000 Hz sample rate. ``-shortest`` clips output to the shorter of
-    the two streams so the audio bed never runs past the recording.
+    Video is transcoded to H.264 (Playwright records VP8/WebM, which the MP4
+    container does not accept — a stream copy would fail); audio is encoded to
+    AAC at the canonical 48000 Hz sample rate. ``-shortest`` clips output to the
+    shorter of the two streams so the audio bed never runs past the recording.
     """
     video, audio, out = Path(video), Path(audio), Path(out)
     for src in (video, audio):
@@ -98,7 +99,9 @@ def mux(video: Path, audio: Path, out: Path) -> None:
             "-map",
             "1:a:0",
             "-c:v",
-            "copy",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-c:a",
             "aac",
             "-ar",
