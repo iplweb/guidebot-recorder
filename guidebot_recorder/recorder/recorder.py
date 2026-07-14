@@ -9,6 +9,7 @@ The overlay is optional — the `compile` phase needs no animation, so it can us
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from playwright.async_api import Locator, Page
 
@@ -48,8 +49,15 @@ class Recorder:
         await self.page.goto(url)
         await self.apply_readiness("navigation")
 
-    async def click(self, target: Target) -> None:
+    async def click(
+        self,
+        target: Target,
+        *,
+        before_click: Callable[[], None] | None = None,
+    ) -> None:
         locator = await self._point_and_prepare(target)
+        if before_click is not None:
+            before_click()
         await locator.click()
 
     async def hover(self, target: Target) -> None:

@@ -70,12 +70,8 @@ async def test_context_install_injects_cursor_into_popup(page: Page) -> None:
     popup = await popup_info.value
 
     assert await popup.evaluate("!!window.__guidebot_cursor") is True
-    await overlay.ensure(popup)
-    assert await popup.locator("[data-guidebot-cursor]").count() == 1
-
     await popup.goto("data:text/html,<main>replacement document</main>")
     await popup.wait_for_load_state()
-    await overlay.ensure(popup)
     assert await popup.evaluate("!!window.__guidebot_cursor") is True
     assert await popup.locator("[data-guidebot-cursor]").count() == 1
 

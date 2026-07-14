@@ -19,10 +19,23 @@ WaitState = Literal["visible", "hidden", "enabled"]
 
 _ENV_PLACEHOLDER = re.compile(r"\$\{\w+\}")
 _SENSITIVE_INSTRUCTION = re.compile(
-    r"\b(password|passwd|token|secret|sekret|hasł\w*|pin|otp|"
-    r"api[\s_-]*key|klucz\w*\s+api|kod\w*\s+jednorazow\w*)\b",
+    r"\b(password|passwd|passcode|passphrase|credential\w*|token|secret|"
+    r"sekret\w*|hasł\w*|pin|otp|2fa|mfa|cvv|cvc|ssn|pesel|"
+    r"api[\s_-]*key|private[\s_-]*key|client[\s_-]*secret|"
+    r"security[\s_-]*code|verification[\s_-]*code|recovery[\s_-]*code|"
+    r"backup[\s_-]*code|access[\s_-]*code|auth(?:entication)?[\s_-]*code|"
+    r"klucz\w*\s+(?:api|prywatn\w*)|kod\w*\s+(?:jednorazow\w*|"
+    r"bezpieczeństwa|dostępu|weryfikacyjn\w*|uwierzytelniając\w*)|"
+    r"numer\w*\s+karty)\b",
     re.IGNORECASE,
 )
+
+
+def validate_teach_instruction(instruction: str) -> None:
+    """Reject sensitive teach text before it reaches the Reasoner."""
+
+    if _SENSITIVE_INSTRUCTION.search(instruction):
+        raise ValueError("wartości wrażliwe wymagają enterText z ENV")
 
 
 def validate_teach_input_text(instruction: str, input_text: str) -> None:
@@ -36,8 +49,7 @@ def validate_teach_input_text(instruction: str, input_text: str) -> None:
         raise ValueError(
             "reasoner zwrócił inputText, który nie jest literalnym fragmentem instrukcji teach"
         )
-    if _SENSITIVE_INSTRUCTION.search(instruction):
-        raise ValueError("wartości wrażliwe wymagają enterText z ENV")
+    validate_teach_instruction(instruction)
 
 
 class Fingerprint(BaseModel):

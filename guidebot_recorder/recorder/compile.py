@@ -18,8 +18,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urljoin
 
-from playwright.async_api import BrowserContext, Page
-from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import (
+    BrowserContext,
+    Page,
+)
+from playwright.async_api import (
+    Error as PlaywrightError,
+)
 from tqdm import tqdm
 
 from guidebot_recorder.models.action import (
@@ -29,6 +34,7 @@ from guidebot_recorder.models.action import (
     Expect,
     Fingerprint,
     validate_teach_input_text,
+    validate_teach_instruction,
 )
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.config import config_hash
@@ -47,6 +53,7 @@ from guidebot_recorder.resolver.page_context import collect_candidates
 from guidebot_recorder.resolver.reasoner import Reasoner, ReasonerError, ReasonerResult
 from guidebot_recorder.resolver.validate import (
     ValidationOk,
+    is_sensitive_type_target,
     reuse_is_valid,
     validate_compile_time,
 )
@@ -221,11 +228,14 @@ async def run_compile(
     active_page = main_page
     popup_page: Page | None = None
     popup_seen = False
+    loop = asyncio.get_running_loop()
     observed_pages: list[Page] = [main_page]
+    page_opened_at: dict[Page, float] = {main_page: loop.time()}
 
     def observe_page(candidate: Page) -> None:
         if all(candidate is not observed for observed in observed_pages):
             observed_pages.append(candidate)
+            page_opened_at[candidate] = loop.time()
 
     context.on("page", observe_page)
 
@@ -246,26 +256,34 @@ async def run_compile(
             await active_page.bring_to_front()
             recorder = Recorder(active_page, overlay=None)
             kind = step.command_kind()
+            if kind == "teach":
+                try:
+                    validate_teach_instruction(_instruction(step))
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(steps)}] {kind}: {_short(step)}")
             try:
                 pages_before = tuple(context.pages)
                 observed_start = len(observed_pages)
                 click_observed_start: int | None = None
+                click_started_at: float | None = None
 
                 def arm_click_observation(
                     step_observed_start: int = observed_start,
                 ) -> None:
                     """Assign only pages created after this point to the click."""
 
-                    nonlocal click_observed_start
+                    nonlocal click_observed_start, click_started_at
                     if observed_pages[step_observed_start:]:
                         raise RuntimeError(
                             "nieoczekiwany popup otworzył się podczas rozwiązywania "
                             "kroku, przed akcją click"
                         )
                     click_observed_start = len(observed_pages)
+                    click_started_at = loop.time()
 
+                action_page = active_page
                 compiled_action = await _compile_step(
                     active_page,
                     recorder,
@@ -280,16 +298,21 @@ async def run_compile(
                     force=force,
                     verbose=verbose,
                 )
+                action_page_closed_in_window = action_page.is_closed()
 
                 new_pages: list[Page] = []
                 if compiled_action is not None and compiled_action.action == "click":
-                    if click_observed_start is None:  # pragma: no cover - dispatch invariant
+                    if (
+                        click_observed_start is None or click_started_at is None
+                    ):  # pragma: no cover - dispatch invariant
                         raise RuntimeError("wewnętrzny błąd obserwacji akcji click")
                     new_pages = await _wait_for_new_pages(
                         context,
                         pages_before,
                         observed_pages,
                         click_observed_start,
+                        page_opened_at,
+                        started_at=click_started_at,
                     )
                 elif observed_pages[observed_start:]:
                     raise RuntimeError("popup może zostać otwarty tylko przez akcję click")
@@ -320,7 +343,13 @@ async def run_compile(
                 if main_page.is_closed():
                     raise RuntimeError("główne okno zostało zamknięte podczas compile")
                 if active_page.is_closed():
-                    if kind in {"say", "navigate", "wait"}:
+                    close_was_action_driven = (
+                        active_page is action_page
+                        and action_page_closed_in_window
+                        and compiled_action is not None
+                        and compiled_action.action in {"click", "hover", "type"}
+                    )
+                    if not close_was_action_driven:
                         raise RuntimeError(
                             "popup zamknął się asynchronicznie poza obsługiwaną akcją"
                         )
@@ -385,26 +414,34 @@ async def _wait_for_new_pages(
     known: tuple[Page, ...],
     observed: list[Page] | None = None,
     observed_start: int = 0,
+    opened_at: Mapping[Page, float] | None = None,
+    *,
+    started_at: float | None = None,
     timeout: float = _POPUP_DETECTION_SECONDS,
 ) -> list[Page]:
-    """Poll after a click and keep a short grace window for sibling pages."""
+    """Find pages opened inside the bounded window of the actual click."""
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    started_at = loop.time() if started_at is None else started_at
+    deadline = started_at + timeout
+    cutoff = deadline
     first_seen_at: float | None = None
     while True:
         found: list[Page] = []
         candidates = list((observed or [])[observed_start:]) + _new_pages(context, known)
         for candidate in candidates:
-            if all(candidate is not page for page in found):
+            candidate_opened_at = (opened_at or {}).get(candidate, loop.time())
+            if started_at <= candidate_opened_at <= cutoff and all(
+                candidate is not page for page in found
+            ):
                 found.append(candidate)
         if found:
             if first_seen_at is None:
-                first_seen_at = loop.time()
-                deadline = max(deadline, first_seen_at + _POPUP_QUIESCENCE_SECONDS)
+                first_seen_at = min((opened_at or {}).get(page, loop.time()) for page in found)
+                cutoff = max(cutoff, first_seen_at + _POPUP_QUIESCENCE_SECONDS)
             if loop.time() - first_seen_at >= _POPUP_QUIESCENCE_SECONDS:
                 return found
-        remaining = deadline - loop.time()
+        remaining = cutoff - loop.time()
         if remaining <= 0:
             return found
         await asyncio.sleep(min(0.05, remaining))
@@ -492,6 +529,15 @@ async def _compile_step(
             resolution_error = None
             validation = await validate_compile_time(page, result.target, action)
             if isinstance(validation, ValidationOk):
+                if (
+                    action == "type"
+                    and kind == "teach"
+                    and await is_sensitive_type_target(validation.locator)
+                ):
+                    resolution_error = (
+                        "pole wygląda na przeznaczone dla wartości wrażliwej; użyj enterText z ENV"
+                    )
+                    continue
                 resolved = (action, result.target, validation.locator, input_text)
                 break
         if resolved is None:
@@ -514,8 +560,7 @@ async def _compile_step(
     # perform the action (reveals the state for later steps)
     url_before = page.url
     if action == "click":
-        before_click()
-        await recorder.click(target)
+        await recorder.click(target, before_click=before_click)
     elif action == "hover":
         await recorder.hover(target)
     elif action == "type":
@@ -547,5 +592,9 @@ async def _compile_step(
         )
 
     if not page.is_closed():
-        await recorder.apply_readiness(expect)
+        try:
+            await recorder.apply_readiness(expect)
+        except PlaywrightError:
+            if not page.is_closed():
+                raise
     return cached_out

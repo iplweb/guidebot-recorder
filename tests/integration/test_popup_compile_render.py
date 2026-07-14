@@ -33,6 +33,7 @@ config:
   title: Popup logowania
   viewport: {{width: 640, height: 480}}
   tts: {{provider: fake, voice: v, lang: pl-PL}}
+  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
 steps:
   - navigate: "{url}"
   - wait: 0.4
@@ -48,11 +49,12 @@ config:
   title: Popup pozostający otwarty
   viewport: {{width: 640, height: 480}}
   tts: {{provider: fake, voice: v, lang: pl-PL}}
+  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
 steps:
   - navigate: "{url}"
   - wait: 0.4
   - teach: "Otwórz popup logowania"
-  - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
+  - teach: "Wpisz w pole email tekst koparka@poczta.wp.pl"
   - wait: 0.4
 """
 
@@ -105,7 +107,7 @@ class FakeTts:
                 "-f",
                 "lavfi",
                 "-i",
-                "anullsrc=r=48000:cl=mono",
+                f"sine=frequency=660:duration={duration}:sample_rate=48000",
                 "-t",
                 str(duration),
                 str(out),
@@ -162,6 +164,69 @@ def _rgb_at(path: Path, seconds: float) -> tuple[int, int, int]:
     return raw[0], raw[1], raw[2]
 
 
+def _rgb_at_pixel(
+    path: Path,
+    seconds: float,
+    x: int = 620,
+    y: int = 20,
+) -> tuple[int, int, int]:
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{seconds:.6f}",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"crop=2:2:{x}:{y},scale=1:1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert len(raw) == 3
+    return raw[0], raw[1], raw[2]
+
+
+def _has_audio_signal(path: Path, start: float, seconds: float = 0.1) -> bool:
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{start:.6f}",
+            "-t",
+            f"{seconds:.6f}",
+            "-i",
+            str(path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    samples = [
+        int.from_bytes(raw[index : index + 2], "little", signed=True)
+        for index in range(0, len(raw) - 1, 2)
+    ]
+    return bool(samples) and max(map(abs, samples)) > 100
+
+
 def _is_main_blue(rgb: tuple[int, int, int]) -> bool:
     red, green, blue = rgb
     return blue > 120 and blue > red + 60 and blue > green + 60
@@ -170,6 +235,11 @@ def _is_main_blue(rgb: tuple[int, int, int]) -> bool:
 def _is_popup_yellow(rgb: tuple[int, int, int]) -> bool:
     red, green, blue = rgb
     return red > 120 and green > 120 and blue < 100
+
+
+def _is_chrome_gray(rgb: tuple[int, int, int]) -> bool:
+    red, green, blue = rgb
+    return abs(red - green) < 20 and abs(green - blue) < 20 and red > 180
 
 
 async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
@@ -216,6 +286,14 @@ async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
     assert main_indices and popup_indices
     assert min(main_indices) < min(popup_indices)
     assert max(main_indices) > max(popup_indices)
+    popup_sample_time = duration * (min(popup_indices) + 1) / 20
+    before_popup_windows = [index / 10 for index in range(1, int(popup_sample_time * 10))]
+    popup_windows = [index / 10 for index in range(int(popup_sample_time * 10), int(duration * 10))]
+    assert any(_has_audio_signal(out, start) for start in before_popup_windows)
+    assert any(_has_audio_signal(out, start) for start in popup_windows)
+    for sample_index in (min(main_indices), min(popup_indices), max(main_indices)):
+        sample_time = duration * (sample_index + 1) / 20
+        assert _is_chrome_gray(_rgb_at_pixel(out, sample_time))
 
 
 async def test_popup_left_open_stays_visible_through_video_end(tmp_path: Path) -> None:

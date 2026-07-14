@@ -22,6 +22,12 @@ final `.mp4` visibly switches to the pop-up and back to the main page.
   `enterText: {into: "pole hasła", text: "${PASSWORD}"}`. ENV expansion follows the
   main design, and the expanded value must never be written to the compiled sidecar,
   the fingerprint, narration, or logs.
+- Compile rejects recognized sensitive instruction terms and sensitive DOM field
+  metadata (for example `type=password` and password/OTP autocomplete values). This
+  is defense in depth, not a general-purpose secret classifier; scenario authors
+  remain responsible for putting every secret behind `enterText` + ENV.
+  Sensitive `teach` text is rejected before verbose step output and before the
+  Reasoner is called.
 
 ## Approved direction
 
@@ -100,11 +106,17 @@ the same state-transition rules.
 
 - The main page must remain open for the whole session.
 - The pop-up must be a newly created `Page`. Reusing a pre-existing named window,
-  browser chrome, iframes, and downloads are outside v1.
+  native browser chrome, iframes, and downloads are outside v1. The optional
+  synthetic `config.chrome` DOM bar is installed at context level before either
+  page is created and synchronized on both pages. A page-event task immediately
+  primes both visual layers and is awaited before the new page is used, so the
+  first popup frame cloned by the compositor already contains them.
 - Supported closure is caused by a scenario action in the pop-up, or by end of
   session when the pop-up remains open. Timer-driven/asynchronous closure between
   actions is outside v1 and fails loudly; compile and render otherwise have
-  different timing because only render waits for narration.
+  different timing because only render waits for narration. The supported action
+  window includes its close-aware readiness wait, so a close triggered by an
+  asynchronous click handler can still complete normally.
 - Before resolving/executing a step, and again after narration or a timed wait, the
   tracker refreshes `active_page`. A pop-up closed by the preceding scenario action
   selects main; any other close fails before another step can run.
@@ -127,7 +139,9 @@ For each step:
    the click, after target resolution and identity capture. A page observed earlier
    during reasoner work is unexpected and cannot be attributed to that click.
    After the action, allow a short bounded discovery window (approximately one
-   second) for a newly created page. Ordinary non-click actions do not poll.
+   second, measured from the actual locator click) for a newly created page. A page
+   appearing after that deadline is unexpected. Ordinary non-click actions do not
+   poll.
 3. Compute/apply the action's `expect` readiness on the page that executed the
    action, not on the newly selected page. If that page closed during the action,
    skip page-bound readiness, switch to main, and settle/wait for main instead.
@@ -153,9 +167,13 @@ ENV.
 
 Render remains 0×LLM and treats the compiled lifecycle as a replay contract.
 
-- Install the overlay init script on the **BrowserContext before creating the main
-  page**, so it applies to every document of main and pop-up. Call `ensure()` on the
-  active page after navigation/load and when switching pages.
+- Install the cursor overlay and, when enabled, synthetic `config.chrome` init
+  scripts on the **BrowserContext before creating the main page**, so they apply to
+  every document. A freshly opened `about:blank` can replace its initial document
+  after losing init-script timers, so the context page event must also start a
+  bounded Python task that retries both `ensure()` calls; retain and await that task
+  before using the page. Call both `ensure()` methods again after navigation/load
+  and when switching pages.
 - Use one monotonic recording anchor shared by narration and window events. Chromium
   may not emit a video frame for a pristine `about:blank`, so first paint and capture
   a neutral main document with the overlay, allow a bounded warm-up, and establish the
@@ -167,8 +185,9 @@ Render remains 0×LLM and treats the compiled lifecycle as a replay contract.
   listener, and record `t_open` from the shared anchor. On the close event, record
   `t_close`; select main only when the close happened during a supported action.
 - When `cached.opens_popup` is true, the opening click must yield that event within
-  the bounded timeout; otherwise raise `RenderError("re-compile")`. When it is
-  false, any new page event is an unexpected-lifecycle error.
+  one second measured from the actual locator click—not from the preceding cursor
+  animation; otherwise raise `RenderError("re-compile")`. When it is false, any new
+  page event is an unexpected-lifecycle error, including after the final step.
 - Readiness is close-aware exactly as in compile: it applies to the action page only
   while that page is open. A pop-up-closing action returns to and settles main.
 - If the pop-up remains open at scenario end, set `t_close` to the session-end

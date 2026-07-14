@@ -166,6 +166,26 @@ async def test_install_registers_bar_for_future_documents(page: Page) -> None:
     assert snapshot["rootPadding"] == "56px"
 
 
+async def test_install_context_injects_bar_into_popup_documents(page: Page) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True))
+    await chrome.install_context(page.context)
+    await page.set_content("<button onclick=\"window.open('about:blank')\">open</button>")
+
+    async with page.expect_popup() as popup_info:
+        await page.get_by_role("button", name="open").click()
+    popup = await popup_info.value
+    try:
+        assert await popup.evaluate("!!window.__guidebot_chrome") is True
+        await popup.goto("data:text/html,<main>replacement document</main>")
+        await popup.wait_for_load_state()
+        assert await popup.locator(HOST_SELECTOR).count() == 1
+        snapshot = await _snapshot(popup)
+        assert snapshot["url"] == popup.url
+        assert snapshot["rootPadding"] == "56px"
+    finally:
+        await popup.close()
+
+
 async def test_ensure_syncs_page_url_and_repairs_spa_wipe_without_padding_growth(
     page: Page,
 ) -> None:

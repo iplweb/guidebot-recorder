@@ -68,6 +68,10 @@ def test_teach_can_freeze_literal_text_for_type():
     [
         ("wpisz wartość z instrukcji", "wartość wymyślona"),
         ("wpisz hasło hunter2", "hunter2"),
+        ("Wklej hasło hunter2 do pola Access", "hunter2"),
+        ("Paste password hunter2 into Access", "hunter2"),
+        ("Enter hunter2 into the passcode field", "hunter2"),
+        ("Enter 123 into the CVV field", "123"),
         ("enter API key sk-live-demo", "sk-live-demo"),
     ],
 )

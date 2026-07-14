@@ -13,7 +13,7 @@
     <h1>Logowanie</h1>
     <label for="email">E-mail</label>
     <input id="email" type="email">
-    <button onclick="window.opener.postMessage('guidebot-popup-closed', '*'); window.close()">
+    <button onclick="window.opener.postMessage('guidebot-popup-closed', '*'); setTimeout(() => window.close(), 20)">
       Zamknij logowanie
     </button>
   </body>

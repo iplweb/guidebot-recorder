@@ -37,6 +37,6 @@ steps:
 
   - say: "The login window opens in a separate pop-up window, which Guidebot follows automatically."
 
-  - teach: "Switch to the pop-up and type koparka@poczta.wp.pl into the e-mail field"
+  - teach: "In the pop-up, type koparka@poczta.wp.pl into the e-mail field"
 
   - say: "Thank you for your attention."

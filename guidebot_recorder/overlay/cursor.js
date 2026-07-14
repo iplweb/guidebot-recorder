@@ -61,12 +61,12 @@
     };
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", mount, { once: true });
-    } else {
-      // A freshly opened about:blank Page can run an init script after its
-      // DOMContentLoaded event while documentElement is not exposed yet.  Do
-      // not leave the cursor permanently unmounted in that race.
-      window.setTimeout(mount, 0);
     }
+    // A freshly opened about:blank Page can report "loading" even though its
+    // DOMContentLoaded event already raced past the init script. The timer is a
+    // mandatory fallback in both branches; ensure() is idempotent if the event
+    // also fires.
+    window.setTimeout(mount, 0);
   }
 
   function addCursorGraphic(cursor) {

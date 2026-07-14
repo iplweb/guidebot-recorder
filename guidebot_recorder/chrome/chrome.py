@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from importlib.resources import files
 
-from playwright.async_api import Page
+from playwright.async_api import BrowserContext, Page
 
 from guidebot_recorder.models.config import ChromeConfig
 
@@ -44,6 +44,11 @@ class Chrome:
         await page.add_init_script(script=self._script)
         await page.evaluate(self._script)
         await self.ensure(page)
+
+    async def install_context(self, context: BrowserContext) -> None:
+        """Register the bar before pages are created so their first frame has it."""
+
+        await context.add_init_script(script=self._script)
 
     async def ensure(self, page: Page) -> None:
         """Recreate a missing controller/bar and synchronize Playwright's URL."""
