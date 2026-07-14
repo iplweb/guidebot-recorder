@@ -52,6 +52,7 @@ async def run_render(
     cache_dir: Path | str,
     browser: Browser,
     *,
+    timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
 ) -> None:
@@ -83,6 +84,7 @@ async def run_render(
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
     )
     page = await context.new_page()
+    page.set_default_timeout(timeout * 1000)
     video = page.video
     overlay = Overlay()
     await overlay.install(page)

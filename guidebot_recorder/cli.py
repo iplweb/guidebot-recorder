@@ -36,6 +36,7 @@ def compile_cmd(
     pause_on_error: bool = typer.Option(
         False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
     ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
 ) -> None:
     """Skompiluj intencje → `cachedAction` (in-place, faza AI)."""
@@ -49,6 +50,7 @@ def compile_cmd(
                     path,
                     page,
                     CodexReasoner(),
+                    timeout=timeout,
                     force=force,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
@@ -68,6 +70,7 @@ def render_cmd(
     pause_on_error: bool = typer.Option(
         False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
     ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
 ) -> None:
@@ -86,6 +89,7 @@ def render_cmd(
                     EdgeTtsProvider(),
                     Path(".guidebot/audio"),
                     browser,
+                    timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
                 )

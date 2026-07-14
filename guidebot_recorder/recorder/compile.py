@@ -115,6 +115,7 @@ async def run_compile(
     reasoner: Reasoner,
     env: Mapping[str, str] | None = None,
     *,
+    timeout: float = 30.0,
     force: bool = False,
     pause_on_error: bool = False,
     verbose: bool = False,
@@ -126,6 +127,7 @@ async def run_compile(
     chash = config_hash(cfg)
     # KLUCZOWE: ten sam viewport co render, inaczej zamrożone pozycje nie pasują.
     await page.set_viewport_size({"width": cfg.viewport.width, "height": cfg.viewport.height})
+    page.set_default_timeout(timeout * 1000)
     recorder = Recorder(page, overlay=None)
 
     steps = scenario.steps

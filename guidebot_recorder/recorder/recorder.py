@@ -25,7 +25,9 @@ class Recorder:
 
     async def _point_and_prepare(self, target: Target) -> Locator:
         locator = await build_locator(self.page, target)
-        await locator.scroll_into_view_if_needed()
+        # przewiń do celu w OBU osiach — element bywa poza kadrem także w poziomie,
+        # a auto-scroll Playwrighta jest pionowo-centryczny
+        await locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
         if self.overlay is not None:
             box = await locator.bounding_box()
             if box is not None:

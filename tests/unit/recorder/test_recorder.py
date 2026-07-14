@@ -37,6 +37,20 @@ async def test_enter_text_fills(page):
     assert await page.locator("#e").input_value() == "user@x.pl"
 
 
+async def test_click_scrolls_to_horizontally_offscreen_element(page):
+    await page.set_viewport_size({"width": 400, "height": 400})
+    await page.set_content(
+        "<div style='width:3000px;position:relative;height:400px'>"
+        "<button style='position:absolute;left:2500px;top:10px' "
+        "onclick=\"this.textContent='ok'\">Zaloguj</button></div>"
+    )
+    rec = Recorder(page, overlay=None)
+
+    await rec.click(RoleTarget(role="button", name="Zaloguj"))
+
+    assert await page.locator("button").text_content() == "ok"
+
+
 async def test_apply_readiness_none_is_noop(page):
     await page.set_content("<p>ok</p>")
     rec = Recorder(page, overlay=None)
