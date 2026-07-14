@@ -17,6 +17,7 @@ from urllib.parse import urljoin
 from playwright.async_api import Browser, Page
 from tqdm import tqdm
 
+from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.models.action import CachedAction
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
@@ -99,6 +100,9 @@ async def run_render(
     video = page.video
     overlay = Overlay(cfg.cursor)
     await overlay.install(page)
+    chrome = Chrome(cfg.chrome) if cfg.chrome.enabled else None
+    if chrome is not None:
+        await chrome.install(page)
     recorder = Recorder(page, overlay, settle_ms=cfg.cursor.settle)
 
     placed: list[Placed] = []
@@ -115,6 +119,7 @@ async def run_render(
                     page,
                     recorder,
                     overlay,
+                    chrome,
                     scenario,
                     step,
                     kind,
@@ -148,6 +153,7 @@ async def _render_step(
     page: Page,
     recorder: Recorder,
     overlay: Overlay,
+    chrome: Chrome | None,
     scenario: Scenario,
     step: Step,
     kind: str,
@@ -157,6 +163,12 @@ async def _render_step(
     placed: list[Placed],
     anchor: float,
 ) -> None:
+    # Both visual layers can be removed by an SPA without a navigation.  Check
+    # them before every recorded step, including narration-only and timed waits.
+    await overlay.ensure(page)
+    if chrome is not None:
+        await chrome.ensure(page)
+
     seg = segments.get(index)
     if seg is not None:
         placed.append(Placed(segment=seg, offset=time.monotonic() - anchor))
@@ -165,8 +177,28 @@ async def _render_step(
     if kind == "say":
         return
     if kind == "navigate":
-        await recorder.navigate(_resolve_url(scenario, step.navigate))
+        source_url = step.navigate_url()
+        assert source_url is not None  # guaranteed by command_kind()
+        url = _resolve_url(scenario, source_url)
+        type_override = step.navigate_type_override()
+        animate = (
+            scenario.config.chrome.type_on_navigate
+            if type_override is None
+            else type_override
+        )
+        if chrome is not None and scenario.config.chrome.show_url and animate:
+            await chrome.set_url(page, url, animate=True)
+
+        await recorder.navigate(url)
+
+        # An instant update happens after goto so redirects are reflected.  The
+        # animated variant is typed before goto, then ensure synchronizes the
+        # final page URL after the new document has loaded.
+        if chrome is not None and scenario.config.chrome.show_url and not animate:
+            await chrome.set_url(page, page.url, animate=False)
         await overlay.ensure(page)
+        if chrome is not None:
+            await chrome.ensure(page)
         return
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
@@ -177,7 +209,6 @@ async def _render_step(
     if cached.action != "waitFor" and not await reuse_is_valid(page, cached):
         raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile`")
 
-    await overlay.ensure(page)
     if cached.action == "click":
         await recorder.click(cached.target)
     elif cached.action == "hover":

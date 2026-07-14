@@ -42,6 +42,8 @@ def substitute_scenario_values(raw: dict, env: Mapping[str, str]) -> dict:
         nav = step.get("navigate")
         if isinstance(nav, str):
             step["navigate"] = substitute_env(nav, env)
+        elif isinstance(nav, dict) and isinstance(nav.get("url"), str):
+            nav["url"] = substitute_env(nav["url"], env)
         enter = step.get("enterText")
         if isinstance(enter, dict) and isinstance(enter.get("text"), str):
             enter["text"] = substitute_env(enter["text"], env)

@@ -28,8 +28,9 @@ login.scenario.yaml ──compile (AI)──▶ login.compiled.yaml ──render
   whose intent is unchanged are reused (no LLM); only new/changed steps are resolved.
   Editing only narration (`say`) needs no browser at all.
 - **`render`** — no LLM. Reads the frozen actions, animates a synthetic cursor
-  (move, ripple, highlight), records video, and muxes the TTS narration into the
-  final `.mp4`.
+  (move, ripple, highlight), optionally draws a macOS-style browser bar and types
+  navigation URLs into it, records video, and muxes the TTS narration into the final
+  `.mp4`.
 
 Both the source and the compiled file are meant to be committed to git, so `render`
 is reproducible in CI and a diff shows when a page changed and a reference drifted.
@@ -79,6 +80,10 @@ config:
   viewport: { width: 1440, height: 900 }
   locale: en-US
   tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+  chrome:
+    enabled: true
+    showUrl: true
+    typeOnNavigate: true
 steps:
   - say: "Welcome. I'll show you how to log in to the system."
   - navigate: /login
@@ -92,6 +97,34 @@ Commands: `say` (narration only), `teach` (the voice reads a whole guiding sente
 and the bot performs the action extracted from it), `enterText`, `navigate`, `wait`
 (seconds or an element condition), plus `click`/`hover` as explicit escape hatches.
 Substitute secrets with `${ENV_VAR}` — they never land in the repo.
+
+The optional `config.chrome` block is render-only and defaults to `enabled: false`,
+so existing scenarios keep their current output. When enabled, `showUrl` controls
+whether the address pill is visible and `typeOnNavigate` controls whether a string
+`navigate` step types its URL character by character before loading it. Both default
+to `true`. Appearance can be overridden with `height` (default `56`), `barColor`
+(`#f3f4f6`), `textColor` (`#374151`), `radius` (`12`), `showLock` (`true`),
+`closeColor` (`#ff5f57`), `minimizeColor` (`#febc2e`), and `maximizeColor`
+(`#28c840`). These cosmetic settings stay outside the compile hash, so changing them
+does not require recompilation.
+
+`navigate` also accepts an object when one step should override the default:
+
+```yaml
+- navigate: "/login"                         # inherits typeOnNavigate
+- navigate: { url: "/login", type: true }    # animate, then load
+- navigate: { url: "/login", type: false }   # load, then update the pill instantly
+```
+
+`type` chooses animated versus instant display; it does not hide the URL. With
+`showUrl: false`, the pill and typing delay are both disabled while the rest of the
+bar remains visible. The injected bar reserves `height` pixels using top padding on
+`<html>`. This intentionally changes the page's available layout area, but the video
+remains exactly the configured `viewport` size: no desktop background or outer frame
+is added. The displayed address is synchronized from `page.url` after navigation and
+on the next `ensure`, not continuously through the History API. Because the complete
+URL (including query and fragment) can appear in the video, disable `showUrl` for
+secret-bearing URLs.
 
 ## Status
 

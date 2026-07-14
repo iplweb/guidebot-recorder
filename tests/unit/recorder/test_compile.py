@@ -3,8 +3,9 @@ import textwrap
 import pytest
 from playwright.async_api import async_playwright
 
+from guidebot_recorder.models.scenario import Step
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.compile import run_compile
+from guidebot_recorder.recorder.compile import _short, run_compile
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 
@@ -94,3 +95,36 @@ async def test_compile_force_reresolves(tmp_path, page):
     forced = MockReasoner()
     await run_compile(path, page, forced, force=True)
     assert forced.calls == 1  # --force ignoruje cache i woła reasonera ponownie
+
+
+async def test_compile_navigates_with_object_form_and_ignores_render_type_flag(tmp_path, page):
+    path = tmp_path / "object-navigate.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Object navigate
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - navigate:
+                  url: "data:text/html,<h1>Object navigation</h1>"
+                  type: true
+            """
+        ),
+        encoding="utf-8",
+    )
+    reasoner = MockReasoner()
+
+    await run_compile(path, page, reasoner)
+
+    assert await page.get_by_role("heading", name="Object navigation").count() == 1
+    assert reasoner.calls == 0
+
+
+def test_compile_short_description_uses_object_navigate_url():
+    step = Step.model_validate(
+        {"navigate": {"url": "https://example.com/login", "type": True}}
+    )
+
+    assert _short(step) == "https://example.com/login"

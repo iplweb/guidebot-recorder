@@ -81,3 +81,26 @@ def test_scenario_values_missing_env_raises():
     raw = {"steps": [{"navigate": "${NOPE}"}]}
     with pytest.raises(KeyError):
         substitute_scenario_values(raw, {})
+
+
+def test_scenario_values_substitutes_object_navigate_url_only():
+    raw = {
+        "steps": [
+            {"navigate": {"url": "${BASE}/login", "type": False}},
+        ]
+    }
+
+    out = substitute_scenario_values(raw, {"BASE": "https://example.com"})
+
+    assert out["steps"][0]["navigate"] == {
+        "url": "https://example.com/login",
+        "type": False,
+    }
+    assert raw["steps"][0]["navigate"]["url"] == "${BASE}/login"
+
+
+def test_scenario_values_object_navigate_missing_env_raises():
+    raw = {"steps": [{"navigate": {"url": "${NOPE}", "type": True}}]}
+
+    with pytest.raises(KeyError):
+        substitute_scenario_values(raw, {})

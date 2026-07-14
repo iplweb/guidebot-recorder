@@ -86,11 +86,27 @@ config:
   viewport: { width: 1280, height: 720 }  # = video size; required for repeatability
   locale: pl-PL                        # Playwright context locale; feeds into configHash
   tts: { provider: elevenlabs, voice: "pl-PL-Marek", lang: pl-PL }
+  chrome:                              # optional, render-only browser bar
+    enabled: false                     # omit/false = no bar and no layout change
+    showUrl: true                      # show the address pill
+    typeOnNavigate: true               # type before goto unless the step overrides it
+    height: 56
+    barColor: "#f3f4f6"
+    textColor: "#374151"
+    radius: 12
+    showLock: true
+    closeColor: "#ff5f57"
+    minimizeColor: "#febc2e"
+    maximizeColor: "#28c840"
 ```
 `viewport` is required — it determines both the repeatability of references and the
 size of the `.mp4`. `locale` sets the browser context locale (and the application
-language, if driven by locale/header) and feeds into `configHash` (§4.3). **Unknown
-keys** in `config` and in steps = **hard error** (closed schema).
+language, if driven by locale/header) and feeds into `configHash` (§4.3).
+`chrome` is a cosmetic, render-only block. Omitting it is equivalent to
+`enabled: false`; when enabled, omitted `showUrl` and `typeOnNavigate` both default
+to `true`, and the remaining fields use the values shown above. None of its fields
+feeds into `configHash`, so changing the bar does not require recompilation.
+**Unknown keys** in `config`, `chrome`, and steps = **hard error** (closed schema).
 
 ### 3.2 Commands
 
@@ -108,8 +124,21 @@ keys** in `config` and in steps = **hard error** (closed schema).
 - optional accompanying fields: `say` (custom narration for `enterText`/`click`/
   `hover`), `cachedAction` (added by compile).
 
+`navigate` has two backward-compatible forms:
+```yaml
+- navigate: "https://www.onet.pl"                         # uses typeOnNavigate
+- navigate: { url: "https://www.onet.pl", type: true }   # force animated typing
+- navigate: { url: "https://www.onet.pl", type: false }  # force instant update
+```
+The object form is still the single `navigate` command. An omitted object `type`
+inherits `config.chrome.typeOnNavigate`. `type` selects **animated versus instant**
+display; it does not hide the URL. If `chrome.enabled` or `chrome.showUrl` is false,
+typing is skipped and adds no delay. Compile always performs the same plain `goto`
+and never installs the render-only browser bar.
+
 **Variable substitution:** `${ENV_VAR}` is expanded **only in the value fields**
-`enterText.text` and `navigate`. **Forbidden in narrative/instruction fields**
+`enterText.text` and the string `navigate` / object `navigate.url`.
+**Forbidden in narrative/instruction fields**
 (`say`, `teach`, `enterText.into`, `wait.until`) — otherwise a secret could be
 spoken by the narrator, land in the audio cache key (§8), the resolver prompt,
 or `compiledFrom`. A literal `${` is written as `$${`. Expansion happens in
@@ -259,7 +288,8 @@ Reasoner's strict JSON covers **the entire** union.
 
 **`configHash`:** a canonical projection of `config` — `viewport.{width,height}`,
 `locale` (§3.1), `tts.lang` — serialized with sorted keys → SHA-256;
-`configHashVersion`.
+`configHashVersion`. Render-only cosmetics (`cursor` and `chrome`, including
+`chrome.height`) are deliberately excluded and never trigger recompilation.
 
 **`expect`:** an optional field **accompanying the step in the source** (overrides
 the compile heuristic) **and** copied into `cachedAction`. Source > heuristic;
@@ -366,7 +396,7 @@ the only place where the LLM may be called.
   nor in-place cache — those are exclusively the YAML+compile path. (A full scripting
   frontend with reference freezing — deferred.)
 
-## 7. Cursor and click visualization — DOM overlay
+## 7. Cursor, click, and browser chrome visualization — DOM overlays
 
 Playwright drives programmatically and **does not render** the cursor. We inject an
 **artificial cursor** (HTML/SVG) + animations: smooth movement to the target, a
@@ -395,6 +425,42 @@ the action:
 After `navigate`, always `navigation`. This is an **explicit completion contract** —
 without guessing: it determines the page state seen by the next step's resolver
 (compile) and the stability (render).
+
+### 7.2 Browser chrome and URL typing
+
+When `config.chrome.enabled` is true, render installs a second DOM controller beside
+the cursor `Overlay`. It draws a fixed, macOS-style top bar with traffic-light dots
+and, when `showUrl` is true, an address pill. The bar has `pointer-events: none` and
+a high z-index below the synthetic cursor, so it is visible without intercepting
+actions. `showLock` displays a lock only for an `https:` address.
+
+The controller uses the same lifecycle as the cursor: an init script installs it in
+future documents, and render calls `ensure` after navigation and before recorded
+steps to recreate DOM removed by a full load or SPA rerender. With `showUrl` enabled,
+`ensure` also synchronizes the pill from Playwright's current `page.url`. This catches
+a click/SPA URL change at the next ensure; there is intentionally no live
+`pushState`/`replaceState`/`popstate`/hash observer in this version.
+
+For a `navigate` step, the effective typing flag is the object's `type` when present,
+otherwise `config.chrome.typeOnNavigate`:
+
+1. If effective typing and `showUrl` are true, `set_url(target, animate=True)` types
+   character by character in JavaScript. Python awaits its Promise before `goto`.
+2. Playwright performs the real navigation.
+3. Cursor and chrome are re-ensured; chrome synchronizes the final `page.url`,
+   including redirects. With effective typing false, the URL appears instantly only
+   after navigation. With `showUrl: false`, no URL or artificial typing delay occurs.
+
+The bar reserves `chrome.height` pixels by applying top padding to `<html>`, keeping
+normal page content below it. This is an explicit layout compromise: it may affect
+responsive or fixed-position content, but it does not expand the recording canvas.
+The output remains a rectangular video exactly equal to `config.viewport`; there is
+no four-sided browser frame, desktop background, or rounded lower window corners.
+Changing any chrome setting is cosmetic and outside `configHash`.
+
+The pill displays the complete URL, including query and fragment. Scenarios whose
+URLs contain credentials or tokens must use `showUrl: false`; automatic redaction is
+out of scope.
 
 ## 8. Narration (TTS) and audio assembly
 
@@ -454,6 +520,7 @@ guidebot_recorder/         # application package (uv + pyproject)
   recorder/    # Recorder (Python API) + YAML runner + readiness rule
   resolver/    # PageContext (candidates+geometry) + Reasoner (codex/...) + validation
   overlay/     # injected JS: artificial cursor + animations (re-inject)
+  chrome/      # injected JS: optional browser bar + URL typing (re-inject)
   tts/         # TTS interface + providers + cache
   video/       # recording + audio bed + mux (ffmpeg/ffprobe)
   cli.py       # compile / render / validate
@@ -475,7 +542,11 @@ guidebot_recorder/         # application package (uv + pyproject)
   `cachedAction` preserves comments/ordering/the YAML subset, atomic write);
   Reasoner with a **mocked agent**; compile-time validation (uniqueness, exact,
   visibility/enabled, type consistency); fingerprint/drift; the "one command
-  per step" validator.
+  per step" validator; string/object `navigate` and chrome defaults/hash exclusion.
+- **DOM overlay (real headless Chromium):** chrome injection and computed
+  `pointer-events`/z-index, URL text, awaited typing to the complete string,
+  re-injection after navigation, recreation after an SPA wipe, URL synchronization
+  on `ensure`, and `<html>` top padding equal to the configured height.
 - **Integration:** static **HTML in the repo** + Playwright → `compile` + `render`.
   **Strong** assertions, **not just "the mp4 exists"**: a trace of the executed actions,
   the identity of the clicked element, the presence of the cursor in sampled frames,
@@ -498,9 +569,13 @@ with a hint to install it or to point to another backend (never a silent fallbac
 - `--auto-heal` (reserved, "not implemented").
 - Additional Reasoner providers + CDP-attach (until the default `codex exec` works).
 - Multi-tab / iframe scenarios.
+- Live browser-URL observation through the History API, `popstate`, and hash events;
+  this version reconciles `page.url` only on explicit navigation and `ensure`.
+- A four-sided browser/window frame, desktop background, rounded lower corners, or
+  an ffmpeg-expanded canvas; the video remains exactly the configured viewport.
 - Exact audio post-sync (stretching to markers, frame-accurate sync).
 - Masking of sensitive values on screen/captions (v1 protects only the repo via
-  `${ENV_VAR}`).
+  `${ENV_VAR}`), including automatic redaction of URL query strings/fragments.
 - Dictating narration during `record`.
 
 ## 15. Target environment — requirements (regarding `compile` and repeatable `render`)

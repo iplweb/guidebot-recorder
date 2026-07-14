@@ -15,9 +15,14 @@ config:
   viewport: { width: 1440, height: 900 }
   locale: pl-PL
   tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+  chrome:
+    enabled: true
+    showUrl: true
+    typeOnNavigate: true
 steps:
   - say: "I'll show you how to reach the login on the Onet portal. We start on the home page."
 
+  # String form inherits config.chrome.typeOnNavigate.
   - navigate: "https://www.onet.pl"
 
   # The consent banner appears after a short delay — wait until it is visible.
