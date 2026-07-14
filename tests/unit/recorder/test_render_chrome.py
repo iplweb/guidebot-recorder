@@ -81,9 +81,8 @@ async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = Tr
         "navigate",
         0,
         None,
-        {},
-        [],
         0.0,
+        {},
     )
     return events
 

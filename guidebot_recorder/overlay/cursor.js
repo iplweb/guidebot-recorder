@@ -55,14 +55,18 @@
       return;
     }
     mountScheduled = true;
-    document.addEventListener(
-      "DOMContentLoaded",
-      () => {
-        mountScheduled = false;
-        ensure();
-      },
-      { once: true },
-    );
+    const mount = () => {
+      mountScheduled = false;
+      ensure();
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", mount, { once: true });
+    } else {
+      // A freshly opened about:blank Page can run an init script after its
+      // DOMContentLoaded event while documentElement is not exposed yet.  Do
+      // not leave the cursor permanently unmounted in that race.
+      window.setTimeout(mount, 0);
+    }
   }
 
   function addCursorGraphic(cursor) {

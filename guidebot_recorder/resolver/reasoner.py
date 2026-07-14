@@ -42,6 +42,7 @@ _CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.Cont
 class ReasonerResult:
     action: ActionKind
     target: Target
+    input_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,14 +127,32 @@ Security rules:
 - Candidate input is an explicit redacted projection and contains no form-field
   values. Do not infer or request such values.
 
+Action rules:
+- When the trusted author instruction asks to enter a literal text value, return
+  action "type" and copy that exact non-empty value into "inputText". When the
+  caller only describes a target field, inputText may be omitted because an
+  explicit enterText step supplies its value outside this redacted prompt.
+  Never derive inputText from candidate data.
+- Never return a password, token, secret, or `${{ENV_VAR}}` placeholder as inputText.
+  Return a no_action error telling the author to use enterText with an environment
+  variable instead.
+- Return the requested page action, such as clicking the control that opens a
+  pop-up. Pop-up discovery and window switching are automatic; never model the
+  switch or focus change as a separate action.
+
 Return exactly one JSON object between the two literal frame markers. Do not
 emit Markdown or text outside the frame. These are concrete format examples;
 choose fields and values from the instruction and candidate data instead of
 copying the examples.
 
-Valid success example:
+Valid click success example:
 {_FRAME_START}
 {{"action":"click","target":{{"strategy":"role","role":"button","name":"Example button","exact":true}}}}
+{_FRAME_END}
+
+Valid type success example:
+{_FRAME_START}
+{{"action":"type","target":{{"strategy":"role","role":"textbox","name":"E-mail","exact":true}},"inputText":"user@example.com"}}
 {_FRAME_END}
 
 Valid error example, used when resolution is impossible:
@@ -164,7 +183,17 @@ def _response_schema_json() -> str:
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "action": {"enum": sorted(_ACTIONS)},
+                    "action": {"const": "type"},
+                    "target": target_schema,
+                    "inputText": {"type": "string", "minLength": 1, "pattern": r"\S"},
+                },
+                "required": ["action", "target"],
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "action": {"enum": sorted(_ACTIONS - {"type"})},
                     "target": target_schema,
                 },
                 "required": ["action", "target"],
@@ -245,16 +274,31 @@ def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerEr
             raise ValueError("Reasoner error message must be a string")
         return ReasonerError(reason=cast(ErrorReason, reason), message=message)
 
-    if set(payload) != {"action", "target"}:
-        raise ValueError("Success response must contain only action and target")
-    action = payload["action"]
+    action = payload.get("action")
     if not isinstance(action, str) or action not in _ACTIONS:
         raise ValueError(f"Unsupported reasoner action: {action!r}")
+
+    input_text: str | None = None
+    if action == "type":
+        if set(payload) not in ({"action", "target"}, {"action", "target", "inputText"}):
+            raise ValueError("Type response contains unsupported fields")
+        if "inputText" in payload:
+            raw_input_text = payload["inputText"]
+            if not isinstance(raw_input_text, str) or not raw_input_text.strip():
+                raise ValueError("Type response inputText must be a non-empty string")
+            input_text = raw_input_text
+    elif set(payload) != {"action", "target"}:
+        raise ValueError("Non-type response must contain only action and target")
+
     try:
         target = _TARGET_ADAPTER.validate_python(payload["target"], strict=True)
     except ValidationError as exc:
         raise ValueError(f"Invalid Target returned by Codex: {exc}") from exc
-    return ReasonerResult(action=cast(ActionKind, action), target=target)
+    return ReasonerResult(
+        action=cast(ActionKind, action),
+        target=target,
+        input_text=input_text,
+    )
 
 
 async def _run_codex_cancellable(prompt: str) -> str:

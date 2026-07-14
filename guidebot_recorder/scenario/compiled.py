@@ -36,7 +36,30 @@ def load_compiled(path: Path | str) -> CompiledScenario:
     path = Path(path)
     yaml = YAML(typ="safe")
     data = yaml.load(path.read_text(encoding="utf-8"))
+    _mark_missing_versions_as_legacy(data)
     return CompiledScenario.model_validate(data)
+
+
+def _mark_missing_versions_as_legacy(data: object) -> None:
+    """Keep parsing old sidecars without treating them as current artifacts.
+
+    Pydantic defaults are convenient for constructing a new model in Python, but
+    applying today's default to a version field omitted by an old YAML file would
+    make the migration check ineffective.  Missing on-disk versions mean schema v1.
+    """
+
+    if not isinstance(data, dict):
+        return
+    data.setdefault("compiler_version", 1)
+    actions = data.get("actions")
+    if not isinstance(actions, list):
+        return
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        fingerprint = action.get("fingerprint")
+        if isinstance(fingerprint, dict):
+            fingerprint.setdefault("compiler_version", 1)
 
 
 def write_compiled(path: Path | str, compiled: CompiledScenario) -> None:

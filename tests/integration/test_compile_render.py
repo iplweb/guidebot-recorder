@@ -115,6 +115,8 @@ async def test_end_to_end_compile_then_render(tmp_path):
         assert teach_ca.identity.tag == "button"
         assert enter_ca.action == "type"
         assert enter_ca.identity.tag == "input"
+        assert enter_ca.input_text is None
+        assert "user@x.pl" not in compiled_path(path).read_text(encoding="utf-8")
         assert reasoner.calls == 2
 
         # --- re-compile: reuse, zero wywołań reasonera ---

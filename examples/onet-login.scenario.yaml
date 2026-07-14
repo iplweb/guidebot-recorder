@@ -8,8 +8,8 @@
 #
 # Notes:
 # - The cookie banner may live in a cross-origin iframe (iframe support is deferred).
-# - "Log in" opens a real pop-up window (multi-window support is deferred): the click
-#   is recorded, but the pop-up's contents are not yet driven.
+# - "Log in" opens a real pop-up window. Guidebot follows it automatically.
+# - Literal values may be typed by `teach`; use `enterText` + ${ENV_VAR} for secrets.
 config:
   title: "Onet.pl — how to reach the login"
   viewport: { width: 1440, height: 900 }
@@ -35,4 +35,8 @@ steps:
 
   - teach: "To log in, we click the account icon in the top-right corner of the page"
 
-  - say: "The login window opens in a separate pop-up window, where we enter the email and password."
+  - say: "The login window opens in a separate pop-up window, which Guidebot follows automatically."
+
+  - teach: "Switch to the pop-up and type koparka@poczta.wp.pl into the e-mail field"
+
+  - say: "Thank you for your attention."

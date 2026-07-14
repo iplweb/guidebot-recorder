@@ -3,11 +3,13 @@ import textwrap
 import pytest
 from playwright.async_api import async_playwright
 
+from guidebot_recorder.models.action import COMPILER_VERSION
+from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.scenario import Step
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.compile import _short, run_compile
+from guidebot_recorder.recorder.compile import _short, compile_up_to_date, run_compile
 from guidebot_recorder.resolver.reasoner import ReasonerResult
-from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 
 SCENARIO = textwrap.dedent(
     """\
@@ -18,6 +20,18 @@ SCENARIO = textwrap.dedent(
     steps:
       - navigate: "data:text/html,<button>Zaloguj</button>"
       - teach: "kliknij Zaloguj"
+    """
+)
+
+TEACH_TYPE_SCENARIO = textwrap.dedent(
+    """\
+    config:
+      title: Wpisywanie
+      viewport: {width: 800, height: 600}
+      tts: {provider: edge, voice: v, lang: pl-PL}
+    steps:
+      - navigate: "data:text/html,<label for=email>E-mail</label><input id=email>"
+      - teach: "wpisz demo@example.com w pole E-mail"
     """
 )
 
@@ -97,7 +111,9 @@ async def test_compile_force_reresolves(tmp_path, page):
     assert forced.calls == 1  # --force ignoruje cache i woła reasonera ponownie
 
 
-async def test_compile_navigates_with_object_form_and_ignores_render_type_flag(tmp_path, page):
+async def test_compile_navigates_with_object_form_and_ignores_render_type_flag(
+    tmp_path, page
+):
     path = tmp_path / "object-navigate.scenario.yaml"
     path.write_text(
         textwrap.dedent(
@@ -128,3 +144,248 @@ def test_compile_short_description_uses_object_navigate_url():
     )
 
     assert _short(step) == "https://example.com/login"
+
+
+async def test_teach_type_reprompts_missing_input_text_before_filling(tmp_path, page):
+    path = tmp_path / "type.scenario.yaml"
+    path.write_text(TEACH_TYPE_SCENARIO, encoding="utf-8")
+    target = RoleTarget(role="textbox", name="E-mail", exact=True)
+
+    class RetryingReasoner:
+        def __init__(self):
+            self.calls = 0
+
+        async def resolve(self, instruction, candidates):
+            self.calls += 1
+            if self.calls == 1:
+                return ReasonerResult("type", target)
+            return ReasonerResult("type", target, input_text="demo@example.com")
+
+    reasoner = RetryingReasoner()
+    await run_compile(path, page, reasoner)
+
+    compiled = load_compiled(compiled_path(path))
+    action = compiled.actions[1]
+    assert reasoner.calls == 2
+    assert action is not None and action.input_text == "demo@example.com"
+    assert await page.locator("#email").input_value() == "demo@example.com"
+
+
+@pytest.mark.parametrize(
+    ("input_text", "message"),
+    [
+        (None, "nie zwrócił niepustego inputText"),
+        ("fabricated@example.com", "nie jest literalnym fragmentem"),
+    ],
+)
+async def test_teach_type_rejects_missing_or_invented_text_after_reprompts(
+    tmp_path,
+    page,
+    input_text,
+    message,
+):
+    path = tmp_path / "invalid-type.scenario.yaml"
+    path.write_text(TEACH_TYPE_SCENARIO, encoding="utf-8")
+    target = RoleTarget(role="textbox", name="E-mail", exact=True)
+
+    class InvalidReasoner:
+        def __init__(self):
+            self.calls = 0
+
+        async def resolve(self, instruction, candidates):
+            self.calls += 1
+            return ReasonerResult("type", target, input_text=input_text)
+
+    reasoner = InvalidReasoner()
+    with pytest.raises(RuntimeError, match=message):
+        await run_compile(path, page, reasoner)
+
+    assert reasoner.calls == 2
+    assert await page.locator("#email").input_value() == ""
+
+
+async def test_teach_type_rejects_sensitive_literal_before_typing(tmp_path, page):
+    path = tmp_path / "sensitive-type.scenario.yaml"
+    path.write_text(
+        TEACH_TYPE_SCENARIO.replace(
+            "wpisz demo@example.com w pole E-mail",
+            "wpisz hasło hunter2 w pole E-mail",
+        ),
+        encoding="utf-8",
+    )
+    target = RoleTarget(role="textbox", name="E-mail", exact=True)
+
+    class SensitiveReasoner:
+        def __init__(self):
+            self.calls = 0
+
+        async def resolve(self, instruction, candidates):
+            self.calls += 1
+            return ReasonerResult("type", target, input_text="hunter2")
+
+    reasoner = SensitiveReasoner()
+    with pytest.raises(RuntimeError, match="wartości wrażliwe"):
+        await run_compile(path, page, reasoner)
+
+    assert reasoner.calls == 2
+    assert await page.locator("#email").input_value() == ""
+
+
+async def test_popup_opened_during_reasoning_is_unexpected_and_click_is_not_run(tmp_path, page):
+    path = tmp_path / "unexpected-popup.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Popup
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - navigate: "data:text/html,<button onclick='this.dataset.clicked=1'>Cel</button>"
+              - teach: "kliknij Cel"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    class PopupDuringReasoning:
+        async def resolve(self, instruction, candidates):
+            await page.evaluate("() => { window.open('about:blank'); }")
+            return ReasonerResult("click", RoleTarget(role="button", name="Cel", exact=True))
+
+    with pytest.raises(RuntimeError, match="podczas rozwiązywania.*przed akcją click"):
+        await run_compile(path, page, PopupDuringReasoning())
+
+    assert await page.get_by_role("button", name="Cel").get_attribute("data-clicked") is None
+
+
+async def test_old_compiler_version_is_not_up_to_date(tmp_path, page):
+    path = tmp_path / "login.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+    await run_compile(path, page, MockReasoner())
+
+    cpath = compiled_path(path)
+    compiled = load_compiled(cpath)
+    stale = compiled.model_copy(update={"compiler_version": COMPILER_VERSION - 1})
+    write_compiled(cpath, stale)
+
+    assert compile_up_to_date(path) is False
+
+
+async def test_old_action_fingerprint_is_not_up_to_date(tmp_path, page):
+    path = tmp_path / "login.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+    await run_compile(path, page, MockReasoner())
+
+    cpath = compiled_path(path)
+    compiled = load_compiled(cpath)
+    action = compiled.actions[1]
+    stale_fingerprint = action.fingerprint.model_copy(
+        update={"compiler_version": COMPILER_VERSION - 1}
+    )
+    stale_action = action.model_copy(update={"fingerprint": stale_fingerprint})
+    stale = compiled.model_copy(update={"actions": [None, stale_action]})
+    write_compiled(cpath, stale)
+
+    assert compile_up_to_date(path) is False
+
+
+def test_targetless_scenario_requires_current_aligned_sidecar(tmp_path):
+    path = tmp_path / "narration.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Narracja
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - say: "Cześć"
+            """
+        ),
+        encoding="utf-8",
+    )
+    cpath = compiled_path(path)
+
+    assert compile_up_to_date(path) is False
+
+    current = CompiledScenario(source=path.name, actions=[None])
+    write_compiled(cpath, current)
+    assert compile_up_to_date(path) is True
+
+    write_compiled(
+        cpath,
+        current.model_copy(update={"compiler_version": COMPILER_VERSION - 1}),
+    )
+    assert compile_up_to_date(path) is False
+
+    write_compiled(cpath, current.model_copy(update={"actions": []}))
+    assert compile_up_to_date(path) is False
+
+
+async def test_compile_rejects_second_popup_in_session(tmp_path, page):
+    second = tmp_path / "second.html"
+    second.write_text("<h1>Drugi popup</h1>", encoding="utf-8")
+    first = tmp_path / "first.html"
+    first.write_text(
+        "<button onclick=\"window.open('second.html')\">Otwórz drugi</button>",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.html"
+    main.write_text(
+        "<button onclick=\"window.open('first.html')\">Otwórz pierwszy</button>",
+        encoding="utf-8",
+    )
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: t
+          viewport: {{width: 800, height: 600}}
+          tts: {{provider: edge, voice: v, lang: pl-PL}}
+        steps:
+          - navigate: "{main.resolve().as_uri()}"
+          - teach: "otwórz pierwszy popup"
+          - teach: "otwórz drugi popup"
+        """
+    )
+    path = tmp_path / "two-popups.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+
+    class TwoPopupReasoner:
+        async def resolve(self, instruction, candidates):
+            name = "Otwórz pierwszy" if "pierwszy" in instruction else "Otwórz drugi"
+            return ReasonerResult("click", RoleTarget(role="button", name=name, exact=True))
+
+    with pytest.raises(RuntimeError, match="co najwyżej jeden popup"):
+        await run_compile(path, page, TwoPopupReasoner())
+
+
+async def test_compile_rejects_two_popups_opened_by_one_click(tmp_path, page):
+    main = tmp_path / "main.html"
+    main.write_text(
+        "<button onclick=\"window.open('about:blank'); window.open('about:blank')\">"
+        "Otwórz dwa</button>",
+        encoding="utf-8",
+    )
+    path = tmp_path / "simultaneous-popups.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            config:
+              title: t
+              viewport: {{width: 800, height: 600}}
+              tts: {{provider: edge, voice: v, lang: pl-PL}}
+            steps:
+              - navigate: "{main.resolve().as_uri()}"
+              - teach: "otwórz dwa popupy"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    class TwoAtOnceReasoner:
+        async def resolve(self, instruction, candidates):
+            return ReasonerResult("click", RoleTarget(role="button", name="Otwórz dwa", exact=True))
+
+    with pytest.raises(RuntimeError, match="dokładnie jeden popup"):
+        await run_compile(path, page, TwoAtOnceReasoner())

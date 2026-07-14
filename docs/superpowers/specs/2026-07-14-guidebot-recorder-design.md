@@ -150,7 +150,7 @@ The value of `teach` is a **whole guide sentence** ("To log in, click the
 Log in button in the top-right corner"). The narrator speaks it in full, while the
 compiler:
 1. **extracts the executable part** from the sentence,
-2. **infers the action type** (click / hover),
+2. **infers the action type** (click / hover / type),
 3. **resolves the target** into a semantic reference (§5),
 4. writes everything into `cachedAction`.
 
@@ -159,8 +159,10 @@ Limitations (the resolver contract must signal them):
 - **>1 action** (e.g. "click A, then B") → compile error "split into steps";
 - **a purely spatial instruction without a semantic handle** → see §5.5.
 
-`teach` handles clicks/hovers. **Typing** is not done via `teach` (no explicit
-value) — that is what `enterText` is for.
+`teach` handles clicks, hovers, and literal text entry when the value appears
+verbatim in the trusted instruction. The compiler freezes that literal in the
+sidecar. Use `enterText` for explicit values and always use `enterText` + an
+`${ENV_VAR}` placeholder for secrets.
 
 ### 3.4 `wait`
 Discriminated form:
@@ -192,7 +194,7 @@ steps:
       exact: true
       identity: { tag: button, ancestryDigest: "h7f3…", identityVersion: 1 }
       expect: navigation
-      fingerprint: { commandKind: teach, compilerVersion: 1, compiledFrom: "To log in, click the Log in button in the top-right corner", expect: navigation, configHash: "c19a…" }
+      fingerprint: { commandKind: teach, compilerVersion: 2, compiledFrom: "To log in, click the Log in button in the top-right corner", expect: navigation, configHash: "c19a…" }
   - enterText: { into: "email field", text: "${DEMO_EMAIL}" }
     say: "Now I'm typing in my email address."
     cachedAction:
@@ -203,7 +205,7 @@ steps:
       exact: true
       identity: { tag: input, testid: "email", ancestryDigest: "a02c…", identityVersion: 1 }
       expect: none
-      fingerprint: { commandKind: enterText, compilerVersion: 1, compiledFrom: "email field", expect: none, configHash: "c19a…" }
+      fingerprint: { commandKind: enterText, compilerVersion: 2, compiledFrom: "email field", expect: none, configHash: "c19a…" }
 ```
 
 ## 4. In-place compilation (single file)
@@ -568,7 +570,8 @@ with a hint to install it or to point to another backend (never a silent fallbac
 - The "Python inside YAML" hybrid.
 - `--auto-heal` (reserved, "not implemented").
 - Additional Reasoner providers + CDP-attach (until the default `codex exec` works).
-- Multi-tab / iframe scenarios.
+- Named/multiple-tab and iframe scenarios. One automatically followed pop-up
+  lifecycle is specified by `2026-07-14-popup-multiwindow-design.md`.
 - Live browser-URL observation through the History API, `popstate`, and hash events;
   this version reconciles `page.url` only on explicit navigation and `ensure`.
 - A four-sided browser/window frame, desktop background, rounded lower corners, or

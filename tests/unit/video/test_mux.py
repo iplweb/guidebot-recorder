@@ -13,7 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from guidebot_recorder.video.mux import mux, probe_duration
+from guidebot_recorder.video.mux import (
+    compose_popup_video,
+    mux,
+    mux_preencoded,
+    probe_duration,
+)
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -66,6 +71,92 @@ def _make_audio(path: Path, seconds: float) -> None:
     )
 
 
+def _make_color_video(path: Path, color: str, seconds: float) -> None:
+    """Write a solid-colour H.264 video."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={color}:duration={seconds}:size=320x240:rate=25",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _make_main_color_timeline(path: Path) -> None:
+    """Write red (0-1s), green (1-2s), then blue (2-3s)."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:duration=1:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x00ff00:duration=1:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:duration=1:size=320x240:rate=25",
+            "-filter_complex",
+            "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[outv]",
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _sample_rgb(path: Path, at: float) -> tuple[int, int, int]:
+    """Decode one frame and return its average RGB colour."""
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-ss",
+            str(at),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1:1:flags=area",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert len(proc.stdout) == 3
+    return tuple(proc.stdout)
+
+
+def _assert_rgb(actual: tuple[int, int, int], expected: tuple[int, int, int]) -> None:
+    assert actual == pytest.approx(expected, abs=20)
+
+
 def _stream_types(path: Path) -> list[str]:
     """Return the codec_type of each stream in *path* (via ffprobe)."""
     proc = subprocess.run(
@@ -84,6 +175,27 @@ def _stream_types(path: Path) -> list[str]:
         text=True,
     )
     return proc.stdout.split()
+
+
+def _video_codec(path: Path) -> str:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
 
 
 def test_probe_duration_matches(tmp_path: Path) -> None:
@@ -126,3 +238,75 @@ def test_mux_shortest_clips_to_shorter_stream(tmp_path: Path) -> None:
 
     # -shortest → output no longer than the 1s audio.
     assert probe_duration(out) == pytest.approx(1.0, abs=0.5)
+
+
+def test_compose_popup_video_switches_main_popup_main(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0)
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    assert _video_codec(out) == "h264"
+    _assert_rgb(_sample_rgb(out, 0.5), (255, 0, 0))
+    _assert_rgb(_sample_rgb(out, 1.5), (255, 255, 0))
+    _assert_rgb(_sample_rgb(out, 2.5), (0, 0, 255))
+
+
+def test_compose_popup_video_omits_tail_when_popup_stays_open(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 2.0)
+
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=3.0)
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_rgb(out, 0.5), (255, 0, 0))
+    _assert_rgb(_sample_rgb(out, 1.5), (255, 255, 0))
+    # The last second must still be the popup, not main's blue tail.
+    _assert_rgb(_sample_rgb(out, 2.5), (255, 255, 0))
+
+
+def test_compose_popup_video_pads_bounded_encoder_startup_gap(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 0.92)
+
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0)
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_rgb(out, 1.1), (255, 255, 0))
+    _assert_rgb(_sample_rgb(out, 1.8), (255, 255, 0))
+    _assert_rgb(_sample_rgb(out, 2.5), (0, 0, 255))
+
+
+def test_compose_popup_video_rejects_large_encoder_gap(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_video(main, 4.0)
+    _make_color_video(popup, "yellow", 0.5)
+
+    with pytest.raises(ValueError, match="startup gap"):
+        compose_popup_video(main, popup, out, opened_at=0.5, closed_at=3.5)
+
+
+def test_mux_preencoded_adds_audio_without_changing_video_codec(tmp_path: Path) -> None:
+    video = tmp_path / "v.mp4"
+    audio = tmp_path / "a.wav"
+    out = tmp_path / "out.mp4"
+    _make_video(video, 2.0)
+    _make_audio(audio, 2.0)
+
+    mux_preencoded(video, audio, out)
+
+    assert _video_codec(out) == "h264"
+    assert _stream_types(out) == ["video", "audio"]
+    assert probe_duration(out) == pytest.approx(2.0, abs=0.4)
