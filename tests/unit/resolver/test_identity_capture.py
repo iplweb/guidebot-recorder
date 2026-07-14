@@ -77,3 +77,77 @@ async def test_ancestry_digest_is_stable_sha256_of_tag_role_pairs(
     assert same_pairs.ancestry_digest == first.ancestry_digest
     assert different_tag.ancestry_digest != first.ancestry_digest
     assert different_role.ancestry_digest != first.ancestry_digest
+
+
+async def test_ancestry_uses_effective_implicit_and_fallback_roles(
+    page: Page,
+) -> None:
+    await page.set_content(
+        """
+        <main role="main">
+          <nav>
+            <button id="implicit-role">Implicit role</button>
+          </nav>
+          <nav role="navigation">
+            <button id="redundant-explicit-role">Explicit role</button>
+          </nav>
+          <nav role="not-a-real-role navigation">
+            <button id="fallback-role">Fallback role</button>
+          </nav>
+        </main>
+        """
+    )
+
+    implicit = await capture_identity(page.locator("#implicit-role"))
+    explicit = await capture_identity(page.locator("#redundant-explicit-role"))
+    fallback = await capture_identity(page.locator("#fallback-role"))
+
+    assert implicit.ancestry_digest == explicit.ancestry_digest
+    assert fallback.ancestry_digest == explicit.ancestry_digest
+
+
+async def test_ancestry_crosses_open_shadow_host_to_composed_root(
+    page: Page,
+) -> None:
+    await page.set_content(
+        """
+        <main role="main">
+          <section role="region"><div id="first-host"></div></section>
+          <aside role="complementary"><div id="second-host"></div></aside>
+        </main>
+        <script>
+          document.querySelector("#first-host")
+            .attachShadow({mode: "open"})
+            .innerHTML = '<div role="group"><button id="first-shadow-target">First</button></div>';
+          document.querySelector("#second-host")
+            .attachShadow({mode: "open"})
+            .innerHTML = '<div role="group"><button id="second-shadow-target">Second</button></div>';
+        </script>
+        """
+    )
+
+    first = await capture_identity(page.locator("#first-shadow-target"))
+    second = await capture_identity(page.locator("#second-shadow-target"))
+
+    assert first.ancestry_digest != second.ancestry_digest
+
+
+async def test_capture_identity_normalizes_area_href(page: Page) -> None:
+    await page.set_content(
+        """
+        <base href="https://example.test/maps/nested/">
+        <map name="destinations">
+          <area
+            data-testid="target-area"
+            href="../../docs/../target?mode=full#details"
+            shape="rect"
+            coords="0,0,10,10"
+          >
+        </map>
+        """
+    )
+
+    identity = await capture_identity(page.get_by_test_id("target-area"))
+
+    assert identity.tag == "area"
+    assert identity.href == "https://example.test/target?mode=full#details"

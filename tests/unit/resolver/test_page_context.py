@@ -104,6 +104,73 @@ async def test_reports_enabled_state_for_disabled_candidates(page: Page) -> None
     assert by_name["Adres e-mail"].enabled is True
 
 
+async def test_explicit_checkbox_uses_its_content_as_accessible_name(
+    page: Page,
+) -> None:
+    await page.set_content('<div role="checkbox">Zapamiętaj mnie</div>')
+
+    candidates = await collect_candidates(page)
+
+    assert any(
+        candidate.role == "checkbox" and candidate.name == "Zapamiętaj mnie"
+        for candidate in candidates
+    )
+
+
+async def test_advertised_password_role_is_resolvable_by_playwright(
+    page: Page,
+) -> None:
+    await page.set_content(
+        """
+        <label for="password">Hasło</label>
+        <input id="password" type="password">
+        """
+    )
+
+    candidates = await collect_candidates(page)
+    password = next(candidate for candidate in candidates if candidate.tag == "input")
+
+    assert (
+        await page.get_by_role(
+            password.role, name=password.name, exact=True
+        ).count()
+        == 1
+    )
+
+
+async def test_css_hidden_descendant_is_excluded_from_accessible_name(
+    page: Page,
+) -> None:
+    await page.set_content(
+        """
+        <button>Zapisz <span style="display: none">tajny sufiks</span></button>
+        """
+    )
+
+    candidates = await collect_candidates(page)
+
+    button = next(candidate for candidate in candidates if candidate.role == "button")
+    assert button.name == "Zapisz"
+
+
+async def test_hidden_aria_labelledby_reference_still_supplies_name(
+    page: Page,
+) -> None:
+    await page.set_content(
+        """
+        <span id="publish-label" hidden>Opublikuj raport</span>
+        <button aria-labelledby="publish-label"></button>
+        """
+    )
+
+    candidates = await collect_candidates(page)
+
+    assert any(
+        candidate.role == "button" and candidate.name == "Opublikuj raport"
+        for candidate in candidates
+    )
+
+
 async def test_viewport_only_excludes_visible_elements_below_the_fold(
     page: Page,
 ) -> None:

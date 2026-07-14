@@ -56,7 +56,7 @@ class Reasoner(Protocol):
     ) -> ReasonerResult | ReasonerError: ...
 
 
-class CodexReasoner:
+class CodexReasoner(Reasoner):
     """Resolve author instructions with a text-only, fail-closed Codex call."""
 
     async def resolve(
@@ -126,16 +126,19 @@ Security rules:
 - Candidate input is an explicit redacted projection and contains no form-field
   values. Do not infer or request such values.
 
-Return exactly one JSON object between the two literal frame markers below.
-Do not emit Markdown or text outside the frame.
+Return exactly one JSON object between the two literal frame markers. Do not
+emit Markdown or text outside the frame. These are concrete format examples;
+choose fields and values from the instruction and candidate data instead of
+copying the examples.
 
+Valid success example:
 {_FRAME_START}
-{{"action":"click|hover|type|waitFor","target":<Target>}}
+{{"action":"click","target":{{"strategy":"role","role":"button","name":"Example button","exact":true}}}}
 {_FRAME_END}
 
-If resolution is impossible, return instead:
+Valid error example, used when resolution is impossible:
 {_FRAME_START}
-{{"error":"no_action|multiple_actions|no_handle","message":"..."}}
+{{"error":"no_action","message":"The instruction contains no executable action."}}
 {_FRAME_END}
 
 The strict response JSON Schema is:
@@ -203,12 +206,31 @@ def _parse_framed(raw: str) -> dict[str, Any]:
 
     encoded = raw[payload_start:frame_end].strip()
     try:
-        payload = json.loads(encoded)
+        payload = json.loads(
+            encoded,
+            object_pairs_hook=_object_without_duplicate_keys,
+            parse_constant=_reject_non_finite_number,
+        )
     except json.JSONDecodeError as exc:
         raise ValueError(f"Codex frame contains invalid JSON: {exc.msg}") from exc
     if not isinstance(payload, dict):
         raise ValueError("Codex frame must contain a JSON object")
     return payload
+
+
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Codex frame contains duplicate JSON key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_number(value: str) -> Any:
+    raise ValueError(f"Codex frame contains non-finite JSON number: {value}")
 
 
 def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerError:
@@ -229,7 +251,7 @@ def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerEr
     if not isinstance(action, str) or action not in _ACTIONS:
         raise ValueError(f"Unsupported reasoner action: {action!r}")
     try:
-        target = _TARGET_ADAPTER.validate_python(payload["target"])
+        target = _TARGET_ADAPTER.validate_python(payload["target"], strict=True)
     except ValidationError as exc:
         raise ValueError(f"Invalid Target returned by Codex: {exc}") from exc
     return ReasonerResult(action=cast(ActionKind, action), target=target)
@@ -238,10 +260,30 @@ def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerEr
 async def _run_codex_cancellable(prompt: str) -> str:
     cancel_event = threading.Event()
     token = _CANCEL_EVENT.set(cancel_event)
+    worker = asyncio.create_task(asyncio.to_thread(_run_codex, prompt))
     try:
-        return await asyncio.to_thread(_run_codex, prompt)
+        # Shielding prevents outer task cancellation from cancelling the Future
+        # that represents the still-running subprocess thread.
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
         cancel_event.set()
+        # Do not report cancellation until the worker has observed the signal
+        # and completed subprocess kill/reap. A repeated cancel request must not
+        # detach that cleanup work either.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if worker.done() and not worker.cancelled():
+            # Retrieve a cleanup exception so asyncio does not report it as an
+            # unhandled Task failure; the caller's cancellation remains primary.
+            try:
+                worker.result()
+            except Exception:
+                pass
         raise
     finally:
         _CANCEL_EVENT.reset(token)

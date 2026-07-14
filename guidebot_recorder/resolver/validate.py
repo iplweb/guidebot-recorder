@@ -27,6 +27,7 @@ ValidationReason: TypeAlias = Literal[
     "not_editable",
     "incompatible_type",
     "unsupported_action",
+    "dom_changed",
 ]
 
 
@@ -110,43 +111,62 @@ async def validate_compile_time(
             "unsupported_action", f"Unsupported action kind: {action!r}."
         )
 
-    locator = await build_locator(page, target)
-    count = await locator.count()
-    if count == 0:
-        return ValidationFail("not_found", "The target locator matched no elements.")
-    if count != 1:
+    try:
+        locator = await build_locator(page, target)
+        count = await locator.count()
+        if count == 0:
+            return ValidationFail("not_found", "The target locator matched no elements.")
+        if count != 1:
+            return ValidationFail(
+                "not_unique", f"The target locator matched {count} elements; expected 1."
+            )
+
+        if not await locator.is_visible():
+            return ValidationFail("not_visible", "The matched element is not visible.")
+
+        if action == "type" and not await _is_type_compatible(locator):
+            return ValidationFail(
+                "incompatible_type", "The type action requires a text-entry element."
+            )
+
+        if action in ("click", "type") and not await locator.is_enabled():
+            return ValidationFail("not_enabled", "The matched element is disabled.")
+
+        if action == "type" and not await locator.is_editable():
+            return ValidationFail("not_editable", "The matched element is not editable.")
+
+        # Close the largest count/check race window. The DOM can always mutate
+        # after this function returns, so execution performs its own checks too.
+        if await locator.count() != 1:
+            return ValidationFail(
+                "dom_changed", "The target changed while it was being validated."
+            )
+        return ValidationOk(locator)
+    except PlaywrightError:
         return ValidationFail(
-            "not_unique", f"The target locator matched {count} elements; expected 1."
+            "dom_changed", "The target changed while it was being validated."
         )
-
-    if not await locator.is_visible():
-        return ValidationFail("not_visible", "The matched element is not visible.")
-
-    if action == "type" and not await _is_type_compatible(locator):
-        return ValidationFail(
-            "incompatible_type", "The type action requires a text-entry element."
-        )
-
-    if action in ("click", "type") and not await locator.is_enabled():
-        return ValidationFail("not_enabled", "The matched element is disabled.")
-
-    if action == "type" and not await locator.is_editable():
-        return ValidationFail("not_editable", "The matched element is not editable.")
-
-    return ValidationOk(locator)
 
 
 async def reuse_is_valid(page: Page, cached: CachedAction) -> bool:
     """Validate a cached target and its independent, frozen identity."""
 
-    result = await validate_compile_time(page, cached.target, cached.action)
-    if isinstance(result, ValidationFail) or cached.identity is None:
-        return False
-
     try:
+        if cached.action == "waitFor":
+            if cached.state is None:
+                return False
+            if cached.state == "hidden":
+                # A hidden wait intentionally has no identity at the point it
+                # succeeds. Zero matches already satisfies the condition; one
+                # match is safe to wait on; multiple matches are ambiguous.
+                locator = await build_locator(page, cached.target)
+                return await locator.count() <= 1
+
+        result = await validate_compile_time(page, cached.target, cached.action)
+        if isinstance(result, ValidationFail) or cached.identity is None:
+            return False
         current_identity = await capture_identity(result.locator)
     except (PlaywrightError, ValueError):
         # The DOM may change between the locator checks and identity capture.
         return False
     return cached.identity.matches(current_identity)
-

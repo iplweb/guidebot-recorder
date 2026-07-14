@@ -9,6 +9,7 @@ from guidebot_recorder.models.target import (
     TestidTarget as ByTestidTarget,
     TextTarget,
 )
+from guidebot_recorder.resolver.identity_capture import capture_identity
 from guidebot_recorder.resolver.validate import (
     ValidationFail,
     ValidationOk,
@@ -27,17 +28,24 @@ async def page():
         await browser.close()
 
 
-def _cached(target, identity: Identity, action: str = "click") -> CachedAction:
+def _cached(
+    target,
+    identity: Identity | None,
+    action: str = "click",
+    state: str | None = None,
+) -> CachedAction:
     return CachedAction(
         action=action,
         target=target,
         identity=identity,
         expect="none",
+        state=state,
         fingerprint=Fingerprint(
-            command_kind="teach",
+            command_kind="wait" if action == "waitFor" else "teach",
             compiled_from="kliknij Zaloguj",
             expect="none",
             config_hash="config",
+            state=state,
         ),
     )
 
@@ -150,6 +158,17 @@ async def test_validate_compile_time_accepts_editable_textbox_for_type(page):
     assert isinstance(result, ValidationOk)
 
 
+async def test_validate_compile_time_rejects_readonly_textbox_for_type(page):
+    await page.set_content('<input data-testid="locked" value="x" readonly>')
+
+    result = await validate_compile_time(
+        page, ByTestidTarget(testid="locked"), "type"
+    )
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "not_editable"
+
+
 async def test_reuse_is_invalid_when_captured_identity_differs(page):
     await page.set_content("<main><button>Zaloguj</button></main>")
     cached = _cached(
@@ -158,3 +177,33 @@ async def test_reuse_is_invalid_when_captured_identity_differs(page):
     )
 
     assert await reuse_is_valid(page, cached) is False
+
+
+async def test_reuse_is_valid_when_structural_checks_and_identity_match(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    target = RoleTarget(role="button", name="Zaloguj")
+    identity = await capture_identity(await build_locator(page, target))
+
+    assert await reuse_is_valid(page, _cached(target, identity)) is True
+
+
+async def test_wait_for_hidden_cache_without_identity_can_be_reused(page):
+    await page.set_content('<div data-testid="spinner">Ładowanie</div>')
+    cached = _cached(
+        ByTestidTarget(testid="spinner"),
+        None,
+        action="waitFor",
+        state="hidden",
+    )
+
+    assert await reuse_is_valid(page, cached) is True
+
+
+async def test_wait_for_cache_without_state_is_invalid(page):
+    await page.set_content('<div data-testid="spinner">Ładowanie</div>')
+    target = ByTestidTarget(testid="spinner")
+    identity = await capture_identity(await build_locator(page, target))
+
+    assert await reuse_is_valid(
+        page, _cached(target, identity, action="waitFor")
+    ) is False

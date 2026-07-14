@@ -9,8 +9,10 @@ from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.resolver.page_context import Candidate
 from guidebot_recorder.resolver.reasoner import (
     CodexReasoner,
+    Reasoner,
     ReasonerError,
     ReasonerResult,
+    _build_prompt,
     _parse_framed,
 )
 
@@ -32,6 +34,10 @@ def _candidate(**overrides: object) -> Candidate:
 
 def _framed(payload: object) -> str:
     return f"<<<GUIDEBOT_JSON>>>{json.dumps(payload)}<<<END>>>"
+
+
+def test_codex_reasoner_nominally_implements_reasoner_protocol():
+    assert Reasoner in CodexReasoner.__mro__
 
 
 async def test_resolve_parses_framed_role_target(monkeypatch: pytest.MonkeyPatch):
@@ -99,6 +105,61 @@ async def test_resolve_returns_explicit_no_action_error(
 def test_parse_framed_rejects_unframed_malformed_or_ambiguous_output(raw: str):
     with pytest.raises(ValueError):
         _parse_framed(raw)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"action":"click","action":"hover"}',
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        '{"value":-Infinity}',
+    ],
+)
+def test_parse_framed_rejects_duplicate_keys_and_non_finite_numbers(payload: str):
+    with pytest.raises(ValueError):
+        _parse_framed(f"<<<GUIDEBOT_JSON>>>{payload}<<<END>>>")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("nth", "1"),
+        ("exact", "true"),
+    ],
+)
+async def test_resolve_rejects_coercible_but_schema_invalid_target_fields_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+):
+    calls = 0
+    target: dict[str, object] = {
+        "strategy": "role",
+        "role": "button",
+        "name": "Zaloguj",
+        field: value,
+    }
+
+    def fake_run_codex(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return _framed({"action": "click", "target": target})
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    with pytest.raises(ValueError):
+        await CodexReasoner().resolve("Kliknij Zaloguj", [_candidate()])
+
+    assert calls == 2
+
+
+def test_prompt_does_not_present_invalid_placeholder_json_as_output():
+    prompt = _build_prompt("Kliknij Zaloguj", [_candidate()])
+
+    assert '"click|hover|type|waitFor"' not in prompt
+    assert '"no_action|multiple_actions|no_handle"' not in prompt
+    assert "<Target>" not in prompt
 
 
 async def test_resolve_retries_malformed_output_once(

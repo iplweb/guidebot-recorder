@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
+from uuid import uuid4
 
-from playwright.async_api import Page
+from playwright.async_api import Error, Page
 
 
 @dataclass
@@ -23,12 +25,7 @@ class Candidate:
     ancestry: list[tuple[str, str]]
 
 
-# This runs once over Playwright's CSS locator result. Unlike querySelectorAll,
-# Playwright locators also pierce open shadow roots, which keeps web-component
-# controls in the candidate set.
-_COLLECT_CANDIDATES_SCRIPT = r"""
-(elements, options) => {
-  const candidateRoles = new Set([
+_CANDIDATE_ROLES = (
     "button",
     "checkbox",
     "combobox",
@@ -49,7 +46,33 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
     "tab",
     "textbox",
     "treeitem",
-  ]);
+)
+
+
+_MARK_CANDIDATE_ROLE_SCRIPT = r"""
+(elements, options) => {
+  let roleMap = window[options.roleMapKey];
+  if (!(roleMap instanceof WeakMap)) {
+    roleMap = new WeakMap();
+    window[options.roleMapKey] = roleMap;
+  }
+  for (const element of elements) {
+    roleMap.set(element, options.role);
+  }
+}
+"""
+
+
+_CLEAR_ROLE_MAP_SCRIPT = "roleMapKey => { delete window[roleMapKey]; }"
+
+
+# This runs once over Playwright's CSS locator result. Unlike querySelectorAll,
+# Playwright locators also pierce open shadow roots, which keeps web-component
+# controls in the candidate set.
+_COLLECT_CANDIDATES_SCRIPT = r"""
+(elements, options) => {
+  const roleMap = window[options.roleMapKey];
+  if (!(roleMap instanceof WeakMap)) return [];
 
   // First-recognized-token semantics matter for fallback role values, e.g.
   // role="future-role button". Keeping the full set here also prevents a
@@ -167,15 +190,28 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
     return false;
   };
 
-  const textAlternative = (node, visited = new Set()) => {
+  const nameHidden = (node) => {
+    const style = getComputedStyle(node);
+    return node.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+      node.hasAttribute("hidden") || style.display === "none" ||
+      style.visibility === "hidden" || style.visibility === "collapse" ||
+      style.contentVisibility === "hidden";
+  };
+
+  const textAlternative = (
+    node,
+    visited = new Set(),
+    allowHiddenRoot = false,
+    inHiddenReference = false,
+  ) => {
     if (!node || visited.has(node)) return "";
     if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
     if (!(node instanceof Element)) return "";
     visited.add(node);
 
-    if (node.getAttribute("aria-hidden") === "true" || node.hasAttribute("hidden")) {
-      return "";
-    }
+    const hidden = nameHidden(node);
+    if (hidden && !allowHiddenRoot && !inHiddenReference) return "";
+    const childInHiddenReference = inHiddenReference || (hidden && allowHiddenRoot);
 
     const labelledBy = normalize(node.getAttribute("aria-labelledby"));
     if (labelledBy) {
@@ -184,7 +220,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
         const reference = typeof root.getElementById === "function"
           ? root.getElementById(id)
           : node.ownerDocument.getElementById(id);
-        return textAlternative(reference, visited);
+        return textAlternative(reference, visited, true);
       });
       const result = normalize(labels.join(" "));
       if (result) return result;
@@ -198,9 +234,10 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
       if (alt) return alt;
     }
 
-    return normalize(
-      Array.from(node.childNodes, (child) => textAlternative(child, visited)).join(" ")
-    );
+    return normalize(Array.from(
+      node.childNodes,
+      (child) => textAlternative(child, visited, false, childInHiddenReference),
+    ).join(" "));
   };
 
   const accessibleName = (element, role) => {
@@ -211,7 +248,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
         const reference = typeof root.getElementById === "function"
           ? root.getElementById(id)
           : element.ownerDocument.getElementById(id);
-        return textAlternative(reference);
+        return textAlternative(reference, new Set(), true);
       }).join(" "));
       if (name) return name;
     }
@@ -239,8 +276,9 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
       }
     }
 
-    if (["button", "heading", "link", "menuitem", "menuitemcheckbox",
-         "menuitemradio", "option", "tab", "treeitem"].includes(role)) {
+    if (["button", "checkbox", "gridcell", "heading", "link", "menuitem",
+         "menuitemcheckbox", "menuitemradio", "option", "radio", "switch",
+         "tab", "treeitem"].includes(role)) {
       const contentName = textAlternative(element);
       if (contentName) return contentName;
     }
@@ -306,8 +344,8 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
   const result = [];
 
   for (const element of elements) {
-    const role = roleOf(element);
-    if (!role || !candidateRoles.has(role) || isAccessibilityHidden(element)) continue;
+    const role = roleMap.get(element);
+    if (!role || isAccessibilityHidden(element)) continue;
 
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
@@ -358,10 +396,25 @@ async def collect_candidates(
     if limit == 0:
         return []
 
-    raw_candidates: list[dict[str, Any]] = await page.locator("*").evaluate_all(
-        _COLLECT_CANDIDATES_SCRIPT,
-        {"viewportOnly": viewport_only, "limit": limit},
-    )
+    role_map_key = f"__guidebot_candidate_roles_{uuid4().hex}"
+    try:
+        for role in _CANDIDATE_ROLES:
+            await page.get_by_role(role).evaluate_all(
+                _MARK_CANDIDATE_ROLE_SCRIPT,
+                {"roleMapKey": role_map_key, "role": role},
+            )
+
+        raw_candidates: list[dict[str, Any]] = await page.locator("*").evaluate_all(
+            _COLLECT_CANDIDATES_SCRIPT,
+            {
+                "roleMapKey": role_map_key,
+                "viewportOnly": viewport_only,
+                "limit": limit,
+            },
+        )
+    finally:
+        with suppress(Error):
+            await page.evaluate(_CLEAR_ROLE_MAP_SCRIPT, role_map_key)
 
     candidates: list[Candidate] = []
     for raw in raw_candidates:
