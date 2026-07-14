@@ -1,9 +1,9 @@
-# Guidebot-recorder — design (spec v3)
+# Guidebot-recorder — design (spec v4)
 
 Data: 2026-07-14
 Status: zaakceptowany do napisania planu implementacji
-Rewizja: v3 — po dwóch rundach self-review. Runda 1: Fable + Codex. Runda 2:
-Fable (Codex round-2 nie wystartował — Codex CLI niezainstalowany w środowisku).
+Rewizja: v4 — po trzech rundach self-review. Runda 1: Fable + Codex (v1). Runda 2:
+Fable (v2). Runda 3: Codex (v3). v4 = konsolidacja + normatywny model danych (§4.3).
 Dziennik zmian w §17.
 
 ## 1. Cel i zakres
@@ -65,8 +65,8 @@ aplikacji docelowej.
 - **0×LLM.** Czyta wkompilowane `cachedAction`, odtwarza kroki czystym
   Playwrightem. Przed każdą akcją **waliduje namiar na żywej stronie** (§5.4,
   render-time): jeśli locator nie trafia lub trafiony element nie zgadza się z
-  zamrożoną tożsamością (`role`/`name`) → **twardy błąd** „re-compile" (render nie
-  ma prawa wołać LLM-a).
+  zamrożoną **tożsamością** (`Identity`, §4.3) → **twardy błąd** „re-compile"
+  (render nie ma prawa wołać LLM-a).
 - Świeża przeglądarka, całość jednym przejściem, brak doczepiania się.
 - `--auto-heal`: **zarezerwowana nazwa, w v1 niezaimplementowana** (błąd „not
   implemented"). Docelowo osobna komenda naprawcza aktualizuje cache i restartuje
@@ -84,10 +84,13 @@ config:
   title: "Logowanie do systemu"
   baseUrl: https://app.example.com     # opcjonalny prefiks dla navigate
   viewport: { width: 1280, height: 720 }  # = rozmiar wideo; wymagany dla powtarzalności
+  locale: pl-PL                        # locale kontekstu Playwrighta; wchodzi do configHash
   tts: { provider: elevenlabs, voice: "pl-PL-Marek", lang: pl-PL }
 ```
 `viewport` jest wymagany — determinuje zarówno powtarzalność namiarów, jak i
-rozmiar `.mp4`.
+rozmiar `.mp4`. `locale` ustawia locale kontekstu przeglądarki (i język aplikacji,
+jeśli sterowany locale/nagłówkiem) i wchodzi do `configHash` (§4.3). **Nieznane
+klucze** w `config` i w krokach = **twardy błąd** (schemat zamknięty).
 
 ### 3.2 Komendy
 
@@ -158,7 +161,9 @@ steps:
       role: button
       name: "Zaloguj"
       exact: true
-      fingerprint: { commandKind: teach, compilerVersion: 1, compiledFrom: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu" }
+      identity: { tag: button, ancestryDigest: "h7f3…", identityVersion: 1 }
+      expect: navigation
+      fingerprint: { commandKind: teach, compilerVersion: 1, compiledFrom: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu", expect: navigation, configHash: "c19a…" }
   - enterText: { into: "pole email", text: "${DEMO_EMAIL}" }
     say: "Teraz wpisuję swój adres e-mail."
     cachedAction:
@@ -167,7 +172,9 @@ steps:
       role: textbox
       name: "Email"
       exact: true
-      fingerprint: { commandKind: enterText, compilerVersion: 1, compiledFrom: "pole email" }
+      identity: { tag: input, testid: "email", ancestryDigest: "a02c…", identityVersion: 1 }
+      expect: none
+      fingerprint: { commandKind: enterText, compilerVersion: 1, compiledFrom: "pole email", expect: none, configHash: "c19a…" }
 ```
 
 ## 4. Kompilacja in-place (jeden plik)
@@ -224,6 +231,49 @@ zwolniony z pre-walidacji istnienia.
 **Brak `locator` jako stringu-wyrażenia.** Locator Playwrighta jest budowany
 **wyłącznie w zaufanym kodzie** z pól strukturalnych — zero eval/parsowania.
 
+### 4.3 Model danych — jedno źródło prawdy (normatywny)
+Poniższe typy to **jeden wspólny model pydantic**, do którego odwołują się:
+wyjście Reasonera (§5.2), pole `scope`, `cachedAction` i walidacja render-time.
+Jest to jedyna definicja — sekcje §2, §5.4, §9 odwołują się do niej, nie
+powtarzają jej. Zmiana modelu → wzrost `compilerVersion`.
+
+**`Target` (rekurencyjny, dyskryminowany po `strategy`):** pola per strategia jak
+w §4.2 (`role/name/exact/nth`, `text/exact`, `label/exact`, `testid`) + opcjonalny
+`scope: Target` (ta sama struktura, zawężenie do poddrzewa przodka). Ścisły JSON
+Reasonera pokrywa **całą** tę unię.
+
+**`Identity` (zamrożona tożsamość, niezależna od locatora):**
+- `tag` (lowercase), `testid?`, `href?` (znormalizowany do absolutnego URL),
+  `ancestryDigest` (SHA-256 z listy `(tag, role)` przodków do korzenia),
+  `identityVersion`.
+- **Równość (jedyna procedura, używana w compile ORAZ render):** wszystkie obecne
+  pola równe + `identityVersion` równa. `role`/`name` **nie** są kryterium (locator
+  jest z nich budowany — porównanie byłoby tautologiczne).
+
+**`cachedAction`:** `action` + spłaszczony `Target` + `Identity` + `expect` +
+(`state` gdy `waitFor`) + `fingerprint`.
+
+**`fingerprint`:** obejmuje **wszystkie zamrożone pola wpływające na zachowanie**:
+`commandKind`, `compiledFrom`, `expect`, `state` (waitFor), `compilerVersion`,
+`configHash`. Zmiana któregokolwiek → re-resolve lub odświeżenie pola.
+
+**`configHash`:** kanoniczna projekcja `config` — `viewport.{width,height}`,
+`locale` (§3.1), `tts.lang` — serializacja z posortowanymi kluczami → SHA-256;
+`configHashVersion`.
+
+**`expect`:** opcjonalne pole **towarzyszące krokowi w źródle** (nadpisuje
+heurystykę compile) **oraz** kopiowane do `cachedAction`. Źródło > heurystyka;
+wchodzi do `fingerprint`.
+
+**Cykl życia `waitFor`:**
+- compile rozwiązuje `Target` na stanie, w którym element **istnieje** (czeka na
+  pojawienie wg instrukcji), zamraża `Target` + `Identity`;
+- render czeka na `state` do `timeout`:
+  - `visible`/`enabled` → po spełnieniu waliduje tożsamość (§4.3 równość),
+  - `hidden` → asercja **nieobecności/ukrycia**; walidacja tożsamości **pominięta**
+    (nie ma czego porównywać);
+- `waitFor` jest zwolniony z pre-walidacji istnienia (§5.4).
+
 ## 5. Resolver (tylko w `compile`, wołany rzadko)
 
 ### 5.1 PageContext
@@ -234,8 +284,10 @@ widocznością/enabled. **Strategia przycinania** (viewport-only + interaktywne)
 utrzymuje rozmiar wejścia w ryzach na dużych stronach.
 
 ### 5.2 Reasoner (wymienny backend)
-Mapuje `(kandydaci, instrukcja) → {action, strategy, role, name, nth?, scope?}`
-albo sygnał błędu (0/>1 akcji, brak uchwytu). Wybierany w configu.
+Mapuje `(kandydaci, instrukcja) → {action, Target}` (Target = wspólny model §4.3,
+wyraża każdą strategię `role/text/label/testid` + `scope`) albo **sygnał błędu**
+(0 akcji, >1 akcji, brak uchwytu semantycznego). Ścisły JSON pokrywa całą unię
+`Target`. Wybierany w configu.
 - **Default: `codex exec`** — subskrypcja, zero kosztu API.
 - Alternatywy (odłożone aż default działa): `claude -p`, `opencode`, Claude
   Messages API.
@@ -260,6 +312,11 @@ badanie strony przez agenta) — odłożony, aż ścieżka domyślna działa.
 - mieć **typ zgodny z akcją** (np. `type` tylko na `textbox`).
 Niepowodzenie → **re-prompt** (max 2 próby), potem **twardy błąd** z listą
 kandydatów do doprecyzowania przez autora.
+
+**Ponowne użycie istniejącego `cachedAction`** (§5.6) waliduje dodatkowo **równość
+`Identity`** (§4.3), nie tylko unikalność/typ. Zamiennik trafiony tym samym
+locatorem, ale o innej tożsamości → traktuj jak brak cache i **re-resolve** (inaczej
+render dostawałby w kółko „re-compile").
 
 **Render-time** (§2): przed akcją locator musi trafiać w 1 element, a jego
 **atrybuty tożsamości** (`tag`/`testid`/`href`/`ancestryDigest`, §4.2) muszą
@@ -342,9 +399,10 @@ zgadywania: determinuje stan strony widziany przez resolver następnego kroku
 
 - **Pre-cache (Faza 0 renderu):** przed otwarciem nagrywanej przeglądarki
   syntezujemy i **walidujemy** każdy segment narracji, zapisując do cache (katalog
-  build, np. `.guidebot/audio/<hash>.wav`; **klucz = hash całej sekcji `config.tts`
-  — provider, voice, lang, i przyszłe parametry (model/speed) — plus tekst**;
-  zmiana backendu/wersji providera unieważnia cache). Render czyta z cache → brak
+  build, np. `.guidebot/audio/<hash>.wav`; **klucz = hash: pełna sekcja `config.tts`
+  (provider, voice, lang, model/speed) + tekst + `ttsAdapterVersion` +
+  `cacheSchemaVersion`** — sam upgrade adaptera/providera przy niezmienionym
+  `config.tts` też unieważnia cache). Render czyta z cache → brak
   wywołań sieciowych i „głuchych klatek" w trakcie nagrywania; awaria TTS ujawnia
   się **przed** renderem.
 - **Model czasu — narracja steruje tempem:** długość każdego segmentu `T` jest
@@ -376,7 +434,7 @@ RENDER (audio już w cache, długość T znana):
 1. overlay: (opcjonalny napis/dymek), start audio segmentu
 2. czekaj T                                   ← narracja steruje tempem
 3. zbuduj locator z pól cachedAction (zaufany kod)
-4. walidacja render-time: 1 trafienie + zgodność role/name (§5.4) — inaczej błąd
+4. walidacja render-time: 1 trafienie + zgodność tożsamości (`Identity`, §4.3/§5.4) — inaczej błąd
 5. scroll do celu, czekaj na stabilny bbox
 6. overlay: ruch kursora + ripple + highlight w momencie akcji
 7. Playwright wykonuje cachedAction.action (click)
@@ -503,3 +561,23 @@ wcześniejszych — algorytm §5.6 zawsze odgrywa od kroku zero na świeżej ses
 - **§3.2:** `${ENV_VAR}` tylko w polach wartości, zakaz w narracji/instrukcji,
   escape `$${`.
 - **§13:** odnotowano zależność od Codex CLI dla domyślnego Reasonera.
+
+### Dziennik zmian (v3 → v4, po trzeciej rundzie — Codex na v3)
+Konsolidacja: charakter uwag przeszedł z wad projektowych w niespójności
+wewnątrz specu (spot-fixy v3 nie zostały wszędzie propagowane). Domknięcie klasowe:
+- **§4.3 (nowa, normatywna):** jedno źródło prawdy — `Target` (wspólna unia dla
+  Reasonera, `scope`, `cachedAction`), `Identity` (kanoniczna równość), `fingerprint`
+  (wszystkie zamrożone pola wpływające na zachowanie: `expect`, `state`),
+  `configHash` (kanoniczna projekcja + wersja), cykl życia `waitFor`.
+- **Propagacja tożsamości:** §2, §9 i przykłady w §3.2 odwołują się teraz do
+  `Identity` (§4.3), nie do tautologicznego `role`/`name`.
+- **§5.2:** kontrakt Reasonera zwraca pełną unię `Target` (nie tylko `role/name`).
+- **§5.4:** ponowne użycie cache waliduje **równość `Identity`** → koniec pętli
+  „render→re-compile→render" przy podmianie elementu (NEW-DEFECT Codeksa).
+- **§3.1:** dodano `config.locale` (locale przeglądarki, w `configHash`); nieznane
+  klucze = twardy błąd (schemat zamknięty).
+- **§8:** klucz cache TTS z saltem wersji adaptera/schematu.
+- **Pozostała precyzja** (dokładna normalizacja `href`/`testid`, wejścia
+  `ancestryDigest`, pełna gramatyka YAML) świadomie przeniesiona do **planu
+  implementacji** — Pydantic + TDD przypną to weryfikowalnie (malejący zwrot z
+  dalszej prozy).
