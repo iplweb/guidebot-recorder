@@ -6,7 +6,7 @@ Locator Playwrighta budowany jest z tych pól wyłącznie w zaufanym kodzie.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class _Base(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # rekurencyjne zawężenie do poddrzewa przodka
-    scope: "Target | None" = None
+    scope: Target | None = None
 
 
 class RoleTarget(_Base):
@@ -43,7 +43,7 @@ class TestidTarget(_Base):
 
 
 Target = Annotated[
-    Union[RoleTarget, TextTarget, LabelTarget, TestidTarget],
+    RoleTarget | TextTarget | LabelTarget | TestidTarget,
     Field(discriminator="strategy"),
 ]
 

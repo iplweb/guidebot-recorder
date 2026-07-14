@@ -19,7 +19,7 @@ class Identity(BaseModel):
     ancestry_digest: str
     identity_version: int = 1
 
-    def matches(self, other: "Identity") -> bool:
+    def matches(self, other: Identity) -> bool:
         """Równość: wszystkie obecne pola równe ORAZ `identity_version` równa."""
         return (
             self.identity_version == other.identity_version

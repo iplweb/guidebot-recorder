@@ -6,7 +6,6 @@ from importlib.resources import files
 
 from playwright.async_api import Page
 
-
 _API_IS_READY = """() => {
     const api = window.__guidebot_cursor;
     return !!api && ["ensure", "moveTo", "ripple", "highlight"].every(
@@ -35,9 +34,7 @@ class Overlay:
     def __init__(self) -> None:
         self.pos: tuple[float, float] = (0.0, 0.0)
         self._script = (
-            files("guidebot_recorder.overlay")
-            .joinpath("cursor.js")
-            .read_text(encoding="utf-8")
+            files("guidebot_recorder.overlay").joinpath("cursor.js").read_text(encoding="utf-8")
         )
 
     async def install(self, page: Page) -> None:

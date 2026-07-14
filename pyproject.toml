@@ -2,7 +2,20 @@
 name = "guidebot-recorder"
 version = "0.1.0"
 description = "Kompilator scenariuszy YAML → deterministyczny film szkoleniowy (Playwright + kursor + lektor TTS)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Michał Pasternak", email = "michal.dtz@gmail.com" }]
+keywords = ["playwright", "screencast", "tutorial", "tts", "automation", "video", "training"]
 requires-python = ">=3.12"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Software Development :: Testing",
+]
 dependencies = [
   "playwright>=1.47",
   "pydantic>=2.7",
@@ -10,6 +23,11 @@ dependencies = [
   "typer>=0.12",
   "edge-tts>=6.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/iplweb/guidebot-recorder"
+Repository = "https://github.com/iplweb/guidebot-recorder"
+Issues = "https://github.com/iplweb/guidebot-recorder/issues"
 
 [project.scripts]
 guidebot = "guidebot_recorder.cli:app"
@@ -32,3 +50,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["guidebot_recorder"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["UP040"]  # `type` keyword alias — pomijamy, by nie ruszać wnętrz modułów
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]  # długie stringi z danymi/HTML w fixture'ach testowych
+"guidebot_recorder/resolver/reasoner.py" = ["E501"]  # przykłady framed JSON w prompcie (jednolinijkowe)
+"guidebot_recorder/cli.py" = ["B008"]  # typer.Option(...) w domyślnych argumentach to idiom typera

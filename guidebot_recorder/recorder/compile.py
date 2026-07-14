@@ -7,9 +7,8 @@ samym pliku. LLM zwraca wyłącznie dane; akcje wykonuje Playwright.
 
 from __future__ import annotations
 
-import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 from urllib.parse import urljoin
 
 from playwright.async_api import Page
@@ -128,7 +127,11 @@ async def run_compile(
             state = step.wait.state if isinstance(step.wait, WaitUntil) else None
             # tożsamość zamrażamy PRZED wykonaniem akcji (DOM może się zmienić);
             # waitFor:hidden nie ma tożsamości do porównania
-            identity = None if (action == "waitFor" and state == "hidden") else await capture_identity(locator)
+            identity = (
+                None
+                if (action == "waitFor" and state == "hidden")
+                else await capture_identity(locator)
+            )
             fresh = True
             expect = None  # wyznaczymy po wykonaniu akcji
 

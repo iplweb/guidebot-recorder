@@ -18,7 +18,6 @@ from guidebot_recorder.models.target import (
 )
 from guidebot_recorder.resolver.identity_capture import capture_identity
 
-
 ValidationReason: TypeAlias = Literal[
     "not_found",
     "not_unique",
@@ -107,9 +106,7 @@ async def validate_compile_time(
     """Apply the compile-time half of the resolver's trust-but-verify contract."""
 
     if action not in ("click", "hover", "type", "waitFor"):
-        return ValidationFail(
-            "unsupported_action", f"Unsupported action kind: {action!r}."
-        )
+        return ValidationFail("unsupported_action", f"Unsupported action kind: {action!r}.")
 
     try:
         locator = await build_locator(page, target)
@@ -138,14 +135,10 @@ async def validate_compile_time(
         # Close the largest count/check race window. The DOM can always mutate
         # after this function returns, so execution performs its own checks too.
         if await locator.count() != 1:
-            return ValidationFail(
-                "dom_changed", "The target changed while it was being validated."
-            )
+            return ValidationFail("dom_changed", "The target changed while it was being validated.")
         return ValidationOk(locator)
     except PlaywrightError:
-        return ValidationFail(
-            "dom_changed", "The target changed while it was being validated."
-        )
+        return ValidationFail("dom_changed", "The target changed while it was being validated.")
 
 
 async def reuse_is_valid(page: Page, cached: CachedAction) -> bool:

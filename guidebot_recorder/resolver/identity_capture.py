@@ -190,9 +190,7 @@ async def capture_identity(locator: Locator) -> Identity:
     """
     count = await locator.count()
     if count != 1:
-        raise ValueError(
-            f"capture_identity requires exactly one matching element; got {count}"
-        )
+        raise ValueError(f"capture_identity requires exactly one matching element; got {count}")
 
     captured: _DomIdentity = await locator.evaluate(_CAPTURE_SCRIPT)
     return Identity(

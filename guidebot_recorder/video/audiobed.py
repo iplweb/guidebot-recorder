@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from guidebot_recorder.video.mux import SAMPLE_RATE, ffmpeg_bin, _run
+from guidebot_recorder.video.mux import SAMPLE_RATE, _run, ffmpeg_bin
 
 
 @runtime_checkable
@@ -82,8 +82,7 @@ def build_audio_bed(placed: list[Placed], total: float, out: Path) -> None:
 
     mix_inputs = len(placed) + 1
     filters.append(
-        f"{''.join(mix_labels)}amix=inputs={mix_inputs}:"
-        f"duration=longest:normalize=0[out]"
+        f"{''.join(mix_labels)}amix=inputs={mix_inputs}:duration=longest:normalize=0[out]"
     )
     filter_complex = ";".join(filters)
 

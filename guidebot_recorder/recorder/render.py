@@ -15,8 +15,8 @@ from urllib.parse import urljoin
 from playwright.async_api import Browser
 
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
-from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.overlay.overlay import Overlay
+from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider

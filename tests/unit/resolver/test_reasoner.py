@@ -59,9 +59,7 @@ async def test_resolve_parses_framed_role_target(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
 
-    result = await CodexReasoner().resolve(
-        "Kliknij przycisk Zaloguj", [_candidate()]
-    )
+    result = await CodexReasoner().resolve("Kliknij przycisk Zaloguj", [_candidate()])
 
     assert isinstance(result, ReasonerResult)
     assert result.action == "click"

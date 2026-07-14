@@ -36,10 +36,14 @@ class _FakeSegment:
 def _make_tone(path: Path, seconds: float, freq: int = 440) -> None:
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"sine=frequency={freq}:duration={seconds}:sample_rate=48000",
-            "-t", str(seconds),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency={freq}:duration={seconds}:sample_rate=48000",
+            "-t",
+            str(seconds),
             str(path),
         ],
         check=True,
@@ -50,10 +54,15 @@ def _make_tone(path: Path, seconds: float, freq: int = 440) -> None:
 def _sample_rate(path: Path) -> int:
     proc = subprocess.run(
         [
-            "ffprobe", "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=sample_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
         check=True,

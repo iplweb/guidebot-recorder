@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Union
-
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from guidebot_recorder.models.action import CachedAction, Expect, WaitState
@@ -35,12 +33,12 @@ class Step(BaseModel):
     click: str | None = None
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
-    wait: Union[float, WaitUntil] | None = None
+    wait: float | WaitUntil | None = None
     expect: Expect | None = None
     cached_action: CachedAction | None = Field(default=None, alias="cachedAction")
 
     @model_validator(mode="after")
-    def _exactly_one_command(self) -> "Step":
+    def _exactly_one_command(self) -> Step:
         present = [c for c in PRIMARY_COMMANDS if getattr(self, c) is not None]
         if len(present) > 1:
             raise ValueError(

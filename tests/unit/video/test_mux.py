@@ -28,10 +28,18 @@ def _make_video(path: Path, seconds: float) -> None:
     """Write an H.264 mp4 (video only) of *seconds* duration."""
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"testsrc=duration={seconds}:size=320x240:rate=25",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", str(seconds),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size=320x240:rate=25",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+            str(seconds),
             str(path),
         ],
         check=True,
@@ -43,10 +51,14 @@ def _make_audio(path: Path, seconds: float) -> None:
     """Write a mono WAV tone of *seconds* duration."""
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"sine=frequency=440:duration={seconds}:sample_rate=48000",
-            "-t", str(seconds),
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}:sample_rate=48000",
+            "-t",
+            str(seconds),
             str(path),
         ],
         check=True,
@@ -58,9 +70,13 @@ def _stream_types(path: Path) -> list[str]:
     """Return the codec_type of each stream in *path* (via ffprobe)."""
     proc = subprocess.run(
         [
-            "ffprobe", "-v", "error",
-            "-show_entries", "stream=codec_type",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
         check=True,

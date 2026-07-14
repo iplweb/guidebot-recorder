@@ -39,9 +39,7 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run *cmd*, capturing output; raise ``RuntimeError`` on failure."""
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}"
-        )
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
     return proc
 
 

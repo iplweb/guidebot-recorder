@@ -32,7 +32,7 @@ def _to_plain(node):
     """Zrzuć strukturę ruamel do czystych typów Pythona (dla pydantic)."""
     if isinstance(node, Mapping):
         return {str(k): _to_plain(v) for k, v in node.items()}
-    if isinstance(node, (list, tuple)):
+    if isinstance(node, list | tuple):
         return [_to_plain(v) for v in node]
     if isinstance(node, bool):
         return bool(node)
@@ -45,9 +45,7 @@ def _to_plain(node):
     return str(node)
 
 
-def load_scenario(
-    path: Path | str, env: Mapping[str, str] | None = None
-) -> LoadedScenario:
+def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> LoadedScenario:
     """Wczytaj scenariusz YAML z `path`.
 
     `env=None` → używa `os.environ`. Substytucja `${ENV}` (§3.2) stosowana tylko

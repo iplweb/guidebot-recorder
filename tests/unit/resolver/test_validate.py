@@ -6,8 +6,10 @@ from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.target import (
     LabelTarget,
     RoleTarget,
-    TestidTarget as ByTestidTarget,
     TextTarget,
+)
+from guidebot_recorder.models.target import (
+    TestidTarget as ByTestidTarget,
 )
 from guidebot_recorder.resolver.identity_capture import capture_identity
 from guidebot_recorder.resolver.validate import (
@@ -53,18 +55,14 @@ def _cached(
 async def test_validate_compile_time_accepts_one_visible_enabled_match(page):
     await page.set_content("<button>Zaloguj</button>")
 
-    result = await validate_compile_time(
-        page, RoleTarget(role="button", name="Zaloguj"), "click"
-    )
+    result = await validate_compile_time(page, RoleTarget(role="button", name="Zaloguj"), "click")
 
     assert isinstance(result, ValidationOk)
     assert await result.locator.count() == 1
 
 
 async def test_validate_compile_time_rejects_ambiguous_substring_match(page):
-    await page.set_content(
-        "<button>Zaloguj</button><button>Zaloguj jako administrator</button>"
-    )
+    await page.set_content("<button>Zaloguj</button><button>Zaloguj jako administrator</button>")
 
     result = await validate_compile_time(
         page,
@@ -137,9 +135,7 @@ async def test_build_locator_applies_recursive_scope_and_nth(page):
         ),
     ],
 )
-async def test_validate_compile_time_checks_action_requirements(
-    page, html, target, action, reason
-):
+async def test_validate_compile_time_checks_action_requirements(page, html, target, action, reason):
     await page.set_content(html)
 
     result = await validate_compile_time(page, target, action)
@@ -151,9 +147,7 @@ async def test_validate_compile_time_checks_action_requirements(
 async def test_validate_compile_time_accepts_editable_textbox_for_type(page):
     await page.set_content('<label for="name">Imię</label><input id="name">')
 
-    result = await validate_compile_time(
-        page, LabelTarget(label="Imię"), "type"
-    )
+    result = await validate_compile_time(page, LabelTarget(label="Imię"), "type")
 
     assert isinstance(result, ValidationOk)
 
@@ -161,9 +155,7 @@ async def test_validate_compile_time_accepts_editable_textbox_for_type(page):
 async def test_validate_compile_time_rejects_readonly_textbox_for_type(page):
     await page.set_content('<input data-testid="locked" value="x" readonly>')
 
-    result = await validate_compile_time(
-        page, ByTestidTarget(testid="locked"), "type"
-    )
+    result = await validate_compile_time(page, ByTestidTarget(testid="locked"), "type")
 
     assert isinstance(result, ValidationFail)
     assert result.reason == "not_editable"
@@ -204,6 +196,4 @@ async def test_wait_for_cache_without_state_is_invalid(page):
     target = ByTestidTarget(testid="spinner")
     identity = await capture_identity(await build_locator(page, target))
 
-    assert await reuse_is_valid(
-        page, _cached(target, identity, action="waitFor")
-    ) is False
+    assert await reuse_is_valid(page, _cached(target, identity, action="waitFor")) is False

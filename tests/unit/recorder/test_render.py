@@ -46,18 +46,38 @@ class FakeTts:
     async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
         duration = 0.3
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
-             "-t", str(duration), str(out)],
-            check=True, capture_output=True,
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                str(duration),
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
         )
         return duration
 
 
 def _stream_types(path: Path) -> list[str]:
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
-         "-of", "csv=p=0", str(path)],
-        check=True, capture_output=True, text=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     return [line.strip() for line in out.splitlines() if line.strip()]
 

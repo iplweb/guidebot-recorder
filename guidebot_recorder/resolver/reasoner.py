@@ -33,8 +33,8 @@ _TARGET_ADAPTER = TypeAdapter(Target)
 # ``asyncio.to_thread`` copies context variables into its worker. This lets an
 # asynchronously cancelled resolve call signal the synchronous subprocess seam
 # without changing the plan's public ``_run_codex(prompt) -> str`` signature.
-_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = (
-    contextvars.ContextVar("guidebot_codex_cancel_event", default=None)
+_CANCEL_EVENT: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar(
+    "guidebot_codex_cancel_event", default=None
 )
 
 
@@ -347,15 +347,11 @@ def _run_codex(prompt: str) -> str:
     if process.returncode != 0:
         detail = " ".join(stderr.split())[-2000:]
         suffix = f": {detail}" if detail else ""
-        raise RuntimeError(
-            f"codex exec failed with exit code {process.returncode}{suffix}"
-        )
+        raise RuntimeError(f"codex exec failed with exit code {process.returncode}{suffix}")
     return stdout
 
 
-def _communicate_with_control(
-    process: subprocess.Popen[str], prompt: str
-) -> tuple[str, str]:
+def _communicate_with_control(process: subprocess.Popen[str], prompt: str) -> tuple[str, str]:
     deadline = time.monotonic() + _CODEX_TIMEOUT_SECONDS
     input_text: str | None = prompt
 
@@ -368,9 +364,7 @@ def _communicate_with_control(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _kill_and_reap(process)
-            raise RuntimeError(
-                f"codex exec timed out after {_CODEX_TIMEOUT_SECONDS:g} seconds"
-            )
+            raise RuntimeError(f"codex exec timed out after {_CODEX_TIMEOUT_SECONDS:g} seconds")
 
         try:
             return process.communicate(

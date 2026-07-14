@@ -24,7 +24,7 @@ def validate_cmd(path: Path) -> None:
         load_scenario(path)
     except Exception as exc:  # noqa: BLE001 — CLI: raportujemy każdy błąd walidacji
         typer.echo(f"BŁĄD walidacji: {exc}", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     typer.echo("OK")
 
 

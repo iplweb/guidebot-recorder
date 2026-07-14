@@ -17,9 +17,7 @@ async def page():
 
 async def test_click_executes_and_moves_cursor(page):
     overlay = Overlay()
-    await page.set_content(
-        "<button onclick=\"this.textContent='clicked'\">Zaloguj</button>"
-    )
+    await page.set_content("<button onclick=\"this.textContent='clicked'\">Zaloguj</button>")
     await overlay.install(page)
     rec = Recorder(page, overlay)
 

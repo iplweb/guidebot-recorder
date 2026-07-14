@@ -22,9 +22,7 @@ def _yaml() -> YAML:
     return yaml
 
 
-def inject_cached_action(
-    doc: CommentedMap, step_index: int, action: CachedAction
-) -> None:
+def inject_cached_action(doc: CommentedMap, step_index: int, action: CachedAction) -> None:
     """Wpisz `action` do `doc["steps"][step_index]["cachedAction"]` (mutacja).
 
     Serializacja przez `model_dump(by_alias=True, exclude_none=True)` — pola None

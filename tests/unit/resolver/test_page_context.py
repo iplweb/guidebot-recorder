@@ -76,9 +76,7 @@ async def test_collects_visible_interactive_elements_and_headings(page: Page) ->
     assert login.bbox[3] > 0
     assert isinstance(login.ancestry, list)
     assert all(
-        isinstance(item, tuple)
-        and len(item) == 2
-        and all(isinstance(value, str) for value in item)
+        isinstance(item, tuple) and len(item) == 2 and all(isinstance(value, str) for value in item)
         for item in login.ancestry
     )
 
@@ -130,12 +128,7 @@ async def test_advertised_password_role_is_resolvable_by_playwright(
     candidates = await collect_candidates(page)
     password = next(candidate for candidate in candidates if candidate.tag == "input")
 
-    assert (
-        await page.get_by_role(
-            password.role, name=password.name, exact=True
-        ).count()
-        == 1
-    )
+    assert await page.get_by_role(password.role, name=password.name, exact=True).count() == 1
 
 
 async def test_css_hidden_descendant_is_excluded_from_accessible_name(
@@ -193,9 +186,10 @@ async def test_viewport_only_excludes_visible_elements_below_the_fold(
         "W kadrze",
         "Poza kadrem",
     }
-    assert next(
-        candidate for candidate in all_candidates if candidate.name == "Poza kadrem"
-    ).visible is True
+    assert (
+        next(candidate for candidate in all_candidates if candidate.name == "Poza kadrem").visible
+        is True
+    )
 
 
 async def test_limit_is_hard_and_candidate_ids_are_stable(page: Page) -> None:
