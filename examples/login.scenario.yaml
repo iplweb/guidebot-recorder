@@ -1,0 +1,18 @@
+# Przykładowy scenariusz. Uruchom:
+#   export DEMO_EMAIL=user@example.com
+#   uv run guidebot validate examples/login.scenario.yaml
+#   uv run guidebot compile  examples/login.scenario.yaml   # wymaga Codex CLI
+#   uv run guidebot render   examples/login.scenario.yaml --out out/login.mp4
+config:
+  title: "Logowanie do systemu"
+  baseUrl: https://example.com
+  viewport: { width: 1280, height: 720 }
+  locale: pl-PL
+  tts: { provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL }
+steps:
+  - say: "Witaj. Zaraz pokażę, jak zalogować się do systemu."
+  - navigate: /login
+  - teach: "Aby się zalogować, należy kliknąć przycisk Zaloguj w prawym górnym rogu"
+  - enterText: { into: "pole adresu e-mail", text: "${DEMO_EMAIL}" }
+    say: "Teraz wpisuję swój adres e-mail."
+  - wait: { until: "aż zniknie spinner ładowania", state: hidden, timeout: 10 }
