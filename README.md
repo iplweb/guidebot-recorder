@@ -126,6 +126,22 @@ on the next `ensure`, not continuously through the History API. Because the comp
 URL (including query and fragment) can appear in the video, disable `showUrl` for
 secret-bearing URLs.
 
+### Pop-up windows and new tabs
+
+When a click opens a new Playwright page (a pop-up window or a target-blank tab),
+Guidebot follows it automatically. Subsequent steps resolve and replay on that page;
+after it closes, control returns to the main page. With `--headed`, the active page is
+brought to the front in the visible Chromium window. The final video cuts between the
+recorded page viewports (`main → pop-up → main`); native Chromium controls such as the
+tab strip are not part of Playwright's video recording. When `config.chrome` is
+enabled, its synthetic bar and URL pill are rendered inside both page viewports.
+
+The first version supports one pop-up lifecycle per scenario and fails loudly on an
+unexpected or second pop-up. Named tabs and explicit switch commands are deferred.
+For a literal demonstration value, `teach` may infer typing and freeze that value in
+the compiled sidecar. Passwords, tokens, and other secrets must continue to use
+`enterText` with `${ENV_VAR}`.
+
 ## Status
 
 Early (beta). The AI path (`compile` via Codex) and the real voice (edge-tts) are

@@ -37,7 +37,7 @@ steps:
   - say: "Pokażę, jak się zalogować."
   - navigate: "{url}"
   - teach: "kliknij Zaloguj"
-  - enterText: {{into: "pole email", text: "user@x.pl"}}
+  - enterText: {{into: "pole email", text: "${{DEMO_EMAIL}}"}}
     say: "Wpisuję adres e-mail."
 """
 
@@ -94,8 +94,10 @@ def _stream_types(path: Path) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-async def test_end_to_end_compile_then_render(tmp_path):
+async def test_end_to_end_compile_then_render(tmp_path, monkeypatch, capsys):
     url = FIXTURE.resolve().as_uri()
+    secret_email = "guidebot-secret-9347@example.test"
+    monkeypatch.setenv("DEMO_EMAIL", secret_email)
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO_TEMPLATE.format(url=url), encoding="utf-8")
 
@@ -105,7 +107,8 @@ async def test_end_to_end_compile_then_render(tmp_path):
         # --- compile ---
         page = await browser.new_page()
         reasoner = MockReasoner()
-        await run_compile(path, page, reasoner)
+        await run_compile(path, page, reasoner, verbose=True)
+        assert await page.get_by_role("textbox", name="E-mail").input_value() == secret_email
         await page.context.close()
 
         compiled = load_compiled(compiled_path(path))
@@ -115,6 +118,8 @@ async def test_end_to_end_compile_then_render(tmp_path):
         assert teach_ca.identity.tag == "button"
         assert enter_ca.action == "type"
         assert enter_ca.identity.tag == "input"
+        assert enter_ca.input_text is None
+        assert secret_email not in compiled_path(path).read_text(encoding="utf-8")
         assert reasoner.calls == 2
 
         # --- re-compile: reuse, zero wywołań reasonera ---
@@ -126,7 +131,7 @@ async def test_end_to_end_compile_then_render(tmp_path):
 
         # --- render ---
         out = tmp_path / "out.mp4"
-        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser, verbose=True)
         await browser.close()
 
     assert out.exists()
@@ -134,3 +139,6 @@ async def test_end_to_end_compile_then_render(tmp_path):
     types = _stream_types(out)
     assert types.count("video") == 1
     assert types.count("audio") == 1
+    captured = capsys.readouterr()
+    assert secret_email not in captured.out
+    assert secret_email not in captured.err

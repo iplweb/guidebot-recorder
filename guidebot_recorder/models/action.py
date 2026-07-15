@@ -2,19 +2,54 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.target import Target
 
 #: reference schema version — a bump forces a re-resolve
-COMPILER_VERSION = 1
+COMPILER_VERSION = 2
 
 ActionKind = Literal["click", "hover", "type", "waitFor"]
 Expect = Literal["navigation", "idle", "none"]
 WaitState = Literal["visible", "hidden", "enabled"]
+
+_ENV_PLACEHOLDER = re.compile(r"\$\{\w+\}")
+_SENSITIVE_INSTRUCTION = re.compile(
+    r"\b(password|passwd|passcode|passphrase|credential\w*|token|secret|"
+    r"sekret\w*|hasł\w*|pin|otp|2fa|mfa|cvv|cvc|ssn|pesel|"
+    r"api[\s_-]*key|private[\s_-]*key|client[\s_-]*secret|"
+    r"security[\s_-]*code|verification[\s_-]*code|recovery[\s_-]*code|"
+    r"backup[\s_-]*code|access[\s_-]*code|auth(?:entication)?[\s_-]*code|"
+    r"klucz\w*\s+(?:api|prywatn\w*)|kod\w*\s+(?:jednorazow\w*|"
+    r"bezpieczeństwa|dostępu|weryfikacyjn\w*|uwierzytelniając\w*)|"
+    r"numer\w*\s+karty)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_teach_instruction(instruction: str) -> None:
+    """Reject sensitive teach text before it reaches the Reasoner."""
+
+    if _SENSITIVE_INSTRUCTION.search(instruction):
+        raise ValueError("wartości wrażliwe wymagają enterText z ENV")
+
+
+def validate_teach_input_text(instruction: str, input_text: str) -> None:
+    """Validate a literal before it is typed or persisted by a teach action."""
+
+    if not input_text.strip():
+        raise ValueError("reasoner nie zwrócił niepustego inputText dla akcji teach → type")
+    if _ENV_PLACEHOLDER.search(input_text):
+        raise ValueError("inputText zawiera placeholder ENV; użyj enterText")
+    if input_text not in instruction:
+        raise ValueError(
+            "reasoner zwrócił inputText, który nie jest literalnym fragmentem instrukcji teach"
+        )
+    validate_teach_instruction(instruction)
 
 
 class Fingerprint(BaseModel):
@@ -37,4 +72,24 @@ class CachedAction(BaseModel):
     identity: Identity | None = None
     expect: Expect
     state: WaitState | None = None
+    #: observed during compile; render follows the new Page deterministically
+    opens_popup: bool = False
+    #: literal frozen by ``teach`` when the inferred action is ``type``
+    input_text: str | None = None
     fingerprint: Fingerprint
+
+    @model_validator(mode="after")
+    def _validate_behavioral_metadata(self) -> CachedAction:
+        if self.opens_popup and self.action != "click":
+            raise ValueError("opens_popup is only valid for click actions")
+        if self.input_text is not None:
+            if self.action != "type" or self.fingerprint.command_kind != "teach":
+                raise ValueError("input_text is only valid for teach actions inferred as type")
+            validate_teach_input_text(self.fingerprint.compiled_from, self.input_text)
+        if (
+            self.action == "type"
+            and self.fingerprint.command_kind == "teach"
+            and self.input_text is None
+        ):
+            raise ValueError("teach actions inferred as type require input_text")
+        return self

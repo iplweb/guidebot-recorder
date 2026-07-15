@@ -11,10 +11,16 @@ from guidebot_recorder.recorder.render import _render_step
 class FakePage:
     url: str = "about:blank"
 
+    async def evaluate(self, script, arg=None):
+        if isinstance(arg, bool):
+            return {"cursor": False, "chrome": False}
+        return None
+
 
 class FakeOverlay:
     def __init__(self, events: list[tuple]) -> None:
         self.events = events
+        self.pos = (0.0, 0.0)
 
     async def ensure(self, page: FakePage) -> None:
         self.events.append(("overlay.ensure", page.url))
@@ -81,9 +87,8 @@ async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = Tr
         "navigate",
         0,
         None,
-        {},
-        [],
         0.0,
+        {},
     )
     return events
 
@@ -92,12 +97,12 @@ async def test_navigate_types_resolved_url_before_goto_and_reensures_afterward()
     events = await _run(Step(navigate={"url": "login", "type": True}))
 
     assert events == [
-        ("overlay.ensure", "about:blank"),
         ("chrome.ensure", "about:blank"),
+        ("overlay.ensure", "about:blank"),
         ("chrome.set_url", "https://example.com/base/login", True),
         ("recorder.navigate", "https://example.com/base/login"),
-        ("overlay.ensure", "https://redirected.example/final"),
         ("chrome.ensure", "https://redirected.example/final"),
+        ("overlay.ensure", "https://redirected.example/final"),
     ]
 
 
@@ -105,12 +110,12 @@ async def test_navigate_without_typing_sets_redirected_url_after_goto() -> None:
     events = await _run(Step(navigate={"url": "login", "type": False}))
 
     assert events == [
-        ("overlay.ensure", "about:blank"),
         ("chrome.ensure", "about:blank"),
+        ("overlay.ensure", "about:blank"),
         ("recorder.navigate", "https://example.com/base/login"),
         ("chrome.set_url", "https://redirected.example/final", False),
-        ("overlay.ensure", "https://redirected.example/final"),
         ("chrome.ensure", "https://redirected.example/final"),
+        ("overlay.ensure", "https://redirected.example/final"),
     ]
 
 

@@ -8,6 +8,9 @@ The overlay is optional — the `compile` phase needs no animation, so it can us
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+
 from playwright.async_api import Locator, Page
 
 from guidebot_recorder.models.action import Expect, WaitState
@@ -46,8 +49,15 @@ class Recorder:
         await self.page.goto(url)
         await self.apply_readiness("navigation")
 
-    async def click(self, target: Target) -> None:
+    async def click(
+        self,
+        target: Target,
+        *,
+        before_click: Callable[[], None] | None = None,
+    ) -> None:
         locator = await self._point_and_prepare(target)
+        if before_click is not None:
+            before_click()
         await locator.click()
 
     async def hover(self, target: Target) -> None:
@@ -59,7 +69,9 @@ class Recorder:
         await locator.fill(text)
 
     async def wait_seconds(self, seconds: float) -> None:
-        await self.page.wait_for_timeout(seconds * 1000)
+        # A wall-clock pause must survive a popup closing while the pause is in
+        # progress; binding it to Page.wait_for_timeout would raise TargetClosedError.
+        await asyncio.sleep(seconds)
 
     async def wait_for(self, target: Target, state: WaitState, timeout: float) -> None:
         locator = await build_locator(self.page, target)

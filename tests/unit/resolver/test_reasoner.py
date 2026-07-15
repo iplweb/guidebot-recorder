@@ -63,9 +63,109 @@ async def test_resolve_parses_framed_role_target(monkeypatch: pytest.MonkeyPatch
 
     assert isinstance(result, ReasonerResult)
     assert result.action == "click"
+    assert result.input_text is None
     assert isinstance(result.target, RoleTarget)
     assert result.target == RoleTarget(role="button", name="Zaloguj", exact=True)
     assert len(prompts) == 1
+
+
+async def test_resolve_type_requires_and_returns_input_text(monkeypatch: pytest.MonkeyPatch):
+    def fake_run_codex(_prompt: str) -> str:
+        return _framed(
+            {
+                "action": "type",
+                "target": {
+                    "strategy": "role",
+                    "role": "textbox",
+                    "name": "E-mail",
+                    "exact": True,
+                },
+                "inputText": "user@example.com",
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve(
+        "Wpisz user@example.com w polu E-mail",
+        [_candidate(role="textbox", name="E-mail", tag="input")],
+    )
+
+    assert result == ReasonerResult(
+        action="type",
+        target=RoleTarget(role="textbox", name="E-mail", exact=True),
+        input_text="user@example.com",
+    )
+
+
+async def test_resolve_type_may_omit_text_for_explicit_enter_text(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run_codex(_prompt: str) -> str:
+        return _framed(
+            {
+                "action": "type",
+                "target": {
+                    "strategy": "role",
+                    "role": "textbox",
+                    "name": "E-mail",
+                },
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve(
+        "pole E-mail", [_candidate(role="textbox", name="E-mail", tag="input")]
+    )
+
+    assert isinstance(result, ReasonerResult)
+    assert result.action == "type"
+    assert result.input_text is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "type",
+            "target": {"strategy": "role", "role": "textbox", "name": "E-mail"},
+            "inputText": "",
+        },
+        {
+            "action": "type",
+            "target": {"strategy": "role", "role": "textbox", "name": "E-mail"},
+            "inputText": "   ",
+        },
+        {
+            "action": "type",
+            "target": {"strategy": "role", "role": "textbox", "name": "E-mail"},
+            "inputText": 123,
+        },
+        {
+            "action": "click",
+            "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+            "inputText": "unexpected",
+        },
+    ],
+)
+async def test_resolve_rejects_invalid_input_text_contract_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+):
+    calls = 0
+
+    def fake_run_codex(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return _framed(payload)
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    with pytest.raises(ValueError):
+        await CodexReasoner().resolve("Wykonaj akcję", [_candidate()])
+
+    assert calls == 2
 
 
 async def test_resolve_returns_explicit_no_action_error(
@@ -158,6 +258,21 @@ def test_prompt_does_not_present_invalid_placeholder_json_as_output():
     assert '"click|hover|type|waitFor"' not in prompt
     assert '"no_action|multiple_actions|no_handle"' not in prompt
     assert "<Target>" not in prompt
+
+
+def test_prompt_documents_type_payload_and_automatic_popup_switching():
+    prompt = _build_prompt(
+        "Wpisz user@example.com w polu E-mail",
+        [_candidate(role="textbox", name="E-mail", tag="input")],
+    )
+
+    assert '"action":"type"' in prompt
+    assert '"inputText":"user@example.com"' in prompt
+    assert "window switching are automatic" in prompt
+    assert "never model the" in prompt
+    assert "as a separate action" in prompt
+    assert "${ENV_VAR}" in prompt
+    assert "use enterText" in prompt
 
 
 async def test_resolve_retries_malformed_output_once(

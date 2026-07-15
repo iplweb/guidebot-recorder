@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -46,6 +47,22 @@ class ValidationFail:
 
 
 LocatorRoot: TypeAlias = Page | Locator
+
+_SENSITIVE_AUTOCOMPLETE = {
+    "current-password",
+    "new-password",
+    "one-time-code",
+    "cc-number",
+    "cc-csc",
+}
+_SENSITIVE_FIELD_METADATA = re.compile(
+    r"\b(password|passwd|passcode|passphrase|credential\w*|secret|token|"
+    r"otp|pin|cvv|cvc|ssn|pesel|security[\s_-]*code|verification[\s_-]*code|"
+    r"recovery[\s_-]*code|access[\s_-]*code|auth(?:entication)?[\s_-]*code|"
+    r"hasł\w*|sekret\w*|kod\w*\s+(?:bezpieczeństwa|dostępu|weryfikacyjn\w*|"
+    r"uwierzytelniając\w*)|numer\w*\s+karty)\b",
+    re.IGNORECASE,
+)
 
 
 def _build_locator(root: LocatorRoot, target: Target) -> Locator:
@@ -98,6 +115,37 @@ async def _is_type_compatible(locator: Locator) -> bool:
         }
         """
     )
+
+
+async def is_sensitive_type_target(locator: Locator) -> bool:
+    """Fail closed for fields where a frozen ``teach`` literal may expose a secret."""
+
+    metadata = await locator.evaluate(
+        """
+        element => ({
+          type: (element.getAttribute("type") || "").toLowerCase(),
+          autocomplete: (element.getAttribute("autocomplete") || "").toLowerCase(),
+          text: [
+            element.getAttribute("aria-label"),
+            element.getAttribute("placeholder"),
+            element.getAttribute("name"),
+            element.getAttribute("id"),
+            ...Array.from(element.labels || [], label => label.textContent),
+          ].filter(Boolean).join(" "),
+        })
+        """
+    )
+    if not isinstance(metadata, dict):
+        return True
+    if metadata.get("type") == "password":
+        return True
+    autocomplete = metadata.get("autocomplete")
+    if not isinstance(autocomplete, str):
+        return True
+    if _SENSITIVE_AUTOCOMPLETE.intersection(autocomplete.split()):
+        return True
+    text = metadata.get("text")
+    return not isinstance(text, str) or _SENSITIVE_FIELD_METADATA.search(text) is not None
 
 
 async def validate_compile_time(
@@ -157,6 +205,12 @@ async def reuse_is_valid(page: Page, cached: CachedAction) -> bool:
 
         result = await validate_compile_time(page, cached.target, cached.action)
         if isinstance(result, ValidationFail) or cached.identity is None:
+            return False
+        if (
+            cached.action == "type"
+            and cached.fingerprint.command_kind == "teach"
+            and await is_sensitive_type_target(result.locator)
+        ):
             return False
         current_identity = await capture_identity(result.locator)
     except (PlaywrightError, ValueError):

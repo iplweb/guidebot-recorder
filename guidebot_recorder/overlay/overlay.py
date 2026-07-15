@@ -6,7 +6,7 @@ import json
 import math
 from importlib.resources import files
 
-from playwright.async_api import Page
+from playwright.async_api import BrowserContext, Page
 
 from guidebot_recorder.models.config import CursorConfig
 
@@ -68,6 +68,11 @@ class Overlay:
         await page.add_init_script(script=self._script)
         await page.evaluate(self._script)
         await self._restore_position(page)
+
+    async def install_context(self, context: BrowserContext) -> None:
+        """Register the cursor for every subsequently created/navigated document."""
+
+        await context.add_init_script(script=self._script)
 
     async def ensure(self, page: Page) -> None:
         """Recreate a missing API or DOM cursor and restore ``pos``."""

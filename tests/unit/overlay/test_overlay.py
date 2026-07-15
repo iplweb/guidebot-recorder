@@ -60,6 +60,22 @@ async def test_install_registers_cursor_for_future_documents(page: Page) -> None
     assert await page.locator("[data-guidebot-cursor]").count() == 1
 
 
+async def test_context_install_injects_cursor_into_popup(page: Page) -> None:
+    overlay = Overlay()
+    await overlay.install_context(page.context)
+    await page.set_content("<button onclick=\"window.open('about:blank')\">Open</button>")
+
+    async with page.expect_popup() as popup_info:
+        await page.get_by_role("button", name="Open").click()
+    popup = await popup_info.value
+
+    assert await popup.evaluate("!!window.__guidebot_cursor") is True
+    await popup.goto("data:text/html,<main>replacement document</main>")
+    await popup.wait_for_load_state()
+    assert await popup.evaluate("!!window.__guidebot_cursor") is True
+    assert await popup.locator("[data-guidebot-cursor]").count() == 1
+
+
 async def test_cursor_config_drives_size_and_glide(page: Page) -> None:
     overlay = Overlay(
         CursorConfig(width=50, height=68, speed=2.0, min_duration=0, max_duration=9999)

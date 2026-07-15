@@ -16,6 +16,7 @@ from guidebot_recorder.resolver.validate import (
     ValidationFail,
     ValidationOk,
     build_locator,
+    is_sensitive_type_target,
     reuse_is_valid,
     validate_compile_time,
 )
@@ -150,6 +151,53 @@ async def test_validate_compile_time_accepts_editable_textbox_for_type(page):
     result = await validate_compile_time(page, LabelTarget(label="Imię"), "type")
 
     assert isinstance(result, ValidationOk)
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        '<label for="value">Access</label><input id="value" type="password">',
+        '<label for="value">Access</label><input id="value" autocomplete="one-time-code">',
+        '<label for="value">Passcode</label><input id="value">',
+    ],
+)
+async def test_sensitive_type_target_detects_secret_field_metadata(page, html):
+    await page.set_content(html)
+    result = await validate_compile_time(page, LabelTarget(label="Access"), "type")
+    if "Passcode" in html:
+        result = await validate_compile_time(page, LabelTarget(label="Passcode"), "type")
+
+    assert isinstance(result, ValidationOk)
+    assert await is_sensitive_type_target(result.locator) is True
+
+
+async def test_sensitive_type_target_accepts_regular_email_field(page):
+    await page.set_content('<label for="value">E-mail</label><input id="value" type="email">')
+    result = await validate_compile_time(page, LabelTarget(label="E-mail"), "type")
+
+    assert isinstance(result, ValidationOk)
+    assert await is_sensitive_type_target(result.locator) is False
+
+
+async def test_reuse_rejects_teach_type_on_password_field(page):
+    await page.set_content('<label for="value">Access</label><input id="value" type="password">')
+    target = LabelTarget(label="Access")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = CachedAction(
+        action="type",
+        target=target,
+        identity=identity,
+        expect="none",
+        input_text="hunter2",
+        fingerprint=Fingerprint(
+            command_kind="teach",
+            compiled_from="enter hunter2 into the field",
+            expect="none",
+            config_hash="config",
+        ),
+    )
+
+    assert await reuse_is_valid(page, cached) is False
 
 
 async def test_validate_compile_time_rejects_readonly_textbox_for_type(page):

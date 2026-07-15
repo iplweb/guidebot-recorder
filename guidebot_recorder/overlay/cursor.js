@@ -55,14 +55,18 @@
       return;
     }
     mountScheduled = true;
-    document.addEventListener(
-      "DOMContentLoaded",
-      () => {
-        mountScheduled = false;
-        ensure();
-      },
-      { once: true },
-    );
+    const mount = () => {
+      mountScheduled = false;
+      ensure();
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", mount, { once: true });
+    }
+    // A freshly opened about:blank Page can report "loading" even though its
+    // DOMContentLoaded event already raced past the init script. The timer is a
+    // mandatory fallback in both branches; ensure() is idempotent if the event
+    // also fires.
+    window.setTimeout(mount, 0);
   }
 
   function addCursorGraphic(cursor) {

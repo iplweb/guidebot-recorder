@@ -11,14 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
 
-from playwright.async_api import Browser, Page
+from playwright.async_api import (
+    Browser,
+    Page,
+    Video,
+)
+from playwright.async_api import (
+    Error as PlaywrightError,
+)
 from tqdm import tqdm
 
 from guidebot_recorder.chrome import Chrome
-from guidebot_recorder.models.action import CachedAction
+from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
+from guidebot_recorder.models.config import config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import pause_for_inspection
@@ -28,11 +37,240 @@ from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
-from guidebot_recorder.video.mux import mux, probe_duration
+from guidebot_recorder.video.mux import (
+    compose_popup_video,
+    mux,
+    mux_preencoded,
+    probe_duration,
+)
+
+_POPUP_DETECTION_SECONDS = 1.0
+_POPUP_QUIESCENCE_SECONDS = 0.1
 
 
 class RenderError(RuntimeError):
     """A step needs (re-)compile: missing action or mismatched identity."""
+
+
+@dataclass(slots=True)
+class _PageObservation:
+    opened_at: float
+    video: Video | None
+    closed_at: float | None = None
+    visual_prime: asyncio.Task[float | None] | None = None
+
+
+@dataclass(slots=True)
+class _PopupSession:
+    page: Page
+    video: Video
+    opened_at: float
+    visual_ready_delay: float = 0.0
+    closed_at: float | None = None
+    close_handled: bool = False
+
+
+def _active_page(main_page: Page, popup: _PopupSession | None) -> Page:
+    if main_page.is_closed():
+        raise RenderError("główne okno zostało zamknięte podczas render")
+    if popup is not None and not popup.page.is_closed():
+        return popup.page
+    return main_page
+
+
+def _unexpected_pages(
+    observed_pages: dict[Page, _PageObservation],
+    main_page: Page,
+    popup: _PopupSession | None,
+) -> list[Page]:
+    """Observed pages outside the deterministic main + one-popup contract.
+
+    The event-backed list deliberately retains pages that already closed, so an
+    unexpected page cannot evade validation by opening and closing between steps.
+    """
+
+    expected_popup = popup.page if popup is not None else None
+    return [page for page in observed_pages if page is not main_page and page is not expected_popup]
+
+
+def _sync_popup_close(
+    popup: _PopupSession | None,
+    observed_pages: dict[Page, _PageObservation],
+    anchor: float,
+) -> None:
+    if popup is None or popup.closed_at is not None:
+        return
+    observation = observed_pages.get(popup.page)
+    if observation is not None and observation.closed_at is not None:
+        popup.closed_at = max(popup.opened_at, observation.closed_at - anchor)
+
+
+async def _wait_for_render_popup(
+    observed_pages: dict[Page, _PageObservation],
+    known_pages: set[Page],
+    started_at: float,
+    timeout: float = _POPUP_DETECTION_SECONDS,
+) -> list[Page]:
+    """Return pages opened inside the actual-click discovery window."""
+
+    deadline = started_at + timeout
+    while True:
+        candidates = [
+            page
+            for page, observation in observed_pages.items()
+            if page not in known_pages and started_at <= observation.opened_at <= deadline
+        ]
+        if candidates:
+            await asyncio.sleep(_POPUP_QUIESCENCE_SECONDS)
+            return sorted(
+                (
+                    page
+                    for page, observation in observed_pages.items()
+                    if page not in known_pages and started_at <= observation.opened_at <= deadline
+                ),
+                key=lambda page: observed_pages[page].opened_at,
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        await asyncio.sleep(min(0.05, remaining))
+
+
+async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -> None:
+    """Restore both DOM overlays in one browser task to avoid a partial frame."""
+
+    readiness = await page.evaluate(
+        """expectChrome => {
+            const cursor = window.__guidebot_cursor;
+            const chrome = window.__guidebot_chrome;
+            return {
+                cursor: !!cursor && ["ensure", "moveTo"].every(
+                    name => typeof cursor[name] === "function"
+                ),
+                chrome: !expectChrome || (!!chrome && ["ensure", "setUrl"].every(
+                    name => typeof chrome[name] === "function"
+                )),
+            };
+        }""",
+        chrome is not None,
+    )
+    # Context init scripts normally make both APIs available. Repair a missing
+    # controller first; the final mount still happens atomically below.
+    if chrome is not None and not readiness.get("chrome"):
+        await chrome.ensure(page)
+    if not readiness.get("cursor"):
+        await overlay.ensure(page)
+
+    await page.evaluate(
+        """([x, y, expectChrome, url]) => {
+            const cursor = window.__guidebot_cursor;
+            const chrome = window.__guidebot_chrome;
+            if (!cursor || typeof cursor.ensure !== "function" ||
+                typeof cursor.moveTo !== "function") {
+                throw new Error("guidebot cursor API is unavailable after injection");
+            }
+            if (expectChrome) {
+                if (!chrome || typeof chrome.ensure !== "function") {
+                    throw new Error("guidebot chrome API is unavailable after injection");
+                }
+                chrome.ensure(url);
+            }
+            cursor.ensure();
+            return cursor.moveTo(x, y, 0);
+        }""",
+        [overlay.pos[0], overlay.pos[1], chrome is not None, page.url],
+    )
+
+
+async def _prime_visuals(
+    page: Page,
+    overlay: Overlay,
+    chrome: Chrome | None,
+    *,
+    timeout: float = _POPUP_DETECTION_SECONDS,
+) -> float | None:
+    """Mount visual layers from the page event, before its first useful frame.
+
+    Chromium can replace a freshly opened ``about:blank`` document without
+    rerunning init-script timers. Keep priming until the document root and both
+    layers stay stable for one quiescence window, then force a captured frame.
+    """
+
+    deadline = time.monotonic() + timeout
+    marker = f"{time.monotonic_ns()}-{id(page)}"
+    stable_since: float | None = None
+    status_script = """([token, expectChrome]) => {
+        const root = document.documentElement;
+        if (!root) return {ready: false};
+        const sameRoot = root.__guidebotVisualPrime === token;
+        root.__guidebotVisualPrime = token;
+        return {
+            ready: true,
+            sameRoot,
+            cursor: !!document.querySelector("[data-guidebot-cursor]"),
+            chrome: !expectChrome || !!document.querySelector("[data-guidebot-chrome]"),
+        };
+    }"""
+    while not page.is_closed():
+        try:
+            status = await page.evaluate(status_script, [marker, chrome is not None])
+            now = time.monotonic()
+            complete = (
+                isinstance(status, dict)
+                and status.get("ready") is True
+                and status.get("sameRoot") is True
+                and status.get("cursor") is True
+                and status.get("chrome") is True
+            )
+            if not complete:
+                await _ensure_visuals(page, overlay, chrome)
+                stable_since = now
+            elif stable_since is None:
+                stable_since = now
+            elif now - stable_since >= _POPUP_QUIESCENCE_SECONDS:
+                await page.screenshot()
+                final_status = await page.evaluate(status_script, [marker, chrome is not None])
+                if (
+                    isinstance(final_status, dict)
+                    and final_status.get("sameRoot") is True
+                    and final_status.get("cursor") is True
+                    and final_status.get("chrome") is True
+                ):
+                    return time.monotonic()
+                stable_since = None
+        except PlaywrightError:
+            # A navigation may replace the execution context between the page
+            # event and injection. Retry only inside the bounded prime window.
+            if page.is_closed():
+                return None
+            stable_since = None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RenderError("nie udało się zainicjować warstw wizualnych nowej strony")
+        await asyncio.sleep(min(0.01, remaining))
+    return None
+
+
+async def _prepare_main_after_popup_close(
+    page: Page,
+    overlay: Overlay,
+    chrome: Chrome | None,
+    settle_ms: float,
+) -> None:
+    """Let opener navigation settle before touching its execution context again."""
+
+    await page.bring_to_front()
+    await Recorder(page, None, settle_ms=settle_ms).apply_readiness("none")
+    try:
+        await page.wait_for_load_state()
+        await _ensure_visuals(page, overlay, chrome)
+    except PlaywrightError as exc:
+        if page.is_closed():
+            raise RenderError("główne okno zamknęło się po zamknięciu popupu") from exc
+        # A navigation can destroy the context between the load-state check and
+        # cursor restoration. Wait for the replacement document and retry once.
+        await page.wait_for_load_state()
+        await _ensure_visuals(page, overlay, chrome)
 
 
 def _narration(step: Step) -> str | None:
@@ -48,6 +286,57 @@ def _resolve_url(scenario: Scenario, url: str) -> str:
     if base and not url.startswith(("http://", "https://")):
         return urljoin(base, url)
     return url
+
+
+def _compiled_from(step: Step) -> str:
+    kind = step.command_kind()
+    if kind == "teach":
+        return step.teach
+    if kind == "click":
+        return step.click
+    if kind == "hover":
+        return step.hover
+    if kind == "enterText":
+        return step.enter_text.into
+    if kind == "wait" and isinstance(step.wait, WaitUntil):
+        return step.wait.until
+    raise ValueError(f"krok {kind} nie wymaga cachedAction")
+
+
+def _compiled_action_is_current(
+    step: Step, action: CachedAction | None, scenario_hash: str
+) -> bool:
+    """Check source/config fingerprints before replaying frozen behavior."""
+
+    if not step.requires_target():
+        return action is None
+    if action is None:
+        return False
+    kind = step.command_kind()
+    expected_action = {
+        "click": "click",
+        "hover": "hover",
+        "enterText": "type",
+        "wait": "waitFor",
+    }.get(kind)
+    if expected_action is not None and action.action != expected_action:
+        return False
+    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
+    fingerprint = action.fingerprint
+    if not (
+        fingerprint.compiler_version == COMPILER_VERSION
+        and fingerprint.command_kind == kind
+        and fingerprint.compiled_from == _compiled_from(step)
+        and fingerprint.config_hash == scenario_hash
+        and fingerprint.state == expected_state
+        and fingerprint.expect == action.expect
+    ):
+        return False
+    return not (
+        kind == "teach"
+        and action.action == "type"
+        and (action.input_text is None or action.input_text not in step.teach)
+    )
 
 
 async def run_render(
@@ -75,6 +364,15 @@ async def run_render(
         raise RenderError(f"brak pliku compiled ({cpath.name}) — uruchom `compile`") from exc
     if len(compiled.actions) != len(scenario.steps):
         raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
+    if compiled.compiler_version != COMPILER_VERSION or any(
+        action is not None and action.fingerprint.compiler_version != COMPILER_VERSION
+        for action in compiled.actions
+    ):
+        raise RenderError("compiled ma starszą wersję — uruchom `compile`")
+    scenario_hash = config_hash(cfg)
+    for index, (step, action) in enumerate(zip(scenario.steps, compiled.actions, strict=True)):
+        if not _compiled_action_is_current(step, action, scenario_hash):
+            raise RenderError(f"krok {index}: compiled jest nieaktualny — uruchom `compile`")
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
@@ -95,28 +393,94 @@ async def run_render(
         record_video_dir=str(work),
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
     )
-    page = await context.new_page()
-    page.set_default_timeout(timeout * 1000)
-    video = page.video
     overlay = Overlay(cfg.cursor)
-    await overlay.install(page)
+    await overlay.install_context(context)
     chrome = Chrome(cfg.chrome) if cfg.chrome.enabled else None
     if chrome is not None:
-        await chrome.install(page)
-    recorder = Recorder(page, overlay, settle_ms=cfg.cursor.settle)
+        await chrome.install_context(context)
+
+    observed_pages: dict[Page, _PageObservation] = {}
+
+    def observe_page(candidate: Page) -> None:
+        if candidate in observed_pages:
+            return
+        observation = _PageObservation(
+            opened_at=time.monotonic(),
+            video=candidate.video,
+            visual_prime=asyncio.create_task(_prime_visuals(candidate, overlay, chrome)),
+        )
+        observed_pages[candidate] = observation
+
+        def mark_closed(_: Page, observed: _PageObservation = observation) -> None:
+            if observed.closed_at is None:
+                observed.closed_at = time.monotonic()
+
+        candidate.on("close", mark_closed)
+
+    context.on("page", observe_page)
+    page = await context.new_page()
+    observe_page(page)
+    page.set_default_timeout(timeout * 1000)
+    main_observation = observed_pages[page]
+    if main_observation.visual_prime is not None:
+        await main_observation.visual_prime
+    video = page.video
+    if video is None:  # pragma: no cover - record_video_dir makes this invariant true
+        await context.close()
+        raise RenderError("Playwright nie udostępnił nagrania głównego okna")
+
+    # Chromium's screencast may not emit a first frame for a pristine about:blank
+    # page.  A scenario can narrate for several seconds before its first navigate;
+    # anchoring at the Page event would then put that narration on a timeline the
+    # WebM never encoded.  Paint a neutral document, force one captured frame, and
+    # only then establish the shared narration/window clock.  The tiny warm-up is
+    # bounded pre-roll; it avoids losing an arbitrarily long opening narration.
+    await page.set_content("<style>html,body{margin:0;background:white}</style>")
+    await _ensure_visuals(page, overlay, chrome)
+    await page.screenshot()
+    await page.wait_for_timeout(100)
+    anchor = time.monotonic()
 
     placed: list[Placed] = []
-    anchor = time.monotonic()
+    popup: _PopupSession | None = None
+    popup_open_at_end = False
 
     bar = tqdm(total=len(scenario.steps), desc="render", unit="krok", disable=not verbose)
     try:
         for index, step in enumerate(scenario.steps):
+            _sync_popup_close(popup, observed_pages, anchor)
+            if popup is not None and popup.page.is_closed() and not popup.close_handled:
+                raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
+            if _unexpected_pages(observed_pages, page, popup):
+                raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
             kind = step.command_kind()
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(scenario.steps)}] {kind}")
+
+            active_page = _active_page(page, popup)
+            await active_page.bring_to_front()
+            await _ensure_visuals(active_page, overlay, chrome)
+
+            seg = segments.get(index)
+            if seg is not None:
+                placed.append(Placed(segment=seg, offset=time.monotonic() - anchor))
+                await asyncio.sleep(seg.duration)  # narration drives the pace
+
+            _sync_popup_close(popup, observed_pages, anchor)
+            if popup is not None and popup.page.is_closed() and not popup.close_handled:
+                raise RenderError("popup zamknął się asynchronicznie podczas narracji")
+            active_page = _active_page(page, popup)
+            if _unexpected_pages(observed_pages, page, popup):
+                raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
+            await active_page.bring_to_front()
+            await _ensure_visuals(active_page, overlay, chrome)
+            cached = compiled.actions[index]
+            if cached is not None and cached.opens_popup and popup is not None:
+                raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
+            recorder = Recorder(active_page, overlay, settle_ms=cfg.cursor.settle)
             try:
-                await _render_step(
-                    page,
+                opened = await _render_step(
+                    active_page,
                     recorder,
                     overlay,
                     chrome,
@@ -124,29 +488,93 @@ async def run_render(
                     step,
                     kind,
                     index,
-                    compiled.actions[index],
-                    segments,
-                    placed,
+                    cached,
                     anchor,
+                    observed_pages,
                 )
+                if opened is not None:
+                    popup = opened
+                    popup.page.set_default_timeout(timeout * 1000)
+                    prepared = await _prepare_popup(popup.page, overlay, chrome)
+                    _sync_popup_close(popup, observed_pages, anchor)
+                    if not prepared:
+                        raise RenderError("popup zamknął się podczas otwierania")
+                if page.is_closed():
+                    raise RenderError("główne okno zostało zamknięte podczas render")
+                _sync_popup_close(popup, observed_pages, anchor)
+                if popup is not None and popup.page.is_closed():
+                    if not popup.close_handled:
+                        if opened is not None or kind in {"say", "navigate", "wait"}:
+                            raise RenderError(
+                                "popup zamknął się asynchronicznie poza obsługiwaną akcją"
+                            )
+                        popup.close_handled = True
+                        await _prepare_main_after_popup_close(
+                            page,
+                            overlay,
+                            chrome,
+                            cfg.cursor.settle,
+                        )
+                if _unexpected_pages(observed_pages, page, popup):
+                    raise RenderError(
+                        f"krok {index}: nieoczekiwany popup — uruchom `compile --force`"
+                    )
             except Exception as exc:
                 if verbose:
                     tqdm.write(f"   ✗ {type(exc).__name__}: {exc}")
                 if pause_on_error:
-                    await pause_for_inspection(page, "render", index, kind, exc)
+                    debug_page = _active_page(page, popup)
+                    await pause_for_inspection(debug_page, "render", index, kind, exc)
                 raise
             bar.update(1)
+        await asyncio.sleep(0)
+        _sync_popup_close(popup, observed_pages, anchor)
+        if page.is_closed():
+            raise RenderError("główne okno zostało zamknięte na końcu scenariusza")
+        if _unexpected_pages(observed_pages, page, popup):
+            raise RenderError("nieoczekiwany popup na końcu scenariusza")
+        if popup is not None and popup.page.is_closed() and not popup.close_handled:
+            raise RenderError("popup zamknął się asynchronicznie na końcu scenariusza")
     finally:
         bar.close()
+        _sync_popup_close(popup, observed_pages, anchor)
+        if popup is not None and popup.closed_at is None:
+            popup_open_at_end = True
+            popup.closed_at = max(popup.opened_at, time.monotonic() - anchor)
+        prime_tasks = [
+            observation.visual_prime
+            for observation in observed_pages.values()
+            if observation.visual_prime is not None
+        ]
+        for task in prime_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*prime_tasks, return_exceptions=True)
+        await context.close()
 
-    await page.close()
-    await context.close()
-
-    webm = Path(await video.path())
-    total = probe_duration(webm)
+    main_webm = Path(await video.path())
     bed = work / "bed.wav"
+    if popup is None:
+        total = probe_duration(main_webm)
+        build_audio_bed(placed, total, bed)
+        mux(main_webm, bed, out_mp4)
+        return
+
+    popup_webm = Path(await popup.video.path())
+    closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
+    assert closed_at is not None
+    composite = work / f"{out_mp4.stem}.composite.mp4"
+    compose_popup_video(
+        main_webm,
+        popup_webm,
+        composite,
+        popup.opened_at,
+        closed_at,
+        visual_ready_delay=popup.visual_ready_delay,
+    )
+    total = probe_duration(composite)
     build_audio_bed(placed, total, bed)
-    mux(webm, bed, out_mp4)
+    mux_preencoded(composite, bed, out_mp4)
 
 
 async def _render_step(
@@ -159,32 +587,23 @@ async def _render_step(
     kind: str,
     index: int,
     cached: CachedAction | None,
-    segments: dict[int, Segment],
-    placed: list[Placed],
     anchor: float,
-) -> None:
+    observed_pages: dict[Page, _PageObservation],
+) -> _PopupSession | None:
+    pages_before_prepare = set(observed_pages)
     # Both visual layers can be removed by an SPA without a navigation.  Check
     # them before every recorded step, including narration-only and timed waits.
-    await overlay.ensure(page)
-    if chrome is not None:
-        await chrome.ensure(page)
-
-    seg = segments.get(index)
-    if seg is not None:
-        placed.append(Placed(segment=seg, offset=time.monotonic() - anchor))
-        await asyncio.sleep(seg.duration)  # narration drives the pace
+    await _ensure_visuals(page, overlay, chrome)
 
     if kind == "say":
-        return
+        return None
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()
         url = _resolve_url(scenario, source_url)
         type_override = step.navigate_type_override()
         animate = (
-            scenario.config.chrome.type_on_navigate
-            if type_override is None
-            else type_override
+            scenario.config.chrome.type_on_navigate if type_override is None else type_override
         )
         if chrome is not None and scenario.config.chrome.show_url and animate:
             await chrome.set_url(page, url, animate=True)
@@ -196,26 +615,115 @@ async def _render_step(
         # final page URL after the new document has loaded.
         if chrome is not None and scenario.config.chrome.show_url and not animate:
             await chrome.set_url(page, page.url, animate=False)
-        await overlay.ensure(page)
-        if chrome is not None:
-            await chrome.ensure(page)
-        return
+        await _ensure_visuals(page, overlay, chrome)
+        return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
-        return
+        return None
 
     if cached is None:
         raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
     if cached.action != "waitFor" and not await reuse_is_valid(page, cached):
-        raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile`")
+        raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
+    if cached.opens_popup and cached.action != "click":
+        raise RenderError(f"krok {index}: tylko click może otworzyć popup")
 
+    opened: _PopupSession | None = None
     if cached.action == "click":
-        await recorder.click(cached.target)
+        click_started_at: float | None = None
+
+        def mark_click_started() -> None:
+            nonlocal click_started_at
+            if any(candidate not in pages_before_prepare for candidate in observed_pages):
+                raise RenderError(f"krok {index}: popup otworzył się przed akcją click")
+            click_started_at = time.monotonic()
+
+        await recorder.click(cached.target, before_click=mark_click_started)
+        if cached.opens_popup:
+            if click_started_at is None:  # pragma: no cover - Recorder invariant
+                raise RenderError("wewnętrzny błąd obserwacji akcji click")
+            popup_pages = await _wait_for_render_popup(
+                observed_pages,
+                pages_before_prepare,
+                click_started_at,
+            )
+            if not popup_pages:
+                raise RenderError(
+                    f"krok {index}: oczekiwany popup nie otworzył się — uruchom `compile --force`"
+                )
+            if len(popup_pages) != 1:
+                raise RenderError("v1 obsługuje dokładnie jeden popup w sesji")
+            popup_page = popup_pages[0]
+            if await popup_page.opener() is not page:
+                raise RenderError("nowa strona nie jest popupem aktywnego okna")
+
+            observation = observed_pages.get(popup_page)
+            if observation is None:  # defensive fallback; context event is the primary path
+                observation = _PageObservation(
+                    opened_at=time.monotonic(),
+                    video=popup_page.video,
+                    closed_at=time.monotonic() if popup_page.is_closed() else None,
+                )
+                observed_pages[popup_page] = observation
+            visual_ready_at = (
+                await observation.visual_prime if observation.visual_prime is not None else None
+            )
+            popup_video = observation.video or popup_page.video
+            if popup_video is None:  # pragma: no cover - context recording is enabled
+                raise RenderError("Playwright nie udostępnił nagrania popupu")
+            opened_at = max(0.0, observation.opened_at - anchor)
+            closed_at = (
+                max(opened_at, observation.closed_at - anchor)
+                if observation.closed_at is not None
+                else None
+            )
+            opened = _PopupSession(
+                page=popup_page,
+                video=popup_video,
+                opened_at=opened_at,
+                visual_ready_delay=(
+                    max(0.0, visual_ready_at - observation.opened_at)
+                    if visual_ready_at is not None
+                    else 0.0
+                ),
+                closed_at=closed_at,
+            )
     elif cached.action == "hover":
         await recorder.hover(cached.target)
     elif cached.action == "type":
-        await recorder.enter_text(cached.target, step.enter_text.text)
+        input_text = step.enter_text.text if step.enter_text is not None else cached.input_text
+        if input_text is None:
+            raise RenderError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
+        await recorder.enter_text(cached.target, input_text)
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         await recorder.wait_for(cached.target, cached.state or "visible", timeout)
-    await recorder.apply_readiness(cached.expect)
+    if not page.is_closed():
+        try:
+            await recorder.apply_readiness(cached.expect)
+        except PlaywrightError:
+            if not page.is_closed():
+                raise
+    return opened
+
+
+async def _prepare_popup(
+    page: Page,
+    overlay: Overlay,
+    chrome: Chrome | None,
+) -> bool:
+    """Prepare a new page; translate close races into lifecycle state."""
+
+    if page.is_closed():
+        return False
+    try:
+        await page.bring_to_front()
+        await page.wait_for_load_state()
+        await overlay.ensure(page)
+        if chrome is not None:
+            await chrome.ensure(page)
+    except PlaywrightError:
+        if page.is_closed():
+            return False
+        raise
+    return not page.is_closed()
