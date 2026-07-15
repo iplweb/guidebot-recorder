@@ -7,6 +7,8 @@ installed (no shared conftest by design).
 
 from __future__ import annotations
 
+import importlib
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,11 +16,15 @@ from pathlib import Path
 import pytest
 
 from guidebot_recorder.video.mux import (
+    MuxAudioTrack,
     compose_popup_video,
     mux,
+    mux_audio_tracks,
     mux_preencoded,
     probe_duration,
 )
+
+mux_module = importlib.import_module("guidebot_recorder.video.mux")
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -228,6 +234,28 @@ def _video_codec(path: Path) -> str:
     return proc.stdout.strip()
 
 
+def _audio_streams(path: Path) -> list[dict]:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index,codec_name,sample_rate,channels:"
+            "stream_tags=language,title,handler_name:stream_disposition=default",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(proc.stdout)["streams"]
+
+
 def test_probe_duration_matches(tmp_path: Path) -> None:
     video = tmp_path / "v.mp4"
     _make_video(video, 2.0)
@@ -237,6 +265,25 @@ def test_probe_duration_matches(tmp_path: Path) -> None:
 def test_probe_duration_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         probe_duration(tmp_path / "nope.mp4")
+
+
+def test_atomic_output_preserves_previous_artifact_after_ffmpeg_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"previous-good-artifact")
+
+    def fail_after_partial_write(cmd: list[str]):
+        Path(cmd[-1]).write_bytes(b"partial")
+        raise RuntimeError("ffmpeg failed")
+
+    monkeypatch.setattr(mux_module, "_run", fail_after_partial_write)
+
+    with pytest.raises(RuntimeError, match="ffmpeg failed"):
+        mux_module._run_to_output(["ffmpeg", "-y"], out)
+
+    assert out.read_bytes() == b"previous-good-artifact"
+    assert list(tmp_path.glob(".out.*.mp4")) == []
 
 
 def test_mux_produces_one_video_one_audio(tmp_path: Path) -> None:
@@ -268,6 +315,109 @@ def test_mux_shortest_clips_to_shorter_stream(tmp_path: Path) -> None:
 
     # -shortest → output no longer than the 1s audio.
     assert probe_duration(out) == pytest.approx(1.0, abs=0.5)
+
+
+def test_mux_audio_tracks_embeds_languages_titles_and_default_disposition(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "v.mp4"
+    polish = tmp_path / "pl.wav"
+    english = tmp_path / "en.wav"
+    out = tmp_path / "out.mp4"
+    _make_video(video, 2.0)
+    _make_audio(polish, 2.0)
+    _make_audio(english, 2.0)
+
+    mux_audio_tracks(
+        video,
+        [
+            MuxAudioTrack(polish, language="pol", title="Polski", default=True),
+            MuxAudioTrack(english, language="eng", title="English"),
+        ],
+        out,
+    )
+
+    assert _stream_types(out) == ["video", "audio", "audio"]
+    streams = _audio_streams(out)
+    assert [stream["codec_name"] for stream in streams] == ["aac", "aac"]
+    assert [stream["sample_rate"] for stream in streams] == ["48000", "48000"]
+    assert [stream["channels"] for stream in streams] == [2, 2]
+    assert [stream["tags"]["language"] for stream in streams] == ["pol", "eng"]
+    assert [stream["tags"]["handler_name"] for stream in streams] == ["Polski", "English"]
+    assert [stream["disposition"]["default"] for stream in streams] == [1, 0]
+    payload = out.read_bytes()
+    assert payload.find(b"moov") < payload.find(b"mdat")
+
+
+def test_mux_audio_tracks_requires_exactly_one_default(tmp_path: Path) -> None:
+    video = tmp_path / "v.mp4"
+    audio = tmp_path / "a.wav"
+    _make_video(video, 1.0)
+    _make_audio(audio, 1.0)
+
+    with pytest.raises(ValueError, match="exactly one default"):
+        mux_audio_tracks(
+            video,
+            [MuxAudioTrack(audio, language="pol")],
+            tmp_path / "out.mp4",
+        )
+
+
+def test_mux_audio_tracks_rejects_unregistered_language_code(tmp_path: Path) -> None:
+    video = tmp_path / "v.mp4"
+    audio = tmp_path / "a.wav"
+    _make_video(video, 1.0)
+    _make_audio(audio, 1.0)
+
+    with pytest.raises(ValueError, match="registered ISO 639-2"):
+        mux_audio_tracks(
+            video,
+            [MuxAudioTrack(audio, language="xyz", default=True)],
+            tmp_path / "out.mp4",
+        )
+
+
+def test_mux_audio_tracks_rejects_audio_shorter_than_video(tmp_path: Path) -> None:
+    video = tmp_path / "v.mp4"
+    audio = tmp_path / "a.wav"
+    _make_video(video, 2.0)
+    _make_audio(audio, 1.0)
+
+    with pytest.raises(ValueError, match="duration.*does not match"):
+        mux_audio_tracks(
+            video,
+            [MuxAudioTrack(audio, language="pol", default=True)],
+            tmp_path / "out.mp4",
+        )
+
+
+def test_mux_audio_tracks_preencoded_copies_video_with_multiple_audio_streams(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "v.mp4"
+    polish = tmp_path / "pl.wav"
+    english = tmp_path / "en.wav"
+    out = tmp_path / "out.mp4"
+    _make_video(video, 2.0)
+    _make_audio(polish, 2.0)
+    _make_audio(english, 2.0)
+
+    mux_audio_tracks(
+        video,
+        [
+            MuxAudioTrack(polish, language="pol", title="Polski", default=True),
+            MuxAudioTrack(english, language="eng", title="English"),
+        ],
+        out,
+        preencoded=True,
+    )
+
+    assert _video_codec(out) == "h264"
+    assert _stream_types(out) == ["video", "audio", "audio"]
+    assert [stream["tags"]["language"] for stream in _audio_streams(out)] == [
+        "pol",
+        "eng",
+    ]
 
 
 def test_compose_popup_video_switches_main_popup_main(tmp_path: Path) -> None:

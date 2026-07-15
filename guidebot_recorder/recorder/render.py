@@ -1,8 +1,8 @@
 """The `render` phase — deterministic replay + film assembly (§8/§9).
 
-Phase 0: pre-synthesize all narration into the cache (no "live" TTS calls).
+Phase 0: pre-synthesize every configured narration track into the cache.
 Render: 0×LLM, fresh browser, single pass; narration drives the pace.
-Assembly: Playwright video + audio bed (ffmpeg), approximate sync (decision K2).
+Assembly: Playwright video + language audio beds (ffmpeg), approximate sync (K2).
 
 Resolved actions are read from the separate ``*.compiled.yaml`` sidecar.
 """
@@ -10,6 +10,9 @@ Resolved actions are read from the separate ``*.compiled.yaml`` sidecar.
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,7 +30,7 @@ from tqdm import tqdm
 
 from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
-from guidebot_recorder.models.config import config_hash
+from guidebot_recorder.models.config import TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import pause_for_inspection
@@ -38,14 +41,15 @@ from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
+    MuxAudioTrack,
     compose_popup_video,
-    mux,
-    mux_preencoded,
+    mux_audio_tracks,
     probe_duration,
 )
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
+_VIDEO_POSTROLL_SECONDS = 0.1
 
 
 class RenderError(RuntimeError):
@@ -274,11 +278,96 @@ async def _prepare_main_after_popup_close(
 
 
 def _narration(step: Step) -> str | None:
-    if step.say:
-        return step.say
-    if step.teach:
-        return step.teach
-    return None
+    return step.narration()
+
+
+async def _wait_for_step_narration(segments: list[Segment]) -> None:
+    """Pace one shared visual step by its longest configured narration."""
+
+    if segments:
+        await asyncio.sleep(max(segment.duration for segment in segments))
+
+
+def _mux_tracks_for_timeline(
+    configs: list[TtsConfig],
+    placed_by_language: dict[str, list[Placed]],
+    total: float,
+    work: Path,
+) -> list[MuxAudioTrack]:
+    """Build one full-length bed per language in deterministic stream order."""
+
+    tracks: list[MuxAudioTrack] = []
+    for index, tts in enumerate(configs):
+        for placement in placed_by_language[tts.lang]:
+            if placement.offset + placement.segment.duration > total:
+                raise RenderError(
+                    f"narracja {tts.lang} wykracza poza nagranie wideo — render przerwany"
+                )
+        bed = work / f"bed-{tts.mp4_language()}.wav"
+        build_audio_bed(placed_by_language[tts.lang], total, bed)
+        tracks.append(
+            MuxAudioTrack(
+                path=bed,
+                language=tts.mp4_language(),
+                title=tts.title or tts.lang,
+                default=index == 0,
+            )
+        )
+    return tracks
+
+
+def _publish_render_artifacts(
+    staged_mp4: Path,
+    tracks: list[MuxAudioTrack],
+    work: Path,
+    out_mp4: Path,
+) -> None:
+    """Commit the new master and complete bed set, rolling back publish errors."""
+
+    backup = Path(tempfile.mkdtemp(prefix=".audio-beds-backup-", dir=work))
+    published: list[Path] = []
+    try:
+        for current in list(work.glob("bed-*.wav")):
+            os.replace(current, backup / current.name)
+        for track in tracks:
+            destination = work / track.path.name
+            os.replace(track.path, destination)
+            published.append(destination)
+        # The master is the commit point: until this atomic replace succeeds, the
+        # previous MP4 remains in place and any bed publication error is rolled back.
+        os.replace(staged_mp4, out_mp4)
+    except BaseException:
+        for destination in published:
+            destination.unlink(missing_ok=True)
+        for previous in backup.glob("bed-*.wav"):
+            os.replace(previous, work / previous.name)
+        raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _assemble_audio_tracks(
+    video: Path,
+    configs: list[TtsConfig],
+    placed_by_language: dict[str, list[Placed]],
+    total: float,
+    work: Path,
+    out_mp4: Path,
+    *,
+    preencoded: bool = False,
+) -> None:
+    """Stage a complete bed set, mux atomically, then publish durable WAVs."""
+
+    with tempfile.TemporaryDirectory(prefix=".audio-beds-", dir=work) as staging:
+        staged_mp4 = Path(staging) / f"{out_mp4.stem}.mp4"
+        tracks = _mux_tracks_for_timeline(
+            configs,
+            placed_by_language,
+            total,
+            Path(staging),
+        )
+        mux_audio_tracks(video, tracks, staged_mp4, preencoded=preencoded)
+        _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
 
 
 def _resolve_url(scenario: Scenario, url: str) -> str:
@@ -356,6 +445,13 @@ async def run_render(
 
     scenario = load_scenario(path)
     cfg = scenario.config
+    audio_configs = [cfg.tts, *cfg.audio_tracks]
+    providers = {tts.provider for tts in audio_configs}
+    if len(providers) != 1:
+        raise RenderError(
+            "jeden render obsługuje obecnie jeden provider TTS; "
+            f"skonfigurowano: {', '.join(sorted(providers))}"
+        )
 
     cpath = compiled_path(path)
     try:
@@ -376,16 +472,26 @@ async def run_render(
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
-    segments: dict[int, Segment] = {}
-    presynth = tqdm(scenario.steps, desc="tts", unit="krok", disable=not verbose)
-    for index, step in enumerate(presynth):
-        text = _narration(step)
-        if text:
-            segments[index] = await cache.get_or_synth(text, cfg.tts, tts_provider)
+    segments: dict[str, dict[int, Segment]] = {tts.lang: {} for tts in audio_configs}
+    narration_count = sum(_narration(step) is not None for step in scenario.steps)
+    presynth = tqdm(
+        total=narration_count * len(audio_configs),
+        desc="tts",
+        unit="segment",
+        disable=not verbose,
+    )
+    for index, step in enumerate(scenario.steps):
+        canonical_text = _narration(step)
+        if canonical_text is None:
+            continue
+        for track_index, tts in enumerate(audio_configs):
+            text = canonical_text if track_index == 0 else step.translations[tts.lang]
+            segments[tts.lang][index] = await cache.get_or_synth(text, tts, tts_provider)
+            presynth.update(1)
     presynth.close()
 
     # --- Render z nagrywaniem wideo (viewport z config — patrz compile) ---
-    work = out_mp4.parent / ".guidebot_video"
+    work = out_mp4.parent / ".guidebot_video" / out_mp4.stem
     work.mkdir(parents=True, exist_ok=True)
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
@@ -441,7 +547,7 @@ async def run_render(
     await page.wait_for_timeout(100)
     anchor = time.monotonic()
 
-    placed: list[Placed] = []
+    placed_by_language: dict[str, list[Placed]] = {tts.lang: [] for tts in audio_configs}
     popup: _PopupSession | None = None
     popup_open_at_end = False
 
@@ -461,10 +567,19 @@ async def run_render(
             await active_page.bring_to_front()
             await _ensure_visuals(active_page, overlay, chrome)
 
-            seg = segments.get(index)
-            if seg is not None:
-                placed.append(Placed(segment=seg, offset=time.monotonic() - anchor))
-                await asyncio.sleep(seg.duration)  # narration drives the pace
+            step_segments: list[Segment] = []
+            narration_offset = time.monotonic() - anchor
+            for tts in audio_configs:
+                seg = segments[tts.lang].get(index)
+                if seg is not None:
+                    placed_by_language[tts.lang].append(
+                        Placed(segment=seg, offset=narration_offset)
+                    )
+                    step_segments.append(seg)
+            if step_segments:
+                # One picture timeline: the action waits for the longest language,
+                # while shorter tracks naturally contain silence before the action.
+                await _wait_for_step_narration(step_segments)
 
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
@@ -527,7 +642,12 @@ async def run_render(
                     await pause_for_inspection(debug_page, "render", index, kind, exc)
                 raise
             bar.update(1)
-        await asyncio.sleep(0)
+        # Force a bounded final frame after narration/action completion. Without
+        # this post-roll, a static last page can leave the VFR recording a fraction
+        # shorter than the audio timeline and make the final syllable trimmable.
+        await asyncio.sleep(_VIDEO_POSTROLL_SECONDS)
+        postroll_page = _active_page(page, popup)
+        await postroll_page.screenshot()
         _sync_popup_close(popup, observed_pages, anchor)
         if page.is_closed():
             raise RenderError("główne okno zostało zamknięte na końcu scenariusza")
@@ -553,11 +673,16 @@ async def run_render(
         await context.close()
 
     main_webm = Path(await video.path())
-    bed = work / "bed.wav"
     if popup is None:
         total = probe_duration(main_webm)
-        build_audio_bed(placed, total, bed)
-        mux(main_webm, bed, out_mp4)
+        _assemble_audio_tracks(
+            main_webm,
+            audio_configs,
+            placed_by_language,
+            total,
+            work,
+            out_mp4,
+        )
         return
 
     popup_webm = Path(await popup.video.path())
@@ -573,8 +698,15 @@ async def run_render(
         visual_ready_delay=popup.visual_ready_delay,
     )
     total = probe_duration(composite)
-    build_audio_bed(placed, total, bed)
-    mux_preencoded(composite, bed, out_mp4)
+    _assemble_audio_tracks(
+        composite,
+        audio_configs,
+        placed_by_language,
+        total,
+        work,
+        out_mp4,
+        preencoded=True,
+    )
 
 
 async def _render_step(

@@ -48,6 +48,7 @@ class Step(BaseModel):
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     wait: float | WaitUntil | None = None
     expect: Expect | None = None
+    translations: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _exactly_one_command(self) -> Step:
@@ -86,8 +87,39 @@ class Step(BaseModel):
             return self.navigate.type
         return None
 
+    def narration(self) -> str | None:
+        """Return the canonical/default narration without changing action intent."""
+
+        if self.say:
+            return self.say
+        if self.teach:
+            return self.teach
+        return None
+
 
 class Scenario(BaseModel):
     model_config = ConfigDict(extra="forbid")
     config: Config
     steps: list[Step]
+
+    @model_validator(mode="after")
+    def _complete_audio_translations(self) -> Scenario:
+        expected = {track.lang for track in self.config.audio_tracks}
+        for index, step in enumerate(self.steps):
+            actual = set(step.translations)
+            if step.narration() is None:
+                if actual:
+                    languages = ", ".join(sorted(actual))
+                    raise ValueError(
+                        f"krok {index}: tłumaczenia bez narracji `say`/`teach`: {languages}"
+                    )
+                continue
+            missing = expected - actual
+            if missing:
+                languages = ", ".join(sorted(missing))
+                raise ValueError(f"krok {index}: brak tłumaczeń dla ścieżek: {languages}")
+            unknown = actual - expected
+            if unknown:
+                languages = ", ".join(sorted(unknown))
+                raise ValueError(f"krok {index}: niezdefiniowane tłumaczenia: {languages}")
+        return self

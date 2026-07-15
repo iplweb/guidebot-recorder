@@ -1,6 +1,7 @@
 """TTS provider protocol + narration pre-synthesis cache (§8).
 
-Cache key = hash of the full ``config.tts`` section (provider/voice/lang/model/speed)
+Cache key = hash of the synthesis fields in ``config.tts``
+(provider/voice/lang/model/speed)
 + text + ``ttsAdapterVersion`` (provider adapter version) + ``cacheSchemaVersion``.
 Upgrading the adapter/provider alone, with ``config.tts`` unchanged, also invalidates
 the cache — which is why the versions enter the key as salt.
@@ -50,10 +51,10 @@ def cache_key(
     adapter_version: int,
     cache_schema_version: int,
 ) -> str:
-    """SHA-256 of the canonical projection: the ``config.tts`` section + text + versions.
+    """SHA-256 of the canonical synthesis settings + text + versions.
 
-    Sensitive to provider/voice/lang/model/speed, the content, and the version salt
-    (adapter + cache schema).
+    MP4-only ``title``/``trackLanguage`` metadata is intentionally excluded. The
+    key is sensitive to provider/voice/lang/model/speed, content, and version salt.
     """
     projection = {
         "adapter_version": adapter_version,

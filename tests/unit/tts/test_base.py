@@ -58,6 +58,13 @@ def test_cache_key_sensitive_to_schema_version():
     assert cache_key("a", _tts(), 1, 1) != cache_key("a", _tts(), 1, 2)
 
 
+def test_cache_key_ignores_mp4_track_metadata():
+    baseline = _tts()
+    metadata = baseline.model_copy(update={"title": "Polski", "track_language": "pol"})
+
+    assert cache_key("a", baseline, 1, 1) == cache_key("a", metadata, 1, 1)
+
+
 # --- TtsCache ---
 
 

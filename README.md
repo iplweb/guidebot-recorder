@@ -6,8 +6,8 @@
 
 Compile a text scenario (YAML) into a **deterministic training video**: a bot
 opens a page, walks through a flow step by step (Playwright), shows the cursor and
-clicks, and a voice-over (TTS) narrates what happens. The result is an `.mp4` with
-narration.
+clicks, and one or more language-specific voice-overs (TTS) narrate what happens.
+The result is an `.mp4` with selectable audio tracks.
 
 ## How it works — a two-phase compiler
 
@@ -97,6 +97,63 @@ Commands: `say` (narration only), `teach` (the voice reads a whole guiding sente
 and the bot performs the action extracted from it), `enterText`, `navigate`, `wait`
 (seconds or an element condition), plus `click`/`hover` as explicit escape hatches.
 Substitute secrets with `${ENV_VAR}` — they never land in the repo.
+
+### Multiple language audio tracks
+
+Keep `config.tts` as the default language and add render-only `audioTracks` plus a
+complete `translations` map on every narrated step:
+
+```yaml
+config:
+  title: "Logging in"
+  viewport: { width: 1280, height: 720 }
+  locale: pl-PL
+  tts:
+    provider: edge
+    voice: pl-PL-MarekNeural
+    lang: pl-PL
+    trackLanguage: pol
+    title: Polski
+  audioTracks:
+    - provider: edge
+      voice: en-US-GuyNeural
+      lang: en-US
+      trackLanguage: eng
+      title: English
+steps:
+  - say: "Witaj."
+    translations:
+      en-US: "Welcome."
+  - teach: "Kliknij przycisk Zaloguj."
+    translations:
+      en-US: "Click the Log in button."
+```
+
+`lang` is the TTS/translation key; `trackLanguage` is the lowercase ISO 639-2 code
+stored in MP4 (`pol`, `eng`, `deu`, and so on). Every alternate track needs a
+translation for every `say`/`teach`; Guidebot fails instead of silently mixing
+languages. The canonical `teach` still controls compilation, so translated narration
+cannot change the browser action and does not require a recompile.
+
+Guidebot records the browser once. At each step it waits for the longest language,
+then performs the shared action. The output contains one H.264 video stream and one
+AAC-LC 48 kHz stereo stream per language; the default `tts` stream is first and
+marked as default. Full-length WAV beds remain in
+`<output-dir>/.guidebot_video/<output-stem>/bed-<trackLanguage>.wav`.
+Successful rerenders replace that complete set and remove languages no longer
+configured; a failed or interrupted build/mux keeps the previous master and beds.
+
+The built-in `guidebot render` command uses Edge TTS and rejects any configured
+provider other than `edge` before launching the recording browser. Custom callers of
+the Python render API may inject another provider implementation, but all tracks in
+one render must still use that same provider name.
+
+The MP4 is a useful multi-track master. YouTube Studio's documented language workflow
+currently asks for a separate audio-only file of roughly the same duration for each
+added language, so use those generated WAV beds when uploading dubs:
+[YouTube multi-language audio](https://support.google.com/youtube/answer/13338784?hl=en).
+See [`examples/multilingual-login.scenario.yaml`](examples/multilingual-login.scenario.yaml)
+for a complete scenario.
 
 The optional `config.chrome` block is render-only and defaults to `enabled: false`,
 so existing scenarios keep their current output. When enabled, `showUrl` controls

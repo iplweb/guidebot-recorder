@@ -7,12 +7,27 @@ All helpers are fail-loud: a missing binary or a non-zero exit raises immediatel
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import subprocess
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+
+from guidebot_recorder.languages import is_iso_639_2
 
 #: Audio sample rate used everywhere in the montage pipeline (design §8).
 SAMPLE_RATE = 48000
+
+
+@dataclass(frozen=True, slots=True)
+class MuxAudioTrack:
+    """One audio input and the metadata of its MP4 stream."""
+
+    path: Path
+    language: str
+    title: str | None = None
+    default: bool = False
 
 
 def _resolve(binary: str) -> str:
@@ -42,6 +57,29 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     if proc.returncode != 0:
         raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
     return proc
+
+
+def _run_to_output(cmd: list[str], out: Path) -> None:
+    """Run an ffmpeg command atomically, appending a temporary output path.
+
+    The temporary file lives beside the final artifact so ``os.replace`` is atomic.
+    A failed command never truncates a previously successful MP4/WAV.
+    """
+
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{out.stem}.",
+        suffix=out.suffix,
+        dir=out.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        _run([*cmd, str(temporary)])
+        os.replace(temporary, out)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def probe_duration(path: Path) -> float:
@@ -207,8 +245,7 @@ def compose_popup_video(
     else:
         filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    _run_to_output(
         [
             ffmpeg_bin(),
             "-y",
@@ -225,8 +262,8 @@ def compose_popup_video(
             "libx264",
             "-pix_fmt",
             "yuv420p",
-            str(out),
-        ]
+        ],
+        out,
     )
 
 
@@ -240,8 +277,7 @@ def mux(video: Path, audio: Path, out: Path) -> None:
     """
     video, audio, out = Path(video), Path(audio), Path(out)
     _check_sources(video, audio)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    _run_to_output(
         [
             ffmpeg_bin(),
             "-y",
@@ -262,17 +298,107 @@ def mux(video: Path, audio: Path, out: Path) -> None:
             "-ar",
             str(SAMPLE_RATE),
             "-shortest",
-            str(out),
-        ]
+        ],
+        out,
     )
+
+
+def mux_audio_tracks(
+    video: Path,
+    tracks: list[MuxAudioTrack],
+    out: Path,
+    *,
+    preencoded: bool = False,
+) -> None:
+    """Attach one or more language-tagged audio tracks to a single MP4 video.
+
+    The first track must be the sole default stream. Every audio bed must already
+    match the video duration; the video clock is authoritative and ``-shortest``
+    is deliberately avoided so a malformed short track cannot truncate the film.
+    ``preencoded`` copies an already H.264-compatible picture (the popup
+    compositor path); otherwise Playwright's WebM picture is encoded to H.264.
+    """
+
+    video, out = Path(video), Path(out)
+    tracks = [
+        MuxAudioTrack(
+            path=Path(track.path),
+            language=track.language,
+            title=track.title,
+            default=track.default,
+        )
+        for track in tracks
+    ]
+    if not tracks:
+        raise ValueError("at least one audio track is required")
+    default_indices = [index for index, track in enumerate(tracks) if track.default]
+    if default_indices != [0]:
+        raise ValueError("exactly one default audio track is required and it must be first")
+    languages = [track.language for track in tracks]
+    if any(not is_iso_639_2(language) for language in languages):
+        raise ValueError("audio track language must be a registered ISO 639-2 code")
+    if len(languages) != len(set(languages)):
+        raise ValueError("audio track languages must be unique")
+
+    _check_sources(video, *(track.path for track in tracks))
+    video_duration = probe_duration(video)
+    duration_tolerance = 0.05
+    for track in tracks:
+        audio_duration = probe_duration(track.path)
+        if abs(audio_duration - video_duration) > duration_tolerance:
+            raise ValueError(
+                f"audio track {track.language} duration ({audio_duration}) does not match "
+                f"video duration ({video_duration})"
+            )
+
+    cmd = [ffmpeg_bin(), "-y", "-i", str(video)]
+    for track in tracks:
+        cmd += ["-i", str(track.path)]
+    cmd += ["-map", "0:v:0"]
+    for input_index in range(1, len(tracks) + 1):
+        cmd += ["-map", f"{input_index}:a:0"]
+    if preencoded:
+        cmd += ["-c:v", "copy"]
+    else:
+        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    cmd += [
+        "-c:a",
+        "aac",
+        "-profile:a",
+        "aac_low",
+        "-b:a",
+        "192k",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        "2",
+    ]
+    for stream_index, track in enumerate(tracks):
+        title = track.title or track.language
+        cmd += [
+            f"-metadata:s:a:{stream_index}",
+            f"language={track.language}",
+            f"-metadata:s:a:{stream_index}",
+            f"title={title}",
+            f"-metadata:s:a:{stream_index}",
+            f"handler_name={title}",
+            f"-disposition:a:{stream_index}",
+            "default" if track.default else "0",
+        ]
+    cmd += [
+        "-movflags",
+        "+faststart",
+        "-t",
+        f"{video_duration:.6f}",
+    ]
+    _run_to_output(cmd, out)
 
 
 def mux_preencoded(video: Path, audio: Path, out: Path) -> None:
     """Attach audio to an MP4-compatible video without re-encoding its picture."""
     video, audio, out = Path(video), Path(audio), Path(out)
     _check_sources(video, audio)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    _run(
+    _run_to_output(
         [
             ffmpeg_bin(),
             "-y",
@@ -291,6 +417,6 @@ def mux_preencoded(video: Path, audio: Path, out: Path) -> None:
             "-ar",
             str(SAMPLE_RATE),
             "-shortest",
-            str(out),
-        ]
+        ],
+        out,
     )

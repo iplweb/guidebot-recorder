@@ -1,0 +1,31 @@
+# One browser recording, two selectable MP4 audio tracks.
+# `lang` selects TTS/translation text; `trackLanguage` is ISO 639-2 MP4 metadata.
+config:
+  title: "Logowanie do systemu"
+  baseUrl: https://example.com
+  viewport: { width: 1280, height: 720 }
+  locale: pl-PL
+  tts:
+    provider: edge
+    voice: pl-PL-MarekNeural
+    lang: pl-PL
+    trackLanguage: pol
+    title: Polski
+  audioTracks:
+    - provider: edge
+      voice: en-US-GuyNeural
+      lang: en-US
+      trackLanguage: eng
+      title: English
+steps:
+  - say: "Witaj. Pokażę, jak zalogować się do systemu."
+    translations:
+      en-US: "Welcome. I will show you how to log in to the system."
+  - navigate: /login
+  - teach: "Aby się zalogować, kliknij przycisk Zaloguj."
+    translations:
+      en-US: "To log in, click the Log in button."
+  - enterText: { into: "pole adresu e-mail", text: "${DEMO_EMAIL}" }
+    say: "Teraz wpisuję adres e-mail."
+    translations:
+      en-US: "Now I am entering the email address."

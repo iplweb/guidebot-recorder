@@ -466,6 +466,10 @@ out of scope.
 
 ## 8. Narration (TTS) and audio assembly
 
+This section defines the original single-track baseline. Multiple language tracks,
+per-step maximum-duration pacing, and the no-`-shortest` multi-track mux are specified
+by `2026-07-15-multilingual-audio-design.md`.
+
 - **Pre-cache (render Phase 0):** before opening the recorded browser, we
   synthesize and **validate** each narration segment, saving it to cache (a build
   directory, e.g. `.guidebot/audio/<hash>.wav`; **key = hash: the full `config.tts`

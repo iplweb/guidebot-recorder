@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,13 +33,17 @@ SCENARIO_TEMPLATE = """\
 config:
   title: Popup logowania
   viewport: {{width: 640, height: 480}}
-  tts: {{provider: fake, voice: v, lang: pl-PL}}
+  tts: {{provider: fake, voice: v-pl, lang: pl-PL, trackLanguage: pol, title: Polski}}
+  audioTracks:
+    - {{provider: fake, voice: v-en, lang: en-US, trackLanguage: eng, title: English}}
   chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
 steps:
   - navigate: "{url}"
   - wait: 0.4
   - teach: "Otwórz popup logowania"
+    translations: {{en-US: "Open the login popup"}}
   - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
+    translations: {{en-US: "switch to the popup and type koparka@poczta.wp.pl in email"}}
   - wait: 0.4
   - click: "Zamknij popup logowania"
   - click: "Zakończ na stronie głównej"
@@ -100,6 +105,7 @@ class FakeTts:
 
     async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
         duration = 0.4
+        frequency = {"pl-PL": 440, "en-US": 880}.get(tts.lang, 660)
         subprocess.run(
             [
                 "ffmpeg",
@@ -107,7 +113,7 @@ class FakeTts:
                 "-f",
                 "lavfi",
                 "-i",
-                f"sine=frequency=660:duration={duration}:sample_rate=48000",
+                f"sine=frequency={frequency}:duration={duration}:sample_rate=48000",
                 "-t",
                 str(duration),
                 str(out),
@@ -135,6 +141,50 @@ def _stream_types(path: Path) -> list[str]:
         text=True,
     ).stdout
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _audio_streams(path: Path) -> list[dict]:
+    output = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream_tags=language,handler_name:stream_disposition=default",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return json.loads(output)["streams"]
+
+
+def _decode_audio_stream(path: Path, index: int) -> bytes:
+    return subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            f"0:a:{index}",
+            "-ac",
+            "1",
+            "-ar",
+            "8000",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
 
 
 def _rgb_at(path: Path, seconds: float) -> tuple[int, int, int]:
@@ -278,7 +328,15 @@ async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
     assert duration > 0
     stream_types = _stream_types(out)
     assert stream_types.count("video") == 1
-    assert stream_types.count("audio") == 1
+    assert stream_types.count("audio") == 2
+    audio_streams = _audio_streams(out)
+    assert [stream["tags"]["language"] for stream in audio_streams] == ["pol", "eng"]
+    assert [stream["tags"]["handler_name"] for stream in audio_streams] == [
+        "Polski",
+        "English",
+    ]
+    assert [stream["disposition"]["default"] for stream in audio_streams] == [1, 0]
+    assert _decode_audio_stream(out, 0) != _decode_audio_stream(out, 1)
 
     samples = [_rgb_at(out, duration * fraction / 20) for fraction in range(1, 20)]
     main_indices = [index for index, rgb in enumerate(samples) if _is_main_blue(rgb)]
