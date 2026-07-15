@@ -57,7 +57,7 @@ class _PageObservation:
     opened_at: float
     video: Video | None
     closed_at: float | None = None
-    visual_prime: asyncio.Task[None] | None = None
+    visual_prime: asyncio.Task[float | None] | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +65,7 @@ class _PopupSession:
     page: Page
     video: Video
     opened_at: float
+    visual_ready_delay: float = 0.0
     closed_at: float | None = None
     close_handled: bool = False
 
@@ -136,11 +137,49 @@ async def _wait_for_render_popup(
 
 
 async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -> None:
-    """Restore both DOM overlays on the currently recorded page."""
+    """Restore both DOM overlays in one browser task to avoid a partial frame."""
 
-    await overlay.ensure(page)
-    if chrome is not None:
+    readiness = await page.evaluate(
+        """expectChrome => {
+            const cursor = window.__guidebot_cursor;
+            const chrome = window.__guidebot_chrome;
+            return {
+                cursor: !!cursor && ["ensure", "moveTo"].every(
+                    name => typeof cursor[name] === "function"
+                ),
+                chrome: !expectChrome || (!!chrome && ["ensure", "setUrl"].every(
+                    name => typeof chrome[name] === "function"
+                )),
+            };
+        }""",
+        chrome is not None,
+    )
+    # Context init scripts normally make both APIs available. Repair a missing
+    # controller first; the final mount still happens atomically below.
+    if chrome is not None and not readiness.get("chrome"):
         await chrome.ensure(page)
+    if not readiness.get("cursor"):
+        await overlay.ensure(page)
+
+    await page.evaluate(
+        """([x, y, expectChrome, url]) => {
+            const cursor = window.__guidebot_cursor;
+            const chrome = window.__guidebot_chrome;
+            if (!cursor || typeof cursor.ensure !== "function" ||
+                typeof cursor.moveTo !== "function") {
+                throw new Error("guidebot cursor API is unavailable after injection");
+            }
+            if (expectChrome) {
+                if (!chrome || typeof chrome.ensure !== "function") {
+                    throw new Error("guidebot chrome API is unavailable after injection");
+                }
+                chrome.ensure(url);
+            }
+            cursor.ensure();
+            return cursor.moveTo(x, y, 0);
+        }""",
+        [overlay.pos[0], overlay.pos[1], chrome is not None, page.url],
+    )
 
 
 async def _prime_visuals(
@@ -149,29 +188,67 @@ async def _prime_visuals(
     chrome: Chrome | None,
     *,
     timeout: float = _POPUP_DETECTION_SECONDS,
-) -> None:
+) -> float | None:
     """Mount visual layers from the page event, before its first useful frame.
 
     Chromium can replace a freshly opened ``about:blank`` document without
-    rerunning init-script timers. Retrying from Python survives that replacement
-    and makes the first encoded popup frame safe for compositor startup padding.
+    rerunning init-script timers. Keep priming until the document root and both
+    layers stay stable for one quiescence window, then force a captured frame.
     """
 
     deadline = time.monotonic() + timeout
+    marker = f"{time.monotonic_ns()}-{id(page)}"
+    stable_since: float | None = None
+    status_script = """([token, expectChrome]) => {
+        const root = document.documentElement;
+        if (!root) return {ready: false};
+        const sameRoot = root.__guidebotVisualPrime === token;
+        root.__guidebotVisualPrime = token;
+        return {
+            ready: true,
+            sameRoot,
+            cursor: !!document.querySelector("[data-guidebot-cursor]"),
+            chrome: !expectChrome || !!document.querySelector("[data-guidebot-chrome]"),
+        };
+    }"""
     while not page.is_closed():
         try:
-            if await page.evaluate("() => !!document.documentElement"):
+            status = await page.evaluate(status_script, [marker, chrome is not None])
+            now = time.monotonic()
+            complete = (
+                isinstance(status, dict)
+                and status.get("ready") is True
+                and status.get("sameRoot") is True
+                and status.get("cursor") is True
+                and status.get("chrome") is True
+            )
+            if not complete:
                 await _ensure_visuals(page, overlay, chrome)
-                return
+                stable_since = now
+            elif stable_since is None:
+                stable_since = now
+            elif now - stable_since >= _POPUP_QUIESCENCE_SECONDS:
+                await page.screenshot()
+                final_status = await page.evaluate(status_script, [marker, chrome is not None])
+                if (
+                    isinstance(final_status, dict)
+                    and final_status.get("sameRoot") is True
+                    and final_status.get("cursor") is True
+                    and final_status.get("chrome") is True
+                ):
+                    return time.monotonic()
+                stable_since = None
         except PlaywrightError:
             # A navigation may replace the execution context between the page
             # event and injection. Retry only inside the bounded prime window.
             if page.is_closed():
-                return
+                return None
+            stable_since = None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RenderError("nie udało się zainicjować warstw wizualnych nowej strony")
         await asyncio.sleep(min(0.01, remaining))
+    return None
 
 
 async def _prepare_main_after_popup_close(
@@ -487,7 +564,14 @@ async def run_render(
     closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
     assert closed_at is not None
     composite = work / f"{out_mp4.stem}.composite.mp4"
-    compose_popup_video(main_webm, popup_webm, composite, popup.opened_at, closed_at)
+    compose_popup_video(
+        main_webm,
+        popup_webm,
+        composite,
+        popup.opened_at,
+        closed_at,
+        visual_ready_delay=popup.visual_ready_delay,
+    )
     total = probe_duration(composite)
     build_audio_bed(placed, total, bed)
     mux_preencoded(composite, bed, out_mp4)
@@ -581,8 +665,9 @@ async def _render_step(
                     closed_at=time.monotonic() if popup_page.is_closed() else None,
                 )
                 observed_pages[popup_page] = observation
-            if observation.visual_prime is not None:
-                await observation.visual_prime
+            visual_ready_at = (
+                await observation.visual_prime if observation.visual_prime is not None else None
+            )
             popup_video = observation.video or popup_page.video
             if popup_video is None:  # pragma: no cover - context recording is enabled
                 raise RenderError("Playwright nie udostępnił nagrania popupu")
@@ -596,6 +681,11 @@ async def _render_step(
                 page=popup_page,
                 video=popup_video,
                 opened_at=opened_at,
+                visual_ready_delay=(
+                    max(0.0, visual_ready_at - observation.opened_at)
+                    if visual_ready_at is not None
+                    else 0.0
+                ),
                 closed_at=closed_at,
             )
     elif cached.action == "hover":

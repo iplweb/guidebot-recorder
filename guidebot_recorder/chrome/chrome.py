@@ -22,9 +22,7 @@ class Chrome:
 
     def __init__(self, config: ChromeConfig | None = None) -> None:
         self.config = config or ChromeConfig()
-        body = files("guidebot_recorder.chrome").joinpath("chrome.js").read_text(
-            encoding="utf-8"
-        )
+        body = files("guidebot_recorder.chrome").joinpath("chrome.js").read_text(encoding="utf-8")
         appearance = {
             "showUrl": self.config.show_url,
             "height": self.config.height,

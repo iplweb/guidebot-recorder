@@ -109,8 +109,9 @@ the same state-transition rules.
   native browser chrome, iframes, and downloads are outside v1. The optional
   synthetic `config.chrome` DOM bar is installed at context level before either
   page is created and synchronized on both pages. A page-event task immediately
-  primes both visual layers and is awaited before the new page is used, so the
-  first popup frame cloned by the compositor already contains them.
+  primes both visual layers and is awaited before the new page is used. The
+  compositor discards any raw frames preceding that verified point, so the first
+  popup frame visible in the final film contains both layers.
 - Supported closure is caused by a scenario action in the pop-up, or by end of
   session when the pop-up remains open. Timer-driven/asynchronous closure between
   actions is outside v1 and fails loudly; compile and render otherwise have
@@ -171,9 +172,13 @@ Render remains 0×LLM and treats the compiled lifecycle as a replay contract.
   scripts on the **BrowserContext before creating the main page**, so they apply to
   every document. A freshly opened `about:blank` can replace its initial document
   after losing init-script timers, so the context page event must also start a
-  bounded Python task that retries both `ensure()` calls; retain and await that task
-  before using the page. Call both `ensure()` methods again after navigation/load
-  and when switching pages.
+  bounded Python task that retries both `ensure()` calls until the document root and
+  layers remain stable for a quiescence window. Mount Chrome and cursor atomically
+  in one browser task before forcing a captured frame. Retain and await the prime
+  task before using the page, and record its verified-ready timestamp for assembly.
+  Raw WebM may already contain an earlier paint, so assembly must trim to the
+  verified point rather than clone raw frame zero. Repeat the atomic ensure after
+  navigation/load and when switching pages.
 - Use one monotonic recording anchor shared by narration and window events. Chromium
   may not emit a video frame for a pristine `about:blank`, so first paint and capture
   a neutral main document with the overlay, allow a bounded warm-up, and establish the
@@ -198,10 +203,12 @@ Render remains 0×LLM and treats the compiled lifecycle as a replay contract.
 
 With no pop-up, keep the current single-video mux path.
 
-With a pop-up, build a video-only composite corresponding to:
+Let `t_ready` be the verified visual-ready timestamp and `p_ready` its corresponding
+offset in the raw popup file. With a pop-up, build a video-only composite
+corresponding to:
 
 ```text
-main[0:t_open] ++ popup[0:t_close-t_open] ++ main[t_close:end]
+main[0:t_ready] ++ popup[p_ready:p_ready+(t_close-t_ready)] ++ main[t_close:end]
 ```
 
 This is an FFmpeg filter concat, not a container-level "plain concat". Each present
@@ -220,9 +227,11 @@ Before composing, probe both inputs and validate
 `0 <= t_open <= t_close <= main_duration`. Playwright emits the popup `Page` event
 before its separate encoder necessarily writes a first frame. If the popup file is
 shorter than its wall-clock interval by a bounded startup gap, hold its first frame
-for that gap. The accepted gap is the larger of two seconds or 15% of the interval;
-a larger disagreement is a hard timing error. The existing approximate-sync
-trade-off for Playwright VFR remains in force.
+for that gap only after discarding frames before the verified-ready point. Thus
+`tpad` clones the first verified frame, never raw frame zero. The accepted gap is
+the larger of two seconds or 15% of the interval; a larger disagreement is a hard
+timing error. The existing approximate-sync trade-off for Playwright VFR remains in
+force.
 
 Finally probe the composite duration, build the unchanged narration bed on the same
 wall-clock offsets, and mux one video stream plus one audio stream to the output
@@ -262,8 +271,10 @@ practical.
 - Expected-pop-up-missing and unexpected-pop-up render paths raise `RenderError`
   instead of acting on a matching element in the wrong window.
 - A compositor unit test uses synthetic, solid-color inputs and samples frames to
-  prove the output order main → pop-up → main and the expected duration. Assertions
-  only on file existence or `duration > 0` are insufficient.
+  prove the output order main → pop-up → main, the expected duration, and removal of
+  pre-prime popup frames. A recorded `about:blank` replacement regression verifies
+  that the first popup frame visible in the composite has both visual layers.
+  Assertions only on file existence or `duration > 0` are insufficient.
 - End-to-end compile → render produces one `.mp4` with exactly one video and one
   audio stream. Its sampled frames visibly include all three intervals, and its
   duration/audio placement stay within the documented VFR tolerance.

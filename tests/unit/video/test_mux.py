@@ -125,6 +125,36 @@ def _make_main_color_timeline(path: Path) -> None:
     )
 
 
+def _make_popup_with_bad_leading_frames(path: Path) -> None:
+    """Write magenta pre-prime frames followed by a verified yellow interval."""
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=magenta:duration=0.2:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=yellow:duration=0.8:size=320x240:rate=25",
+            "-filter_complex",
+            "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p[outv]",
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _sample_rgb(path: Path, at: float) -> tuple[int, int, int]:
     """Decode one frame and return its average RGB colour."""
     proc = subprocess.run(
@@ -284,6 +314,28 @@ def test_compose_popup_video_pads_bounded_encoder_startup_gap(tmp_path: Path) ->
     assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
     _assert_rgb(_sample_rgb(out, 1.1), (255, 255, 0))
     _assert_rgb(_sample_rgb(out, 1.8), (255, 255, 0))
+    _assert_rgb(_sample_rgb(out, 2.5), (0, 0, 255))
+
+
+def test_compose_popup_video_discards_frames_before_visual_prime(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_bad_leading_frames(popup)
+
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        opened_at=1.0,
+        closed_at=2.2,
+        visual_ready_delay=0.4,
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_rgb(out, 1.3), (0, 255, 0))
+    _assert_rgb(_sample_rgb(out, 1.5), (255, 255, 0))
     _assert_rgb(_sample_rgb(out, 2.5), (0, 0, 255))
 
 

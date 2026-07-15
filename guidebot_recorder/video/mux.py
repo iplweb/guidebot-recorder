@@ -85,15 +85,17 @@ def compose_popup_video(
     out: Path,
     opened_at: float,
     closed_at: float,
+    *,
+    visual_ready_delay: float = 0.0,
 ) -> None:
     """Cut between the main-page and popup recordings on one timeline.
 
     ``opened_at`` and ``closed_at`` are offsets on the main recording's clock.
-    The resulting picture is ``main[:opened_at]``, followed by the popup from
-    its first frame for ``closed_at - opened_at`` seconds, followed by
-    ``main[closed_at:]``.  When ``closed_at`` is the end of ``main`` the final
-    segment is omitted, which represents a popup that stayed open until the
-    recording ended.
+    ``visual_ready_delay`` is the bounded time from the page event until a frame
+    with both visual layers was verified. The resulting picture keeps main on
+    screen through that delay, trims any earlier popup frames, then follows the
+    popup until ``closed_at`` and returns to main. When ``closed_at`` is the end
+    of ``main`` the final segment is omitted.
 
     Playwright gives every page in the context the same configured frame size,
     so no scaling is applied.  Each segment has its timestamps reset before the
@@ -104,12 +106,15 @@ def compose_popup_video(
 
     opened_at = float(opened_at)
     closed_at = float(closed_at)
-    if not math.isfinite(opened_at) or not math.isfinite(closed_at):
+    visual_ready_delay = float(visual_ready_delay)
+    if not all(math.isfinite(value) for value in (opened_at, closed_at, visual_ready_delay)):
         raise ValueError("popup timestamps must be finite")
     if opened_at < 0:
         raise ValueError(f"opened_at must be >= 0, got {opened_at}")
     if closed_at <= opened_at:
         raise ValueError(f"closed_at must be greater than opened_at, got {opened_at}..{closed_at}")
+    if visual_ready_delay < 0:
+        raise ValueError(f"visual_ready_delay must be >= 0, got {visual_ready_delay}")
 
     main_duration = probe_duration(main)
     # Container durations are frame-rounded.  Accept a sub-frame overshoot from
@@ -121,20 +126,35 @@ def compose_popup_video(
         raise ValueError(f"closed_at ({closed_at}) is past main video duration ({main_duration})")
     opened_at = min(opened_at, main_duration)
     closed_at = min(closed_at, main_duration)
-    popup_span = closed_at - opened_at
-    if popup_span <= 0:
+    raw_popup_span = closed_at - opened_at
+    if raw_popup_span <= 0:
         raise ValueError("popup interval has no encoded video frames")
+    if visual_ready_delay >= raw_popup_span:
+        raise ValueError("visual-ready delay consumes the whole popup interval")
     popup_duration = probe_duration(popup)
-    startup_gap = max(0.0, popup_span - popup_duration)
+    encoder_startup_gap = max(0.0, raw_popup_span - popup_duration)
     # Page events precede the popup encoder's first frame. Real Chromium startup
     # can take a couple of seconds; permit that floor or 15% on longer intervals,
     # while rejecting a mismatch large enough to describe a different timeline.
-    max_startup_gap = max(2.0, popup_span * 0.15)
-    if startup_gap > max_startup_gap:
+    max_startup_gap = max(2.0, raw_popup_span * 0.15)
+    if encoder_startup_gap > max_startup_gap:
         raise ValueError(
-            f"popup encoder startup gap ({startup_gap}) exceeds limit ({max_startup_gap})"
+            f"popup encoder startup gap ({encoder_startup_gap}) exceeds limit ({max_startup_gap})"
         )
-    popup_cut_duration = min(popup_span, popup_duration)
+
+    # Playwright resets each WebM's PTS to zero, so container duration cannot
+    # reveal which early raw frames preceded the verified visual-ready point.
+    # Conservatively trim the full wall-clock prime delay from the source. This
+    # may discard a few already-good frames, but guarantees that tpad can only
+    # clone a post-prime frame.
+    popup_source_start = visual_ready_delay
+    opened_at += visual_ready_delay
+    popup_span = closed_at - opened_at
+    popup_available = popup_duration - popup_source_start
+    if popup_span <= 0 or popup_available <= 0:
+        raise ValueError("popup has no verified encoded video frames")
+    startup_gap = max(0.0, popup_span - popup_available)
+    popup_cut_duration = min(popup_span, popup_available)
 
     has_pre = opened_at > tolerance
     has_tail = main_duration - closed_at > tolerance
@@ -160,7 +180,9 @@ def compose_popup_video(
         labels.append("[main_pre]")
 
     popup_filter = (
-        f"[1:v]settb=AVTB,setpts=PTS-STARTPTS,trim=start=0:end={popup_cut_duration:.6f},"
+        f"[1:v]settb=AVTB,setpts=PTS-STARTPTS,"
+        f"trim=start={popup_source_start:.6f}:"
+        f"end={popup_source_start + popup_cut_duration:.6f},"
         "setpts=PTS-STARTPTS"
     )
     if startup_gap > tolerance:

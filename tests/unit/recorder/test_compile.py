@@ -8,7 +8,12 @@ from guidebot_recorder.models.action import COMPILER_VERSION
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.scenario import Step
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
-from guidebot_recorder.recorder.compile import _short, compile_up_to_date, run_compile
+from guidebot_recorder.recorder.compile import (
+    _short,
+    _wait_for_new_pages,
+    compile_up_to_date,
+    run_compile,
+)
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
@@ -371,6 +376,33 @@ async def test_popup_after_click_discovery_deadline_is_unexpected(tmp_path, page
 
     with pytest.raises(RuntimeError, match="nieoczekiwany dodatkowy popup"):
         await run_compile(path, page, MockReasoner())
+
+
+async def test_popup_quiescence_never_extends_hard_discovery_deadline():
+    main = object()
+    inside = object()
+    late = object()
+
+    class Context:
+        pages = [main]
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    found = await _wait_for_new_pages(
+        Context(),
+        (main,),
+        [main, inside, late],
+        1,
+        {
+            main: started_at,
+            inside: started_at + 0.04,
+            late: started_at + 0.06,
+        },
+        started_at=started_at,
+        timeout=0.05,
+    )
+
+    assert found == [inside]
 
 
 async def test_old_compiler_version_is_not_up_to_date(tmp_path, page):

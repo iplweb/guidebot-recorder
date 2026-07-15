@@ -431,7 +431,7 @@ async def _wait_for_new_pages(
         candidates = list((observed or [])[observed_start:]) + _new_pages(context, known)
         for candidate in candidates:
             candidate_opened_at = (opened_at or {}).get(candidate, loop.time())
-            if started_at <= candidate_opened_at <= cutoff and all(
+            if started_at <= candidate_opened_at <= deadline and all(
                 candidate is not page for page in found
             ):
                 found.append(candidate)

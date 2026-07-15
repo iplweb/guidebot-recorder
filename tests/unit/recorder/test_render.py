@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import subprocess
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -9,14 +10,14 @@ from playwright.async_api import async_playwright
 
 from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.models.action import COMPILER_VERSION
-from guidebot_recorder.models.config import ChromeConfig, TtsConfig
+from guidebot_recorder.models.config import ChromeConfig, CursorConfig, TtsConfig
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import RenderError, _prime_visuals, run_render
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
-from guidebot_recorder.video.mux import probe_duration
+from guidebot_recorder.video.mux import compose_popup_video, probe_duration
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -81,30 +82,139 @@ class SlowTts(FakeTts):
     duration = 0.8
 
 
-async def test_page_event_primes_visuals_in_window_open_about_blank() -> None:
+async def test_compositor_starts_popup_at_verified_visual_frame(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:duration=2:size=640x480:rate=25",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(main),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context()
-        overlay = Overlay()
-        chrome = Chrome(ChromeConfig(enabled=True))
+        context = await browser.new_context(
+            viewport={"width": 640, "height": 480},
+            record_video_dir=str(tmp_path),
+            record_video_size={"width": 640, "height": 480},
+        )
+        overlay = Overlay(
+            CursorConfig(
+                width=72,
+                height=96,
+                color="#ff00ff",
+                outline="#ff00ff",
+                glow="transparent",
+            )
+        )
+        overlay.pos = (300.0, 200.0)
+        chrome = Chrome(ChromeConfig(enabled=True, showUrl=False, barColor="#00ff00"))
         await overlay.install_context(context)
         await chrome.install_context(context)
         page = await context.new_page()
-        await page.set_content("<button onclick=\"window.open('about:blank')\">Open</button>")
+        await page.set_content(
+            """<button onclick="
+                const child = window.open('about:blank');
+                setTimeout(() => {
+                    child.document.open();
+                    child.document.write('<h1>Final popup</h1>');
+                    child.document.close();
+                }, 75);
+            ">Open</button>"""
+        )
 
-        prime_tasks: list[asyncio.Task[None]] = []
+        prime_tasks: list[tuple[float, asyncio.Task[float | None]]] = []
 
         def prime(candidate):
-            prime_tasks.append(asyncio.create_task(_prime_visuals(candidate, overlay, chrome)))
+            prime_tasks.append(
+                (time.monotonic(), asyncio.create_task(_prime_visuals(candidate, overlay, chrome)))
+            )
 
         context.on("page", prime)
-        async with page.expect_popup() as popup_info:
-            await page.get_by_role("button", name="Open").click()
-        popup = await popup_info.value
-        await asyncio.gather(*prime_tasks)
+        for run_index in range(5):
+            task_count = len(prime_tasks)
+            async with page.expect_popup() as popup_info:
+                await page.get_by_role("button", name="Open").click()
+            popup = await popup_info.value
+            assert len(prime_tasks) == task_count + 1
+            opened_at, prime_task = prime_tasks[-1]
+            visual_ready_at = await prime_task
+            assert visual_ready_at is not None
 
-        assert await popup.locator("[data-guidebot-cursor]").count() == 1
-        assert await popup.locator("[data-guidebot-chrome]").count() == 1
+            assert await popup.get_by_role("heading", name="Final popup").count() == 1
+            assert await popup.locator("[data-guidebot-cursor]").count() == 1
+            assert await popup.locator("[data-guidebot-chrome]").count() == 1
+            await popup.wait_for_timeout(300)
+            video = popup.video
+            assert video is not None
+            await popup.close()
+            closed_at = time.monotonic()
+            webm = Path(await video.path())
+            composite = tmp_path / f"composite-{run_index}.mp4"
+            timeline_opened_at = 0.2
+            compose_popup_video(
+                main,
+                webm,
+                composite,
+                opened_at=timeline_opened_at,
+                closed_at=timeline_opened_at + (closed_at - opened_at),
+                visual_ready_delay=visual_ready_at - opened_at,
+            )
+            raw = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(composite),
+                    "-t",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout
+            frame_size = 640 * 480 * 3
+            assert len(raw) >= frame_size
+            assert len(raw) % frame_size == 0
+
+            def pixel(frame: bytes, x: int, y: int) -> tuple[int, int, int]:
+                offset = (y * 640 + x) * 3
+                return tuple(frame[offset : offset + 3])
+
+            first_popup_frame = None
+            for offset in range(0, len(raw), frame_size):
+                frame = raw[offset : offset + frame_size]
+                red, green, blue = pixel(frame, 620, 400)
+                if red > 180 and green > 180 and blue > 180:
+                    first_popup_frame = frame
+                    break
+            assert first_popup_frame is not None
+
+            red, green, blue = pixel(first_popup_frame, 620, 20)
+            assert green > 150 and red < 100 and blue < 100
+            cursor_pixels = (
+                pixel(first_popup_frame, x, y) for y in range(200, 296) for x in range(300, 372)
+            )
+            assert any(
+                red > 140 and green < 120 and blue > 140 for red, green, blue in cursor_pixels
+            )
+
         await context.close()
         await browser.close()
 
