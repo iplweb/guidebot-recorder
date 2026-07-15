@@ -1,6 +1,36 @@
 (() => {
   "use strict";
 
+  // Role gating (Spec A). Capture whether we are the top-level window BEFORE any
+  // frame-bust shadowing runs, then decide our role:
+  //   - framed-site (isTop === false): neutralize common frame-busting and bail;
+  //     the shell owns the bar, so the legacy padding bar must NOT mount here.
+  //   - shell (top-level, sentinel origin): bail; shell.js renders its own bar.
+  //   - popup-site (top-level, any other origin): keep today's legacy padding bar.
+  const SHELL_ORIGIN = "https://guidebot.shell";
+  const isTop = window === window.top;
+  let origin = "";
+  try {
+    origin = window.location.origin;
+  } catch (_error) {
+    origin = "";
+  }
+  if (!isTop) {
+    // `top`/`parent` are [Replaceable]; shadowing them makes idioms such as
+    // `if (top !== self) top.location = ...` benign inside the framed site.
+    try {
+      const selfWindow = window;
+      Object.defineProperty(window, "top", { configurable: true, get: () => selfWindow });
+      Object.defineProperty(window, "parent", { configurable: true, get: () => selfWindow });
+    } catch (_error) {
+      /* a non-configurable top/parent cannot be neutralized; nothing more to do */
+    }
+    return;
+  }
+  if (origin === SHELL_ORIGIN) {
+    return;
+  }
+
   const API_KEY = "__guidebot_chrome";
   const API_VERSION = 1;
   const HOST_ID = "guidebot-chrome";

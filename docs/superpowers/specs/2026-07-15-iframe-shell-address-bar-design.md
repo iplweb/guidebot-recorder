@@ -117,11 +117,17 @@ as top.
 - Context: `bypass_csp=True` and `service_workers="block"` (SW-served documents
   never hit `context.route`, so their `X-Frame-Options`/`frame-ancestors` could not
   otherwise be stripped — this is a behavior change for SW-heavy sites, called out).
-- A `context.route` handler does `route.fetch(max_redirects=0)`; it **passes 3xx
-  responses through unchanged** (so the browser performs the redirect and
-  `frame.url` reflects the true final URL) and strips `x-frame-options` and the
-  `frame-ancestors` directive from `content-security-policy` only on 2xx document
-  responses before `route.fulfill`.
+- A `context.route` handler strips `x-frame-options` and the `frame-ancestors`
+  directive from `content-security-policy` on document responses before
+  `route.fulfill`. **Redirects (implementation reality):** Chromium rejects a
+  route-*fulfilled* 3xx inside a subframe (`net::ERR_BLOCKED_BY_RESPONSE`), so a
+  redirect cannot be passed through *and* header-stripped in an iframe. The handler
+  therefore lets `route.fetch` follow the chain and fulfills the **final** response
+  with stripped headers. Consequence: a site that redirects on its entry URL still
+  loads, but the frame commits at the **entry URL** — `frame.url` and the pill show
+  the navigated URL, not the post-redirect one. (Relative sub-resources on a
+  cross-origin-redirecting page resolve against the entry URL; absolute-URL sites —
+  the common case — are unaffected.)
 - An init script neutralizes common frame-busting (`if (top !== self) top.location
   = …`, `top.location.href = …`) by shadowing the framed document's `top`/`parent`
   (both are `[Replaceable]`, so this is feasible) — applied only in the
@@ -155,7 +161,9 @@ In `render.py` / `Recorder` for the **main window** (site frame):
 
 - **Navigation** uses `frame.goto(url)` on the site frame (awaits commit+load;
   avoids the `wait_for_load_state`-returns-for-old-document race of a bare `src`
-  set). The pill/URL source is `frame.url` after load, so redirects are reflected.
+  set). The pill/URL source is `frame.url` after load (the navigated/entry URL; a
+  server-side redirect is not reflected — see the redirect note under Header
+  stripping).
 - **Element actions** (`click`/`hover`/`type`/`waitFor`/`reuse_is_valid`) target the
   site `Frame`.
 - **Cursor positioning** uses `locator.bounding_box()` on the site-frame locator,
@@ -263,8 +271,9 @@ overlap of the two mechanisms.
   second cursor (role gating), and `<html>` inside the iframe has no injected
   `padding-top`.
 - **Header stripping + redirects**: a response with `X-Frame-Options: DENY` and
-  `frame-ancestors 'none'` loads framed; a 301→200 chain leaves `frame.url` (and the
-  pill) at the final URL, not the request URL.
+  `frame-ancestors 'none'` loads framed; a 301→200 chain on the entry URL still
+  loads the final document in the iframe, with `frame.url` (and the pill) left at the
+  entry URL (the documented redirect tradeoff).
 - **Coordinate correctness**: a known in-iframe target's `bounding_box()` lands the
   cursor on it with **no** extra `HEIGHT` offset.
 - **Typing determinism**: two renders of the same navigate step produce the identical
@@ -279,6 +288,7 @@ overlap of the two mechanisms.
 
 Chrome enabled + a main-window `navigate` step yields an `.mp4` at the configured
 dimensions where the site sits entirely below the bar (including adversarial CSS),
-the cursor visibly moves to the bar, clicks, and types the URL naturally with a
-truthful final URL, and arbitrary framing-protected sites load. Popup renders are
+the cursor visibly moves to the bar, clicks, and types the URL naturally, and
+arbitrary framing-protected sites load (redirecting sites load at their entry URL).
+Popup renders are
 unchanged. `config_hash` reflects chrome geometry.

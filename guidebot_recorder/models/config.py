@@ -135,6 +135,22 @@ class Config(BaseModel):
         return self
 
 
+def site_viewport(cfg: Config) -> tuple[int, int]:
+    """Layout viewport of the target site (width, height).
+
+    When ``chrome.enabled`` is true the site renders inside the shell iframe of
+    height ``H - chrome.height``, so both ``compile`` and ``render`` must resolve
+    the site at the reduced height for the frozen positions to line up. With
+    chrome disabled the site occupies the full configured viewport.
+    """
+
+    width = cfg.viewport.width
+    height = cfg.viewport.height
+    if cfg.chrome.enabled:
+        height -= cfg.chrome.height
+    return width, height
+
+
 def config_hash(cfg: Config) -> str:
     """SHA-256 of the canonical projection: viewport, locale, tts.lang, chrome geometry.
 

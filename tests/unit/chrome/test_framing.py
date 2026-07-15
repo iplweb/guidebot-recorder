@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from guidebot_recorder.chrome.framing import install_framing, strip_framing_headers
 
 
@@ -105,7 +103,9 @@ class _FakeRoute:
         self.continued = False
 
     async def fetch(self, *, max_redirects: int = 20) -> _FakeResponse:
-        assert max_redirects == 0
+        # install_framing lets fetch follow redirects internally (no
+        # max_redirects=0), so the final response is returned here.
+        self.fetched_max_redirects = max_redirects
         assert self._response is not None
         return self._response
 
@@ -142,15 +142,19 @@ class TestInstallFraming:
         assert route.fulfilled["response"] is resp
         assert "x-frame-options" not in {k.lower() for k in route.fulfilled["headers"]}
 
-    async def test_redirect_document_is_fulfilled_unchanged(self) -> None:
+    async def test_fetch_follows_redirects_and_final_is_stripped(self) -> None:
+        # A route-fulfilled 3xx is blocked inside a subframe, so install_framing
+        # lets fetch follow the chain (default max_redirects) and strips the
+        # framing headers off the final response instead of passing 3xx through.
         context = _FakeContext()
         await install_framing(context, shell_origin="https://shell.example")
-        resp = _FakeResponse(302, {"Location": "https://elsewhere.example"})
-        route = _FakeRoute("document", resp)
+        final = _FakeResponse(200, {"X-Frame-Options": "DENY", "Content-Type": "text/html"})
+        route = _FakeRoute("document", final)
         await context.handler(route)
+        assert route.fetched_max_redirects != 0  # did not force max_redirects=0
         assert route.fulfilled is not None
-        assert route.fulfilled["response"] is resp
-        assert route.fulfilled["headers"] is None
+        assert route.fulfilled["response"] is final
+        assert "x-frame-options" not in {k.lower() for k in route.fulfilled["headers"]}
 
     async def test_non_document_resource_is_continued(self) -> None:
         context = _FakeContext()

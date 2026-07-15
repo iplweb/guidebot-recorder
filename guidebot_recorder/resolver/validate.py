@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page
+from playwright.async_api import Frame, Locator, Page
 
 from guidebot_recorder.models.action import ActionKind, CachedAction
 from guidebot_recorder.models.target import (
@@ -46,7 +46,7 @@ class ValidationFail:
     message: str
 
 
-LocatorRoot: TypeAlias = Page | Locator
+LocatorRoot: TypeAlias = Page | Frame | Locator
 
 _SENSITIVE_AUTOCOMPLETE = {
     "current-password",
@@ -90,8 +90,12 @@ def _build_locator(root: LocatorRoot, target: Target) -> Locator:
     raise TypeError(f"Unsupported target type: {type(target).__name__}")
 
 
-async def build_locator(page: Page, target: Target) -> Locator:
-    """Build a locator exclusively from the structural ``Target`` fields."""
+async def build_locator(page: Page | Frame, target: Target) -> Locator:
+    """Build a locator exclusively from the structural ``Target`` fields.
+
+    Accepts a ``Page`` or a ``Frame`` (the main window resolves against the shell
+    site iframe); both expose the same ``get_by_*`` locator factory.
+    """
 
     return _build_locator(page, target)
 
@@ -149,7 +153,7 @@ async def is_sensitive_type_target(locator: Locator) -> bool:
 
 
 async def validate_compile_time(
-    page: Page, target: Target, action: ActionKind
+    page: Page | Frame, target: Target, action: ActionKind
 ) -> ValidationOk | ValidationFail:
     """Apply the compile-time half of the resolver's trust-but-verify contract."""
 
@@ -189,7 +193,7 @@ async def validate_compile_time(
         return ValidationFail("dom_changed", "The target changed while it was being validated.")
 
 
-async def reuse_is_valid(page: Page, cached: CachedAction) -> bool:
+async def reuse_is_valid(page: Page | Frame, cached: CachedAction) -> bool:
     """Validate a cached target and its independent, frozen identity."""
 
     try:

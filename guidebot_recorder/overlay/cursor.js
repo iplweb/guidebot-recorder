@@ -1,6 +1,16 @@
 (() => {
   "use strict";
 
+  // Role gating (Spec A). Capture whether we are the top-level window BEFORE any
+  // frame-bust neutralization can shadow `window.top`. Inside the framed site
+  // (isTop === false) the shell already owns the cursor, so the legacy cursor
+  // must NOT mount a duplicate. In the shell and in top-level popup documents the
+  // cursor mounts as usual (the shell drives it through the same API).
+  const isTop = window === window.top;
+  if (!isTop) {
+    return;
+  }
+
   const API_KEY = "__guidebot_cursor";
   const API_VERSION = 1;
   const CURSOR_ID = "guidebot-cursor";

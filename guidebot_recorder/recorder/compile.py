@@ -38,7 +38,7 @@ from guidebot_recorder.models.action import (
     validate_teach_instruction,
 )
 from guidebot_recorder.models.compiled import CompiledScenario
-from guidebot_recorder.models.config import config_hash
+from guidebot_recorder.models.config import config_hash, site_viewport
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.models.target import (
     LabelTarget,
@@ -233,8 +233,11 @@ async def run_compile_in_browser(
 
     scenario = load_scenario(path, env)
     cfg = scenario.config
+    # When chrome is enabled the site renders inside the shell iframe of height
+    # ``H - chrome.height``; compile must resolve it at the same reduced viewport.
+    site_width, site_height = site_viewport(cfg)
     context = await browser.new_context(
-        viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
+        viewport={"width": site_width, "height": site_height},
         locale=cfg.locale,
     )
     try:
@@ -270,7 +273,9 @@ async def run_compile(
     cfg = scenario.config
     chash = config_hash(cfg)
     # CRUCIAL: the same viewport as render, otherwise frozen positions do not match.
-    await page.set_viewport_size({"width": cfg.viewport.width, "height": cfg.viewport.height})
+    # With chrome enabled that is the shell iframe interior (``H - chrome.height``).
+    site_width, site_height = site_viewport(cfg)
+    await page.set_viewport_size({"width": site_width, "height": site_height})
     page.set_default_timeout(timeout * 1000)
     main_page = page
     context = page.context

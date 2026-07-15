@@ -3,8 +3,17 @@
 The render step loads target sites inside a shell iframe. Sites commonly defend
 against being framed with the ``X-Frame-Options`` header and the CSP
 ``frame-ancestors`` directive; both must be neutralised on the top-level
-document response. Redirect responses are passed through untouched so the
-browser performs the redirect itself and ``frame.url`` stays truthful.
+document response.
+
+Redirects: Chromium rejects a route-*fulfilled* 3xx response inside a subframe
+(``net::ERR_BLOCKED_BY_RESPONSE``), so passing a redirect through cannot be
+combined with header stripping in an iframe. We therefore let ``route.fetch``
+follow redirects internally and fulfill the *final* response with its framing
+headers stripped. Consequence: a site that redirects on its entry URL still
+loads, but the frame commits at the entry URL — ``frame.url`` (and the address
+pill) shows the navigated URL, not the post-redirect one. Sub-resources with
+*relative* URLs on a cross-origin-redirecting page resolve against the entry
+URL; sites using absolute URLs (the common case) are unaffected.
 """
 
 from __future__ import annotations
@@ -59,24 +68,26 @@ async def install_framing(context: BrowserContext, *, shell_origin: str) -> None
     """Route document responses through :func:`strip_framing_headers`.
 
     Registers a catch-all route on ``context``. Top-level document and subframe
-    responses have their framing headers stripped, except redirects (3xx) which
-    are fulfilled unchanged so the browser performs the redirect and the frame
-    URL stays truthful. All other resource types pass through untouched. Any
-    error falls back to :meth:`Route.continue_` rather than hanging the request.
+    responses have their framing headers stripped; ``route.fetch`` follows any
+    redirects internally and the final response is fulfilled with stripped
+    headers (see module docstring for why a 3xx cannot be passed through in a
+    subframe, and the entry-URL consequence). All other resource types pass
+    through untouched. Any error falls back to :meth:`Route.continue_` rather
+    than hanging the request.
     """
 
     async def handler(route: Route) -> None:
         try:
             resource_type = route.request.resource_type
             if resource_type in ("document", "subframe"):
-                resp = await route.fetch(max_redirects=0)
-                if resp.status in range(300, 400):
-                    await route.fulfill(response=resp)
-                else:
-                    await route.fulfill(
-                        response=resp,
-                        headers=strip_framing_headers(dict(resp.headers), is_document=True),
-                    )
+                # Default max_redirects follows the chain and returns the final
+                # response; a fulfilled 2xx is accepted in a subframe where a
+                # fulfilled 3xx is not.
+                resp = await route.fetch()
+                await route.fulfill(
+                    response=resp,
+                    headers=strip_framing_headers(dict(resp.headers), is_document=True),
+                )
             else:
                 await route.continue_()
         except Exception:
