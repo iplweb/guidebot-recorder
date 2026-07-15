@@ -549,6 +549,11 @@ async def run_render(
         **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
     overlay = Overlay(cfg.cursor)
+    # Role-gating contract: cursor.js MUST be registered before chrome.js. Inside
+    # the site iframe cursor.js relies on reading the real ``window.top`` to bail;
+    # chrome.js is what shadows ``top`` (frame-bust neutralization). If these two
+    # init scripts were swapped, cursor.js would run after ``top`` was shadowed,
+    # misidentify as the top window, and mount a duplicate cursor in the frame.
     await overlay.install_context(context)
     chrome = Chrome(cfg.chrome) if cfg.chrome.enabled else None
     if chrome is not None:
