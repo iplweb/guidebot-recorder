@@ -21,6 +21,7 @@ from urllib.parse import urljoin
 
 from playwright.async_api import (
     Browser,
+    Frame,
     Page,
     Video,
 )
@@ -29,9 +30,10 @@ from playwright.async_api import (
 )
 from tqdm import tqdm
 
-from guidebot_recorder.chrome import Chrome
+from guidebot_recorder.chrome import SHELL_URL, Chrome
+from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
-from guidebot_recorder.models.config import TtsConfig, config_hash
+from guidebot_recorder.models.config import ChromeConfig, TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
@@ -145,8 +147,40 @@ async def _wait_for_render_popup(
         await asyncio.sleep(min(0.05, remaining))
 
 
+def navigate_pill_mode(chrome: ChromeConfig, type_override: bool | None) -> str:
+    """Select the main-window address-bar behavior for a ``navigate`` step.
+
+    Returns one of ``"choreograph"`` (pointer → click → focus → natural type),
+    ``"type"`` (typed pill only, no pointer), or ``"instant"`` (no typing). The
+    caller still gates on ``chrome.enabled`` and ``show_url``.
+    """
+
+    animate = chrome.type_on_navigate if type_override is None else type_override
+    if not animate:
+        return "instant"
+    return "choreograph" if chrome.interact_on_navigate else "type"
+
+
+def _is_shell_page(page: Page) -> bool:
+    """True when ``page`` is the main-window shell (served from the sentinel origin)."""
+
+    return page.url.startswith(SHELL_URL)
+
+
 async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -> None:
-    """Restore both DOM overlays in one browser task to avoid a partial frame."""
+    """Restore both DOM overlays in one browser task to avoid a partial frame.
+
+    In the shell (main render window) the invariant is reworded: the site iframe
+    and the shell bar live in the shell document (the framed site can no longer
+    touch them), and the cursor is restored on the shell page. The pill URL is
+    deliberately *not* resynced here — that would flip it to the shell sentinel
+    URL; the pill is sourced from the site frame only on navigate steps.
+    """
+
+    if chrome is not None and _is_shell_page(page):
+        await chrome.ensure_shell(page)
+        await overlay.ensure(page)
+        return
 
     readiness = await page.evaluate(
         """expectChrome => {
@@ -504,17 +538,28 @@ async def run_render(
     # --- Render z nagrywaniem wideo (viewport z config — patrz compile) ---
     work = out_mp4.parent / ".guidebot_video" / out_mp4.stem
     work.mkdir(parents=True, exist_ok=True)
+    # The context viewport and video size stay at the configured dimensions so the
+    # output MP4 keeps its size and popups are geometrically untouched; the shell
+    # shrinks only the site iframe interior (see compile / site_viewport).
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
         locale=cfg.locale,
         record_video_dir=str(work),
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
+        **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
     overlay = Overlay(cfg.cursor)
+    # Role-gating contract: cursor.js MUST be registered before chrome.js. Inside
+    # the site iframe cursor.js relies on reading the real ``window.top`` to bail;
+    # chrome.js is what shadows ``top`` (frame-bust neutralization). If these two
+    # init scripts were swapped, cursor.js would run after ``top`` was shadowed,
+    # misidentify as the top window, and mount a duplicate cursor in the frame.
     await overlay.install_context(context)
     chrome = Chrome(cfg.chrome) if cfg.chrome.enabled else None
     if chrome is not None:
         await chrome.install_context(context)
+        # Strip X-Frame-Options / CSP frame-ancestors so arbitrary sites frame.
+        await install_framing(context, shell_origin=SHELL_URL)
 
     observed_pages: dict[Page, _PageObservation] = {}
 
@@ -552,7 +597,13 @@ async def run_render(
     # WebM never encoded.  Paint a neutral document, force one captured frame, and
     # only then establish the shared narration/window clock.  The tiny warm-up is
     # bounded pre-roll; it avoids losing an arbitrarily long opening narration.
-    await page.set_content("<style>html,body{margin:0;background:white}</style>")
+    # With chrome enabled the neutral document IS the shell (bar + empty iframe),
+    # so the recording opens on the browser chrome rather than a bare white page.
+    site_frame: Frame | None = None
+    if chrome is not None:
+        site_frame = await chrome.install_shell(page)
+    else:
+        await page.set_content("<style>html,body{margin:0;background:white}</style>")
     await _ensure_visuals(page, overlay, chrome)
     await page.screenshot()
     await page.wait_for_timeout(100)
@@ -603,7 +654,14 @@ async def run_render(
             cached = compiled.actions[index]
             if cached is not None and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
-            recorder = Recorder(active_page, overlay, settle_ms=cfg.cursor.settle)
+            # Main window drives the site iframe (a Frame); popups drive the page.
+            on_shell = active_page is page and site_frame is not None
+            recorder = Recorder(
+                active_page,
+                overlay,
+                settle_ms=cfg.cursor.settle,
+                frame=site_frame if on_shell else None,
+            )
             try:
                 opened = await _render_step(
                     active_page,
@@ -746,26 +804,46 @@ async def _render_step(
     # them before every recorded step, including narration-only and timed waits.
     await _ensure_visuals(page, overlay, chrome)
 
+    # Locators/navigation/reuse run against the recorder's frame: the site iframe
+    # for the main window (a Frame distinct from the shell page), the page itself
+    # for popups / chrome-disabled renders.
+    action_frame = getattr(recorder, "frame", recorder.page)
+    on_shell = action_frame is not recorder.page
+
     if kind == "say":
         return None
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()
         url = _resolve_url(scenario, source_url)
-        type_override = step.navigate_type_override()
-        animate = (
-            scenario.config.chrome.type_on_navigate if type_override is None else type_override
-        )
-        if chrome is not None and scenario.config.chrome.show_url and animate:
-            await chrome.set_url(page, url, animate=True)
+        chrome_cfg = scenario.config.chrome
+        show_url = chrome is not None and chrome_cfg.show_url
+        mode = navigate_pill_mode(chrome_cfg, step.navigate_type_override())
 
-        await recorder.navigate(url)
-
-        # An instant update happens after goto so redirects are reflected.  The
-        # animated variant is typed before goto, then ensure synchronizes the
-        # final page URL after the new document has loaded.
-        if chrome is not None and scenario.config.chrome.show_url and not animate:
-            await chrome.set_url(page, page.url, animate=False)
+        if on_shell:
+            # Main window: the pill lives in the shell. The choreography/typed
+            # animation runs before goto; the truthful site URL (after redirects)
+            # is reflected once the iframe has loaded.
+            if show_url and mode in ("choreograph", "type"):
+                await chrome.type_url(
+                    page,
+                    overlay,
+                    url,
+                    seed=f"{url}:{index}",
+                    choreograph=(mode == "choreograph"),
+                )
+            await recorder.navigate(url)
+            if show_url:
+                await chrome.set_url_shell(page, action_frame.url)
+        else:
+            # Popup / chrome-disabled: legacy in-DOM pill on the page itself. An
+            # instant update happens after goto so redirects are reflected; the
+            # animated variant is typed before goto.
+            if show_url and mode != "instant":
+                await chrome.set_url(page, url, animate=True)
+            await recorder.navigate(url)
+            if show_url and mode == "instant":
+                await chrome.set_url(page, page.url, animate=False)
         await _ensure_visuals(page, overlay, chrome)
         return None
     if kind == "wait" and not step.requires_target():
@@ -774,7 +852,7 @@ async def _render_step(
 
     if cached is None:
         raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
-    if cached.action != "waitFor" and not await reuse_is_valid(page, cached):
+    if cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
         raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
     if cached.opens_popup and cached.action != "click":
         raise RenderError(f"krok {index}: tylko click może otworzyć popup")

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Frame, Locator, Page
 
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.target import Target
@@ -23,15 +23,26 @@ _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enable
 
 
 class Recorder:
-    def __init__(self, page: Page, overlay: Overlay | None, settle_ms: float = 280) -> None:
+    def __init__(
+        self,
+        page: Page,
+        overlay: Overlay | None,
+        settle_ms: float = 280,
+        frame: Page | Frame | None = None,
+    ) -> None:
         self.page = page
+        # Locators, navigation and reuse-validation run against ``frame``; the
+        # main window drives the site iframe (a ``Frame``) while the overlay and
+        # load-state stay on the page. ``frame`` defaults to the page, which is
+        # the popup/compile/chrome-disabled case (frame is the page).
+        self.frame: Page | Frame = frame if frame is not None else page
         self.overlay = overlay
         # Pause (ms) after the cursor lands and ripples, before the action fires —
         # gives the viewer a beat to register *where* the cursor stopped.
         self.settle_ms = settle_ms
 
     async def _point_and_prepare(self, target: Target) -> Locator:
-        locator = await build_locator(self.page, target)
+        locator = await build_locator(self.frame, target)
         # scroll to the target on BOTH axes — an element can be off-screen horizontally
         # too, and Playwright's auto-scroll is vertically centric
         await locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
@@ -46,7 +57,9 @@ class Recorder:
         return locator
 
     async def navigate(self, url: str) -> None:
-        await self.page.goto(url)
+        # For the main window ``self.frame`` is the site iframe, so this navigates
+        # the iframe (not the shell); for popups/compile it is the page itself.
+        await self.frame.goto(url)
         await self.apply_readiness("navigation")
 
     async def click(
@@ -74,7 +87,7 @@ class Recorder:
         await asyncio.sleep(seconds)
 
     async def wait_for(self, target: Target, state: WaitState, timeout: float) -> None:
-        locator = await build_locator(self.page, target)
+        locator = await build_locator(self.frame, target)
         await locator.wait_for(state=_WAIT_STATE[state], timeout=timeout * 1000)
 
     async def apply_readiness(self, expect: Expect) -> None:

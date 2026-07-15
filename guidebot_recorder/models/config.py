@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from guidebot_recorder.languages import is_iso_639_2
 
 #: version of the canonical config projection used for the hash
-CONFIG_HASH_VERSION = 1
+CONFIG_HASH_VERSION = 2
 
 
 class Viewport(BaseModel):
@@ -63,10 +63,13 @@ class CursorConfig(BaseModel):
 
 
 class ChromeConfig(BaseModel):
-    """Cosmetic browser chrome rendered above the recorded page.
+    """Browser chrome (address bar shell) rendered around the recorded page.
 
-    The whole feature is opt-in.  These values only affect render-time visuals,
-    so they deliberately stay outside :func:`config_hash`.
+    The whole feature is opt-in.  ``enabled`` and ``height`` change the compiled
+    site layout — the page renders inside an iframe of height ``H - height`` — so
+    those two are the *only* chrome fields folded into :func:`config_hash`.  The
+    cosmetic and typing/interaction fields below are render-time visuals and stay
+    outside the hash, so tweaking them never forces a recompile.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -82,6 +85,15 @@ class ChromeConfig(BaseModel):
     close_color: str = Field(default="#ff5f57", alias="closeColor")
     minimize_color: str = Field(default="#febc2e", alias="minimizeColor")
     maximize_color: str = Field(default="#28c840", alias="maximizeColor")
+
+    # --- Typing / interaction in the address bar (render-only, off the hash) ---
+    interact_on_navigate: bool = Field(default=True, alias="interactOnNavigate")
+    char_delay_ms: int = Field(default=110, alias="charDelayMs")
+    char_jitter_ms: int = Field(default=55, alias="charJitterMs")
+    segment_pause_ms: int = Field(default=180, alias="segmentPauseMs")
+    pre_navigate_pause_ms: int = Field(default=400, alias="preNavigatePauseMs")
+    focus_color: str = Field(default="#3b82f6", alias="focusColor")
+    show_caret: bool = Field(default=True, alias="showCaret")
 
 
 class Config(BaseModel):
@@ -123,17 +135,40 @@ class Config(BaseModel):
         return self
 
 
+def site_viewport(cfg: Config) -> tuple[int, int]:
+    """Layout viewport of the target site (width, height).
+
+    When ``chrome.enabled`` is true the site renders inside the shell iframe of
+    height ``H - chrome.height``, so both ``compile`` and ``render`` must resolve
+    the site at the reduced height for the frozen positions to line up. With
+    chrome disabled the site occupies the full configured viewport.
+    """
+
+    width = cfg.viewport.width
+    height = cfg.viewport.height
+    if cfg.chrome.enabled:
+        height -= cfg.chrome.height
+    return width, height
+
+
 def config_hash(cfg: Config) -> str:
-    """SHA-256 of the canonical projection: viewport, locale, tts.lang.
+    """SHA-256 of the canonical projection: viewport, locale, tts.lang, chrome geometry.
 
     Changing the viewport/locale/default TTS language invalidates the references
     (fingerprint, §4.1). Alternate audio tracks and MP4 metadata are render-only.
+
+    Chrome geometry (``chrome.enabled`` and ``chrome.height``) is included because
+    enabling the chrome shell or resizing it shrinks the site's compile/layout
+    viewport — the page renders inside an iframe of height ``H - chrome.height`` —
+    which changes the compiled references. The cosmetic and typing/interaction
+    chrome fields do not affect layout and are deliberately left out.
     """
     projection = {
         "v": CONFIG_HASH_VERSION,
         "viewport": {"width": cfg.viewport.width, "height": cfg.viewport.height},
         "locale": cfg.locale,
         "tts_lang": cfg.tts.lang,
+        "chrome": {"enabled": cfg.chrome.enabled, "height": cfg.chrome.height},
     }
     payload = json.dumps(projection, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
