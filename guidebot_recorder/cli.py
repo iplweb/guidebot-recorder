@@ -8,13 +8,30 @@ from pathlib import Path
 import typer
 from playwright.async_api import async_playwright
 
-from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile
+from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
+from guidebot_recorder.recorder.render_set import (
+    RenderSetError,
+    ensure_render_set_compiled,
+    render_set_output_paths,
+    render_set_up_to_date,
+    run_compile_set,
+    run_render_set,
+)
 from guidebot_recorder.resolver.reasoner import CodexReasoner
 from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.render_set import RenderSetPlan, load_render_set
 from guidebot_recorder.tts.edge import EdgeTtsProvider
 
 app = typer.Typer(help="Kompilator scenariuszy YAML → deterministyczny film szkoleniowy.")
+
+
+def _load_set_or_exit(path: Path) -> RenderSetPlan:
+    try:
+        return load_render_set(path)
+    except Exception as exc:  # noqa: BLE001 — CLI reports the full manifest/scenario error
+        typer.echo(f"BŁĄD zestawu: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command("validate")
@@ -47,11 +64,10 @@ def compile_cmd(
     async def _run() -> None:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=not headed)
-            page = await browser.new_page()
             try:
-                await run_compile(
+                await run_compile_in_browser(
                     path,
-                    page,
+                    browser,
                     CodexReasoner(),
                     timeout=timeout,
                     force=force,
@@ -63,6 +79,55 @@ def compile_cmd(
 
     asyncio.run(_run())
     typer.echo("skompilowano")
+
+
+@app.command("compile-set")
+def compile_set_cmd(
+    path: Path,
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    force: bool = typer.Option(False, "--force", help="Przelicz wszystkie warianty"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zostaw okno otwarte (headed)"
+    ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji (sekundy)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp"),
+) -> None:
+    """Skompiluj osobny sidecar dla każdego scenariusza językowego."""
+
+    plan = _load_set_or_exit(path)
+    if not force:
+        try:
+            if render_set_up_to_date(plan):
+                typer.echo("nic do skompilowania (wszystkie warianty aktualne)")
+                return
+        except RenderSetError as exc:
+            typer.echo(f"BŁĄD: {exc}", err=True)
+            raise typer.Exit(code=1) from None
+
+    async def _run() -> None:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=not headed)
+            try:
+                result = await run_compile_set(
+                    plan,
+                    browser,
+                    CodexReasoner(),
+                    timeout=timeout,
+                    force=force,
+                    pause_on_error=pause_on_error,
+                    verbose=verbose,
+                )
+            finally:
+                await browser.close()
+        typer.echo(
+            "skompilowano warianty: " + (", ".join(result.compiled) if result.compiled else "brak")
+        )
+
+    try:
+        asyncio.run(_run())
+    except RenderSetError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 @app.command("render")
@@ -112,6 +177,60 @@ def render_cmd(
 
     asyncio.run(_run())
     typer.echo(f"zrenderowano: {out}")
+
+
+@app.command("render-set")
+def render_set_cmd(
+    path: Path,
+    out_dir: Path = typer.Option(..., "--output-dir", "--out-dir", help="Katalog wynikowych MP4"),
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zostaw okno otwarte (headed)"
+    ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji (sekundy)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp"),
+) -> None:
+    """Wyrenderuj osobny zlokalizowany MP4 z jednym audio na wariant."""
+
+    plan = _load_set_or_exit(path)
+    if plan.provider != "edge":
+        typer.echo(
+            "BŁĄD: wbudowane `render-set` obsługuje provider TTS `edge`; "
+            f"skonfigurowano: {plan.provider}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    try:
+        render_set_output_paths(plan, out_dir)
+        ensure_render_set_compiled(plan)
+    except RenderSetError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    async def _run() -> list[Path]:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=not headed)
+            try:
+                return await run_render_set(
+                    plan,
+                    out_dir,
+                    EdgeTtsProvider(),
+                    Path(".guidebot/audio"),
+                    browser,
+                    timeout=timeout,
+                    pause_on_error=pause_on_error,
+                    verbose=verbose,
+                )
+            finally:
+                await browser.close()
+
+    try:
+        outputs = asyncio.run(_run())
+    except RenderSetError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    for output in outputs:
+        typer.echo(f"zrenderowano: {output}")
 
 
 if __name__ == "__main__":

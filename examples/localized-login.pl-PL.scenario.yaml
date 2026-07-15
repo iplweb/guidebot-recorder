@@ -1,0 +1,52 @@
+# Pełny polski wariant zestawu. `teach` i pozostałe opisy akcji są kanonicznym
+# polskim action intent — nie pochodzą z `translations`.
+#
+# Polecenia:
+#   export DEMO_EMAIL=user@example.com
+#   uv run guidebot compile-set examples/localized-login.render-set.yaml
+#   uv run guidebot render-set examples/localized-login.render-set.yaml \
+#     --output-dir out/localized-login
+config:
+  title: "Logowanie do systemu"
+  baseUrl: https://pl.example.com
+  viewport: { width: 1280, height: 720 }
+  locale: pl-PL
+  tts:
+    provider: edge
+    voice: pl-PL-MarekNeural
+    lang: pl-PL
+    trackLanguage: pol
+    title: Polski
+  chrome:
+    enabled: true
+    showUrl: true
+    typeOnNavigate: true
+steps:
+  - say: "Witaj. Pokażę, jak zalogować się do systemu."
+
+  - navigate: /logowanie
+
+  - wait:
+      until: "aż pojawi się baner zgody na pliki cookie"
+      state: visible
+      timeout: 20
+
+  - click: "przycisk Akceptuję na banerze plików cookie"
+    say: "Najpierw akceptuję ustawienia plików cookie."
+
+  - hover: "menu Konto w prawym górnym rogu"
+    say: "Teraz otwieram menu konta."
+
+  - teach: "Aby otworzyć formularz logowania, kliknij odnośnik Zaloguj się."
+
+  - enterText:
+      into: "pole adresu e-mail"
+      text: "${DEMO_EMAIL}"
+    say: "Wpisuję adres e-mail."
+
+  - wait:
+      until: "aż przycisk Dalej będzie widoczny"
+      state: visible
+      timeout: 10
+
+  - say: "Polski wariant filmu jest gotowy."

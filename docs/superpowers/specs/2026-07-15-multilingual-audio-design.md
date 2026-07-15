@@ -13,6 +13,12 @@ and place every language as a separately selectable audio stream in one MP4. The
 legacy scenario remains valid and still produces one video plus one default audio
 stream.
 
+This contract localizes audio only. It deliberately keeps one canonical browser
+locale, URL flow, and set of action intents. When those visual or behavioral inputs
+must differ by language, use complete scenarios grouped by the
+[`2026-07-15-localized-render-set-design.md`](2026-07-15-localized-render-set-design.md)
+contract instead.
+
 ## Scenario contract
 
 `config.tts` remains the canonical/default track. `config.audioTracks` contains
@@ -166,6 +172,7 @@ and [recommended upload encoding](https://support.google.com/youtube/answer/1722
 - Global `-shortest` was rejected for the multi-track mux because the shortest audio
   input could shorten the video. Full-duration beds plus an authoritative video
   duration make failure observable.
-- Re-rendering the browser once per language was rejected because it can produce
-  visually different runs and multiplies browser cost. One shared timeline is the
-  product contract.
+- Re-rendering the browser once per language was rejected for an embedded multi-audio
+  master because it can produce visually different runs and cannot yield one shared
+  picture timeline. Separate localized films intentionally make the opposite
+  trade-off and are specified by `2026-07-15-localized-render-set-design.md`.

@@ -1,0 +1,11 @@
+# Localized render-set manifest. Relative scenario paths are resolved from
+# this file; output paths are resolved underneath `render-set --output-dir`.
+kind: localized-render-set
+version: 1
+variants:
+  pl-PL:
+    scenario: localized-login.pl-PL.scenario.yaml
+    output: localized-login.pl-PL.mp4
+  en-US:
+    scenario: localized-login.en-US.scenario.yaml
+    output: localized-login.en-US.mp4
