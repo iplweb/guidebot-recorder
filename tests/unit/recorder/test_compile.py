@@ -95,6 +95,36 @@ async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     assert second.calls == 0  # reuse — LLM nie wołany
 
 
+async def test_editing_translation_does_not_invalidate_canonical_teach(tmp_path, page):
+    scenario = textwrap.dedent(
+        """\
+        config:
+          title: Logowanie
+          viewport: {width: 800, height: 600}
+          tts: {provider: edge, voice: pl, lang: pl-PL, trackLanguage: pol}
+          audioTracks:
+            - {provider: edge, voice: en, lang: en-US, trackLanguage: eng}
+        steps:
+          - navigate: "data:text/html,<button>Zaloguj</button>"
+          - teach: "kliknij Zaloguj"
+            translations: {en-US: "Click Log in"}
+        """
+    )
+    path = tmp_path / "multilingual.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+    await run_compile(path, page, MockReasoner())
+
+    path.write_text(scenario.replace("Click Log in", "Choose Log in"), encoding="utf-8")
+
+    assert compile_up_to_date(path) is True
+    reasoner = MockReasoner()
+    await run_compile(path, page, reasoner)
+    assert reasoner.calls == 0
+    action = load_compiled(compiled_path(path)).actions[1]
+    assert action is not None
+    assert action.fingerprint.compiled_from == "kliknij Zaloguj"
+
+
 async def test_compile_sets_viewport_from_config(tmp_path, page):
     # config.viewport = 800x600; compile MUSI go ustawić (spójność z render)
     path = tmp_path / "login.scenario.yaml"

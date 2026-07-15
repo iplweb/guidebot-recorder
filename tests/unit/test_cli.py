@@ -52,3 +52,13 @@ def test_render_auto_heal_not_implemented(tmp_path):
         app, ["render", str(path), "--out", str(tmp_path / "o.mp4"), "--auto-heal"]
     )
     assert result.exit_code != 0
+
+
+def test_render_rejects_non_edge_provider_before_browser_launch(tmp_path):
+    path = tmp_path / "s.yaml"
+    path.write_text(GOOD.replace("provider: edge", "provider: custom"), encoding="utf-8")
+
+    result = runner.invoke(app, ["render", str(path), "--out", str(tmp_path / "o.mp4")])
+
+    assert result.exit_code == 2
+    assert "obsługuje provider TTS `edge`" in result.output

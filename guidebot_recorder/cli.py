@@ -77,9 +77,20 @@ def render_cmd(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
 ) -> None:
-    """Zrenderuj deterministyczny film `.mp4` z lektorem (0×LLM)."""
+    """Zrenderuj `.mp4` z jedną lub wieloma ścieżkami lektora (0×LLM)."""
     if auto_heal:
         typer.echo("BŁĄD: --auto-heal nie jest zaimplementowane w v1", err=True)
+        raise typer.Exit(code=2)
+
+    scenario = load_scenario(path)
+    providers = {track.provider for track in [scenario.config.tts, *scenario.config.audio_tracks]}
+    if providers != {"edge"}:
+        configured = ", ".join(sorted(providers))
+        typer.echo(
+            "BŁĄD: wbudowane polecenie `render` obsługuje provider TTS `edge`; "
+            f"skonfigurowano: {configured}",
+            err=True,
+        )
         raise typer.Exit(code=2)
 
     async def _run() -> None:

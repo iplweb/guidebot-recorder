@@ -233,11 +233,11 @@ the larger of two seconds or 15% of the interval; a larger disagreement is a har
 timing error. The existing approximate-sync trade-off for Playwright VFR remains in
 force.
 
-Finally probe the composite duration, build the unchanged narration bed on the same
-wall-clock offsets, and mux one video stream plus one audio stream to the output
-`.mp4`. Implementation may use one combined FFmpeg invocation or an intermediate
-video, but it must avoid an accidental second lossy encode when a single encode is
-practical.
+Finally probe the composite duration, build every configured narration bed on the
+same wall-clock offsets, and mux one video stream plus one or more audio streams to
+the output `.mp4`, as defined by the multilingual-audio design. Implementation may
+use one combined FFmpeg invocation or an intermediate video, but it must avoid an
+accidental second lossy video encode when a single encode is practical.
 
 ## Tests and acceptance gates
 
@@ -275,8 +275,9 @@ practical.
   pre-prime popup frames. A recorded `about:blank` replacement regression verifies
   that the first popup frame visible in the composite has both visual layers.
   Assertions only on file existence or `duration > 0` are insufficient.
-- End-to-end compile → render produces one `.mp4` with exactly one video and one
-  audio stream. Its sampled frames visibly include all three intervals, and its
-  duration/audio placement stay within the documented VFR tolerance.
+- End-to-end compile → render produces one `.mp4` with exactly one video and the
+  configured number of audio streams (one for a legacy scenario). Its sampled frames
+  visibly include all three intervals, and its duration/audio placement stay within
+  the documented VFR tolerance.
 - An end-to-end scenario uses automatic switching only: opening `teach`, literal
   typing `teach` with frozen `input_text`, closing action, then a main-only action.

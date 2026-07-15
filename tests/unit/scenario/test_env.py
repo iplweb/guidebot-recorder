@@ -55,11 +55,14 @@ def test_scenario_values_navigate_and_entertext():
 
 
 def test_scenario_values_leaves_narration_untouched():
-    # say / teach / enterText.into / wait.until NIE są substytuowane
+    # say / teach / translations / enterText.into / wait.until NIE są substytuowane
     raw = {
         "steps": [
             {"say": "koszt ${SECRET}"},
-            {"teach": "kliknij ${SECRET}"},
+            {
+                "teach": "kliknij ${SECRET}",
+                "translations": {"en-US": "click ${SECRET}"},
+            },
             {"enterText": {"into": "${SECRET}", "text": "x"}},
             {"wait": {"until": "aż ${SECRET}", "state": "visible"}},
         ],
@@ -67,6 +70,7 @@ def test_scenario_values_leaves_narration_untouched():
     out = substitute_scenario_values(raw, {"SECRET": "TOP"})
     assert out["steps"][0]["say"] == "koszt ${SECRET}"
     assert out["steps"][1]["teach"] == "kliknij ${SECRET}"
+    assert out["steps"][1]["translations"]["en-US"] == "click ${SECRET}"
     assert out["steps"][2]["enterText"]["into"] == "${SECRET}"
     assert out["steps"][3]["wait"]["until"] == "aż ${SECRET}"
 

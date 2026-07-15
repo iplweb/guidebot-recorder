@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from guidebot_recorder.video.mux import SAMPLE_RATE, _run, ffmpeg_bin
+from guidebot_recorder.video.mux import SAMPLE_RATE, _run_to_output, ffmpeg_bin
 
 
 @runtime_checkable
@@ -44,7 +44,6 @@ def build_audio_bed(placed: list[Placed], total: float, out: Path) -> None:
     if total <= 0:
         raise ValueError(f"total must be positive, got {total}")
     out = Path(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
 
     for p in placed:
         if p.offset < 0:
@@ -96,6 +95,5 @@ def build_audio_bed(placed: list[Placed], total: float, out: Path) -> None:
         # Enforce the exact timeline length (trim overruns, keep silent padding).
         "-t",
         f"{total:.6f}",
-        str(out),
     ]
-    _run(cmd)
+    _run_to_output(cmd, out)

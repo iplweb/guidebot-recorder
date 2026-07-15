@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from guidebot_recorder.languages import is_iso_639_2
 
 #: version of the canonical config projection used for the hash
 CONFIG_HASH_VERSION = 1
@@ -18,12 +20,20 @@ class Viewport(BaseModel):
 
 
 class TtsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
     provider: str
     voice: str
     lang: str
     model: str | None = None
     speed: float | None = None
+    # MP4 stream metadata only; neither field changes synthesized audio.
+    title: str | None = None
+    track_language: str | None = Field(default=None, alias="trackLanguage")
+
+    def mp4_language(self) -> str:
+        """Return the language tag written to the MP4 audio stream."""
+
+        return self.track_language or "und"
 
 
 class CursorConfig(BaseModel):
@@ -81,14 +91,43 @@ class Config(BaseModel):
     tts: TtsConfig
     base_url: str | None = Field(default=None, alias="baseUrl")
     locale: str | None = None
+    audio_tracks: list[TtsConfig] = Field(default_factory=list, alias="audioTracks")
     cursor: CursorConfig = Field(default_factory=CursorConfig)
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
+
+    @model_validator(mode="after")
+    def _unique_audio_languages(self) -> Config:
+        tracks = [self.tts, *self.audio_tracks]
+        languages = [track.lang for track in tracks]
+        if len(languages) != len(set(languages)):
+            raise ValueError("każda ścieżka audio musi mieć unikalny język `lang`")
+        invalid = [
+            track.track_language
+            for track in tracks
+            if track.track_language is not None and not is_iso_639_2(track.track_language)
+        ]
+        if invalid:
+            raise ValueError(
+                "`trackLanguage` musi być zarejestrowanym kodem ISO 639-2: " + ", ".join(invalid)
+            )
+        if self.audio_tracks:
+            missing = [track.lang for track in tracks if track.track_language is None]
+            if missing:
+                raise ValueError(
+                    "wielojęzyczne MP4 wymaga `trackLanguage` (ISO 639-2) dla: "
+                    + ", ".join(missing)
+                )
+            mux_languages = [track.track_language for track in tracks]
+            if len(mux_languages) != len(set(mux_languages)):
+                raise ValueError("każda ścieżka audio musi mieć unikalny `trackLanguage`")
+        return self
 
 
 def config_hash(cfg: Config) -> str:
     """SHA-256 of the canonical projection: viewport, locale, tts.lang.
 
-    Changing the viewport/locale/TTS language invalidates the references (fingerprint, §4.1).
+    Changing the viewport/locale/default TTS language invalidates the references
+    (fingerprint, §4.1). Alternate audio tracks and MP4 metadata are render-only.
     """
     projection = {
         "v": CONFIG_HASH_VERSION,
