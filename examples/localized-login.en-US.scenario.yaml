@@ -1,0 +1,52 @@
+# Complete English set variant. `teach` and every other action description are the
+# canonical English action intent; they do not come from `translations`.
+#
+# Commands:
+#   export DEMO_EMAIL=user@example.com
+#   uv run guidebot compile-set examples/localized-login.render-set.yaml
+#   uv run guidebot render-set examples/localized-login.render-set.yaml \
+#     --output-dir out/localized-login
+config:
+  title: "Signing in to the system"
+  baseUrl: https://en.example.com
+  viewport: { width: 1280, height: 720 }
+  locale: en-US
+  tts:
+    provider: edge
+    voice: en-US-GuyNeural
+    lang: en-US
+    trackLanguage: eng
+    title: English
+  chrome:
+    enabled: true
+    showUrl: true
+    typeOnNavigate: true
+steps:
+  - say: "Welcome. I will show you how to sign in to the system."
+
+  - navigate: /login
+
+  - wait:
+      until: "the cookie consent banner to appear"
+      state: visible
+      timeout: 20
+
+  - click: "the Accept button in the cookie consent banner"
+    say: "First, I accept the cookie settings."
+
+  - hover: "the Account menu in the top-right corner"
+    say: "Now I open the account menu."
+
+  - teach: "To open the sign-in form, click the Sign in link."
+
+  - enterText:
+      into: "the email address field"
+      text: "${DEMO_EMAIL}"
+    say: "I enter the email address."
+
+  - wait:
+      until: "the Next button to become visible"
+      state: visible
+      timeout: 10
+
+  - say: "The English video variant is ready."

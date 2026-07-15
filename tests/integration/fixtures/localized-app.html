@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Localized login fixture</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        box-sizing: border-box;
+        color: white;
+        font: 24px/1.4 system-ui, sans-serif;
+        padding: 48px;
+      }
+
+      main {
+        max-width: 520px;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="heading"></h1>
+      <button id="login" type="button"></button>
+      <p>
+        <label id="email-label" for="email"></label>
+        <input id="email" type="email" data-testid="email">
+      </p>
+    </main>
+    <script>
+      const english = navigator.language.toLowerCase().startsWith("en");
+      const copy = english
+        ? {
+            lang: "en",
+            heading: "Account login",
+            button: "Sign in",
+            email: "Email",
+            background: "rgb(24, 160, 72)",
+            clicked: "Signed in",
+          }
+        : {
+            lang: "pl",
+            heading: "Logowanie do konta",
+            button: "Zaloguj",
+            email: "E-mail",
+            background: "rgb(24, 72, 200)",
+            clicked: "Zalogowano",
+          };
+
+      document.documentElement.lang = copy.lang;
+      document.body.dataset.locale = copy.lang;
+      document.body.style.backgroundColor = copy.background;
+      document.querySelector("#heading").textContent = copy.heading;
+      document.querySelector("#login").textContent = copy.button;
+      document.querySelector("#email-label").textContent = copy.email;
+      document.querySelector("#login").addEventListener("click", () => {
+        document.querySelector("#heading").textContent = copy.clicked;
+        document.body.dataset.clicked = "true";
+      });
+    </script>
+  </body>
+</html>

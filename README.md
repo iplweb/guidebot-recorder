@@ -155,6 +155,54 @@ added language, so use those generated WAV beds when uploading dubs:
 See [`examples/multilingual-login.scenario.yaml`](examples/multilingual-login.scenario.yaml)
 for a complete scenario.
 
+### Separate localized videos (render sets)
+
+An embedded master intentionally keeps one canonical browser flow: `translations`
+changes only alternate narration and never changes `teach` or another browser action.
+When the page itself has a different locale, host, path, labels, or action wording,
+use a localized render set made from complete scenarios instead.
+
+```yaml
+kind: localized-render-set
+version: 1
+variants:
+  pl-PL:
+    scenario: localized-login.pl-PL.scenario.yaml
+    output: localized-login.pl-PL.mp4
+  en-US:
+    scenario: localized-login.en-US.scenario.yaml
+    output: localized-login.en-US.mp4
+```
+
+The set CLI keeps the ordinary `render` command unchanged:
+
+```bash
+# Existing mode: one visual recording with selectable embedded audio tracks
+uv run guidebot render examples/multilingual-login.scenario.yaml \
+  --out out/multilingual-login.mp4
+
+# Set mode: one independently compiled, single-audio MP4 per full scenario
+uv run guidebot compile-set examples/localized-login.render-set.yaml
+uv run guidebot render-set examples/localized-login.render-set.yaml \
+  --output-dir out/localized-login
+```
+
+Scenario paths are relative to the manifest. Output paths are relative to the
+required `--output-dir`. Each language owns its `locale`, `baseUrl`, `navigate`
+values, narration, and canonical action descriptions; its normal compiled sidecar is
+written beside that scenario. Every variant uses a fresh browser context and contains
+exactly one audio stream. Preflight rejects path escapes (including symlinks and
+Windows drive paths), colliding compiled sidecars, and MP4 paths that overlap another
+variant's private render workspace.
+
+Set commands run variants in manifest order and stop on the first error. Outputs from
+earlier completed variants remain valid, the failed variant does not publish a
+partial replacement, and later variants are not started. See the
+[render-set manifest](examples/localized-login.render-set.yaml), the complete
+[Polish](examples/localized-login.pl-PL.scenario.yaml) and
+[English](examples/localized-login.en-US.scenario.yaml) scenarios, and the full
+[localized render-set design](docs/superpowers/specs/2026-07-15-localized-render-set-design.md).
+
 The optional `config.chrome` block is render-only and defaults to `enabled: false`,
 so existing scenarios keep their current output. When enabled, `showUrl` controls
 whether the address pill is visible and `typeOnNavigate` controls whether a string

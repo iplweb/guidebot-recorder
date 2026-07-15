@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from playwright.async_api import (
+    Browser,
     BrowserContext,
     Page,
 )
@@ -46,7 +47,12 @@ from guidebot_recorder.models.target import (
     TestidTarget,
     TextTarget,
 )
-from guidebot_recorder.recorder._debug import pause_for_inspection
+from guidebot_recorder.recorder._debug import (
+    pause_for_inspection,
+    redact_exception,
+    redact_text,
+    scenario_sensitive_values,
+)
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.identity_capture import capture_identity
 from guidebot_recorder.resolver.page_context import collect_candidates
@@ -174,10 +180,11 @@ def compile_up_to_date(
     """
     if force:
         return False
+    path = Path(path)
     scenario = load_scenario(path, env)
     chash = config_hash(scenario.config)
-    cpath = compiled_path(Path(path))
-    if not _compiled_artifact_is_current(cpath, len(scenario.steps)):
+    cpath = compiled_path(path)
+    if not _compiled_artifact_is_current(cpath, path.name, len(scenario.steps)):
         return False
     actions = _load_prior_actions(cpath, len(scenario.steps))
     if any(
@@ -188,7 +195,7 @@ def compile_up_to_date(
     return not _steps_needing_resolution(scenario, actions, chash, force)
 
 
-def _compiled_artifact_is_current(cpath: Path, n_steps: int) -> bool:
+def _compiled_artifact_is_current(cpath: Path, source_name: str, n_steps: int) -> bool:
     """Validate artifact-level invariants, including targetless scenarios."""
 
     try:
@@ -197,12 +204,53 @@ def _compiled_artifact_is_current(cpath: Path, n_steps: int) -> bool:
         return False
     return (
         compiled.compiler_version == COMPILER_VERSION
+        and compiled.source == source_name
         and len(compiled.actions) == n_steps
         and all(
             action is None or action.fingerprint.compiler_version == COMPILER_VERSION
             for action in compiled.actions
         )
     )
+
+
+async def run_compile_in_browser(
+    path: Path | str,
+    browser: Browser,
+    reasoner: Reasoner,
+    env: Mapping[str, str] | None = None,
+    *,
+    timeout: float = 30.0,
+    force: bool = False,
+    pause_on_error: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Compile in a fresh context matching the scenario's render locale.
+
+    A localized page can expose different labels from ``navigator.language`` or
+    ``Accept-Language``. Creating the context here prevents compile from freezing
+    targets against a different DOM than render will later replay.
+    """
+
+    scenario = load_scenario(path, env)
+    cfg = scenario.config
+    context = await browser.new_context(
+        viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
+        locale=cfg.locale,
+    )
+    try:
+        page = await context.new_page()
+        await run_compile(
+            path,
+            page,
+            reasoner,
+            env,
+            timeout=timeout,
+            force=force,
+            pause_on_error=pause_on_error,
+            verbose=verbose,
+        )
+    finally:
+        await context.close()
 
 
 async def run_compile(
@@ -218,6 +266,7 @@ async def run_compile(
 ) -> None:
     path = Path(path)
     scenario = load_scenario(path, env)
+    sensitive_values = scenario_sensitive_values(scenario, env)
     cfg = scenario.config
     chash = config_hash(cfg)
     # CRUCIAL: the same viewport as render, otherwise frozen positions do not match.
@@ -262,7 +311,8 @@ async def run_compile(
                 except ValueError as exc:
                     raise RuntimeError(str(exc)) from exc
             if verbose:
-                tqdm.write(f"[{index + 1}/{len(steps)}] {kind}: {_short(step)}")
+                description = redact_text(_short(step), sensitive_values)
+                tqdm.write(f"[{index + 1}/{len(steps)}] {kind}: {description}")
             try:
                 pages_before = tuple(context.pages)
                 observed_start = len(observed_pages)
@@ -361,12 +411,20 @@ async def run_compile(
                     raise RuntimeError(f"krok {index}: nieoczekiwany dodatkowy popup")
                 actions[index] = compiled_action
             except Exception as exc:
+                safe_message = redact_exception(exc, sensitive_values)
                 if verbose:
-                    tqdm.write(f"   ✗ {type(exc).__name__}: {exc}")
+                    tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
                 if pause_on_error:
                     debug_page = active_page if not active_page.is_closed() else main_page
-                    await pause_for_inspection(debug_page, "compile", index, kind, exc)
-                raise
+                    await pause_for_inspection(
+                        debug_page,
+                        "compile",
+                        index,
+                        kind,
+                        exc,
+                        sensitive_values,
+                    )
+                raise RuntimeError(f"{type(exc).__name__}: {safe_message}") from None
             # persist incrementally so partial progress survives a later failure
             write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
             bar.update(1)

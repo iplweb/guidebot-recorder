@@ -7,6 +7,7 @@ is written with a plain YAML dump. ``compile`` never mutates the source scenario
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -68,12 +69,20 @@ def write_compiled(path: Path | str, compiled: CompiledScenario) -> None:
     payload = compiled.model_dump(by_alias=True, exclude_none=True)
     yaml = YAML()
     yaml.default_flow_style = False
-    tmp = path.with_name(f".{path.name}.tmp")
+    tmp: Path | None = None
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp = Path(fh.name)
             fh.write(_HEADER)
             yaml.dump(payload, fh)
         os.replace(tmp, path)
     finally:
-        if tmp.exists():
+        if tmp is not None and tmp.exists():
             tmp.unlink(missing_ok=True)

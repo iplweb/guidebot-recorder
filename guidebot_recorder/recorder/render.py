@@ -14,6 +14,7 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin
@@ -33,7 +34,11 @@ from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
 from guidebot_recorder.models.config import TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
-from guidebot_recorder.recorder._debug import pause_for_inspection
+from guidebot_recorder.recorder._debug import (
+    pause_for_inspection,
+    redact_exception,
+    scenario_sensitive_values,
+)
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
@@ -435,6 +440,7 @@ async def run_render(
     cache_dir: Path | str,
     browser: Browser,
     *,
+    env: Mapping[str, str] | None = None,
     timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
@@ -443,7 +449,8 @@ async def run_render(
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    scenario = load_scenario(path)
+    scenario = load_scenario(path, env)
+    sensitive_values = scenario_sensitive_values(scenario, env)
     cfg = scenario.config
     audio_configs = [cfg.tts, *cfg.audio_tracks]
     providers = {tts.provider for tts in audio_configs}
@@ -458,6 +465,10 @@ async def run_render(
         compiled = load_compiled(cpath)
     except FileNotFoundError as exc:
         raise RenderError(f"brak pliku compiled ({cpath.name}) — uruchom `compile`") from exc
+    if compiled.source != path.name:
+        raise RenderError(
+            f"compiled pochodzi z innego scenariusza ({compiled.source}) — uruchom `compile`"
+        )
     if len(compiled.actions) != len(scenario.steps):
         raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
     if compiled.compiler_version != COMPILER_VERSION or any(
@@ -635,12 +646,20 @@ async def run_render(
                         f"krok {index}: nieoczekiwany popup — uruchom `compile --force`"
                     )
             except Exception as exc:
+                safe_message = redact_exception(exc, sensitive_values)
                 if verbose:
-                    tqdm.write(f"   ✗ {type(exc).__name__}: {exc}")
+                    tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
                 if pause_on_error:
                     debug_page = _active_page(page, popup)
-                    await pause_for_inspection(debug_page, "render", index, kind, exc)
-                raise
+                    await pause_for_inspection(
+                        debug_page,
+                        "render",
+                        index,
+                        kind,
+                        exc,
+                        sensitive_values,
+                    )
+                raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
             bar.update(1)
         # Force a bounded final frame after narration/action completion. Without
         # this post-roll, a static last page can leave the VFR recording a fraction

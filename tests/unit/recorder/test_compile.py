@@ -309,6 +309,98 @@ async def test_teach_type_rejects_password_dom_target_before_typing(tmp_path, pa
     assert await page.locator("#value").input_value() == ""
 
 
+async def test_enter_text_runtime_error_redacts_value_from_exception_and_verbose_log(
+    tmp_path,
+    page,
+    monkeypatch,
+    capsys,
+):
+    secret = "sentinel-fill-secret"
+    path = tmp_path / "explicit-type.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Wpisywanie
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - navigate: "data:text/html,<label for=email>E-mail</label><input id=email>"
+              - enterText: {into: "pole E-mail", text: "${PASSWORD}"}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    class TypeReasoner:
+        async def resolve(self, instruction, candidates):
+            return ReasonerResult(
+                "type",
+                RoleTarget(role="textbox", name="E-mail", exact=True),
+            )
+
+    async def fail_with_playwright_style_message(self, target, text):
+        assert text == secret
+        raise RuntimeError(f'locator.fill("{text}") timed out')
+
+    monkeypatch.setattr(Recorder, "enter_text", fail_with_playwright_style_message)
+
+    with pytest.raises(RuntimeError) as captured:
+        await run_compile(
+            path,
+            page,
+            TypeReasoner(),
+            {"PASSWORD": secret},
+            verbose=True,
+        )
+
+    diagnostics = str(captured.value) + capsys.readouterr().out
+    assert secret not in diagnostics
+    assert "<redacted>" in diagnostics
+
+
+async def test_navigate_runtime_error_redacts_expanded_env_value(
+    tmp_path,
+    page,
+    monkeypatch,
+    capsys,
+):
+    secret = "sentinel-navigation-token"
+    path = tmp_path / "secret-navigation.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Nawigacja
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - navigate: "https://example.test/login?token=${TOKEN}"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    async def fail_with_effective_url(self, url):
+        assert secret in url
+        raise RuntimeError(f'page.goto("{url}") timed out')
+
+    monkeypatch.setattr(Recorder, "navigate", fail_with_effective_url)
+
+    with pytest.raises(RuntimeError) as captured:
+        await run_compile(
+            path,
+            page,
+            MockReasoner(),
+            {"TOKEN": secret},
+            verbose=True,
+        )
+
+    diagnostics = str(captured.value) + capsys.readouterr().out
+    assert secret not in diagnostics
+    assert "<redacted>" in diagnostics
+
+
 async def test_popup_opened_during_reasoning_is_unexpected_and_click_is_not_run(tmp_path, page):
     path = tmp_path / "unexpected-popup.scenario.yaml"
     path.write_text(
@@ -488,6 +580,11 @@ def test_targetless_scenario_requires_current_aligned_sidecar(tmp_path):
     current = CompiledScenario(source=path.name, actions=[None])
     write_compiled(cpath, current)
     assert compile_up_to_date(path) is True
+
+    write_compiled(cpath, current.model_copy(update={"source": "other.scenario.yaml"}))
+    assert compile_up_to_date(path) is False
+
+    write_compiled(cpath, current)
 
     write_compiled(
         cpath,

@@ -527,6 +527,38 @@ async def test_render_aborts_on_alternate_synthesis_failure_before_recording(tmp
     assert not (tmp_path / ".guidebot_video" / "out").exists()
 
 
+async def test_render_rejects_sidecar_from_other_scenario_before_tts_or_browser(tmp_path):
+    path = tmp_path / "narration.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Narracja
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: pl, lang: pl-PL}
+            steps:
+              - say: "Witaj."
+            """
+        ),
+        encoding="utf-8",
+    )
+    write_compiled(
+        compiled_path(path),
+        CompiledScenario(source="english.scenario.yaml", actions=[None]),
+    )
+
+    with pytest.raises(RenderError, match="innego scenariusza"):
+        await run_render(
+            path,
+            tmp_path / "out.mp4",
+            FakeTts(),
+            tmp_path / "cache",
+            object(),  # type: ignore[arg-type] -- provenance fails before browser use
+        )
+
+    assert not (tmp_path / "cache").exists()
+
+
 def test_audio_timeline_rejects_even_subframe_narration_overrun(tmp_path):
     tts = TtsConfig(
         provider="fake",
