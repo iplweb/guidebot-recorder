@@ -41,3 +41,19 @@ jobs:
 
       - name: Tests
         run: uv run pytest -q -m "not network"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync documentation dependencies
+        run: uv sync --frozen --python 3.12 --group docs
+
+      - name: Build documentation
+        run: uv run --frozen --group docs mkdocs build --strict

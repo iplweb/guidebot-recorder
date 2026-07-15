@@ -1,0 +1,113 @@
+# yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: Guidebot Recorder
+site_description: Compile plain-language browser scenarios into deterministic narrated videos.
+site_url: https://iplweb.github.io/guidebot-recorder/
+repo_url: https://github.com/iplweb/guidebot-recorder
+repo_name: iplweb/guidebot-recorder
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Michał Pasternak
+
+docs_dir: docs
+exclude_docs: |
+  superpowers/
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.action.edit
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: false
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+        - locale: pl
+          name: Polski
+          build: true
+          site_description: Kompiluj opisane zwykłym językiem scenariusze przeglądarkowe do deterministycznych filmów z lektorem.
+          nav_translations:
+            Home: Start
+            Getting started: Szybki start
+            Compiling agents: Agenci kompilujący
+            Concepts: Podstawy
+            How it works: Jak to działa
+            Scenario files: Pliki scenariusza
+            Multilingual audio: Wielojęzyczne audio
+            Localized render sets: Zlokalizowane zestawy renderów
+            Reference: Dokumentacja
+            Scenario YAML: YAML scenariusza
+            CLI: CLI
+            Troubleshooting: Rozwiązywanie problemów
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Compiling agents: compiling-agents.md
+  - Concepts:
+      - How it works: how-it-works.md
+      - Scenario files: scenario-files.md
+      - Multilingual audio: multilingual-audio.md
+      - Localized render sets: localized-render-sets.md
+  - Reference:
+      - Scenario YAML: scenario-reference.md
+      - CLI: cli-reference.md
+  - Troubleshooting: troubleshooting.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: relative_to_docs
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: relative_to_docs
+    unrecognized_links: warn
