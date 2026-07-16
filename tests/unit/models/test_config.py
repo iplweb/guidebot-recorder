@@ -419,3 +419,23 @@ def test_intro_config_defaults():
 
     i = IntroConfig()
     assert i.enabled is False and i.subtitle is None and i.notes is None
+
+
+# Task 0.5: config_hash() regression test
+def test_new_render_only_blocks_do_not_change_config_hash():
+    from guidebot_recorder.models.config import (
+        Config, Viewport, TtsConfig, CursorConfig, CursorClick,
+        TypingConfig, SoundConfig, IntroConfig,
+    )
+    base = Config(
+        title="t", viewport=Viewport(width=800, height=600),
+        tts=TtsConfig(provider="edge", voice="v", lang="pl-PL"),
+    )
+    h0 = config_hash(base)
+    mutated = base.model_copy(update={
+        "cursor": CursorConfig(click=CursorClick(flash=True, scale=4.5)),
+        "typing": TypingConfig(animate=True, speed=40),
+        "sound": SoundConfig(enabled=True, volume=-6.0),
+        "intro": IntroConfig(enabled=True, subtitle="s"),
+    })
+    assert config_hash(mutated) == h0
