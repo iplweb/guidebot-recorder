@@ -399,3 +399,15 @@ def test_typing_config_defaults_and_bounds():
         TypingConfig(speed=0)
     with pytest.raises(ValidationError):
         TypingConfig(bogus=1)
+
+
+# Task 0.3: SoundConfig tests
+def test_sound_config_defaults_and_bounds():
+    from guidebot_recorder.models.config import SoundConfig
+
+    s = SoundConfig()
+    assert (s.enabled, s.click, s.keys, s.volume) == (False, True, True, -12.0)
+    with pytest.raises(ValidationError):
+        SoundConfig(volume=3.0)   # positive gain rejected (le=0)
+    with pytest.raises(ValidationError):
+        SoundConfig(bogus=1)

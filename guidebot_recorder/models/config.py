@@ -108,6 +108,18 @@ class ChromeConfig(BaseModel):
     show_caret: bool = Field(default=True, alias="showCaret")
 
 
+class SoundConfig(BaseModel):
+    """Render-only, opt-in built-in SFX mixed under the narration."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    click: bool = True
+    keys: bool = True
+    # dB attenuation on the SFX bed; <= 0 only. A positive gain would erode the
+    # −20 dBFS source headroom the clipping defence relies on.
+    volume: float = Field(default=-12.0, le=0)
+
+
 class TypingConfig(BaseModel):
     """Render-only character-by-character input animation."""
 
@@ -129,6 +141,7 @@ class Config(BaseModel):
     cursor: CursorConfig = Field(default_factory=CursorConfig)
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
     typing: TypingConfig = Field(default_factory=TypingConfig)
+    sound: SoundConfig = Field(default_factory=SoundConfig)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:
