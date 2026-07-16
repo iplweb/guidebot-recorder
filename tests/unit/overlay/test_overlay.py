@@ -151,3 +151,36 @@ async def test_hide_show_and_ripple_flash(page: Page) -> None:
     assert disp == "none"
     await overlay.show(page)
     await overlay.ripple(page, flash=True)  # must not raise; TypeError would fail the test
+
+
+async def test_default_overlay_ripple_is_backcompat(page: Page) -> None:
+    """Zero-config default ripple must stay byte-identical to today's ring.
+
+    The default CursorConfig.click (color rgba(37,99,235,.9), scale 3.25,
+    flash False) and ripple() with no flash kwarg must produce exactly one ring
+    in the default blue, its animation ending at scale(3.25), and NO flash disc.
+    """
+    overlay = Overlay()  # no viewport, default CursorConfig → default CFG.click
+    await overlay.install(page)
+    await overlay.ripple(page)  # no flash kwarg → flash defaults False
+
+    # The ring lives ~500ms; read it synchronously in one evaluate.
+    result = await page.evaluate(
+        """() => {
+            const rings = document.querySelectorAll('[data-guidebot-ripple]');
+            const flashes = document.querySelectorAll('[data-guidebot-flash]');
+            const ring = rings[0];
+            const anim = ring.getAnimations()[0];
+            const frames = anim.effect.getKeyframes();
+            return {
+                ringCount: rings.length,
+                flashCount: flashes.length,
+                borderTopColor: getComputedStyle(ring).borderTopColor,
+                endTransform: frames[frames.length - 1].transform,
+            };
+        }"""
+    )
+    assert result["ringCount"] == 1
+    assert result["flashCount"] == 0
+    assert result["borderTopColor"] == "rgba(37, 99, 235, 0.9)"
+    assert result["endTransform"] == "scale(3.25)"
