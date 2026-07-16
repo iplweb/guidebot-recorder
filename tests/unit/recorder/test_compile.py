@@ -447,8 +447,8 @@ async def test_popup_opened_during_click_preparation_is_not_attributed(tmp_path,
     )
     original_prepare = Recorder._point_and_prepare
 
-    async def prepare_and_open_popup(self, target):
-        locator = await original_prepare(self, target)
+    async def prepare_and_open_popup(self, target, *, click_sound=False):
+        locator = await original_prepare(self, target, click_sound=click_sound)
         await self.page.evaluate("() => window.open('about:blank')")
         await self.page.wait_for_timeout(50)
         return locator
