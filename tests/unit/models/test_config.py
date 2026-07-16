@@ -387,3 +387,15 @@ def test_cursor_config_has_click_field_with_defaults():
     assert c.click.color == "rgba(37,99,235,.9)"
     assert c.click.scale == 3.25
     assert c.click.flash is False
+
+
+# Task 0.2: TypingConfig tests
+def test_typing_config_defaults_and_bounds():
+    from guidebot_recorder.models.config import TypingConfig
+
+    t = TypingConfig()
+    assert t.animate is False and t.speed == 60
+    with pytest.raises(ValidationError):
+        TypingConfig(speed=0)
+    with pytest.raises(ValidationError):
+        TypingConfig(bogus=1)

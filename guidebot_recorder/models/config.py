@@ -108,6 +108,16 @@ class ChromeConfig(BaseModel):
     show_caret: bool = Field(default=True, alias="showCaret")
 
 
+class TypingConfig(BaseModel):
+    """Render-only character-by-character input animation."""
+
+    model_config = ConfigDict(extra="forbid")
+    animate: bool = False                  # opt-in; keeps existing renders inert
+    # ms PER CHARACTER — a *delay* (higher = slower). NOT CursorConfig.speed, which is
+    # a px/ms *rate* (higher = faster). Same word, inverted meaning; do not confuse.
+    speed: int = Field(default=60, gt=0)
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
@@ -118,6 +128,7 @@ class Config(BaseModel):
     audio_tracks: list[TtsConfig] = Field(default_factory=list, alias="audioTracks")
     cursor: CursorConfig = Field(default_factory=CursorConfig)
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
+    typing: TypingConfig = Field(default_factory=TypingConfig)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:
