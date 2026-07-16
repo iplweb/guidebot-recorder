@@ -95,6 +95,34 @@ async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     assert second.calls == 0  # reuse — LLM nie wołany
 
 
+async def test_slide_compiles_to_null_without_reasoner(tmp_path, page):
+    scenario = textwrap.dedent(
+        """\
+        config:
+          title: Slajd
+          viewport: {width: 800, height: 600}
+          tts: {provider: edge, voice: v, lang: pl-PL}
+        steps:
+          - navigate: "data:text/html,<button>Zaloguj</button>"
+          - slide:
+              title: "Krok 1"
+              subtitle: "Kliknij przycisk"
+          - teach: "kliknij Zaloguj"
+        """
+    )
+    path = tmp_path / "slide.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+    reasoner = MockReasoner()
+
+    await run_compile(path, page, reasoner)
+
+    compiled = load_compiled(compiled_path(path))
+    assert len(compiled.actions) == 3  # jeden slot na krok — również dla slide
+    assert compiled.actions[1] is None  # slide → null cached action, bez Reasonera
+    assert compiled.actions[2] is not None  # kolejny krok (teach) rozwiązany normalnie
+    assert reasoner.calls == 1  # Reasoner wołany tylko dla kroku teach, nie dla slide
+
+
 async def test_editing_translation_does_not_invalidate_canonical_teach(tmp_path, page):
     scenario = textwrap.dedent(
         """\
@@ -177,6 +205,18 @@ def test_compile_short_description_uses_object_navigate_url():
     step = Step.model_validate({"navigate": {"url": "https://example.com/login", "type": True}})
 
     assert _short(step) == "https://example.com/login"
+
+
+def test_compile_short_description_uses_slide_title():
+    step = Step.model_validate({"slide": {"title": "Krok 1", "subtitle": "Kliknij przycisk"}})
+
+    assert _short(step) == "Krok 1"
+
+
+def test_compile_short_description_falls_back_to_slide_subtitle():
+    step = Step.model_validate({"slide": {"subtitle": "Kliknij przycisk"}})
+
+    assert _short(step) == "Kliknij przycisk"
 
 
 async def test_teach_type_reprompts_missing_input_text_before_filling(tmp_path, page):

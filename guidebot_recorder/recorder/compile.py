@@ -118,6 +118,8 @@ def _short(step: Step, limit: int = 60) -> str:
         if value:
             text = str(value)
             return text if len(text) <= limit else text[: limit - 1] + "…"
+    if step.slide is not None:
+        return step.slide.title or step.slide.subtitle or "slide"
     if step.enter_text is not None:
         return f"→ {step.enter_text.into}"
     if step.wait is not None:
@@ -542,6 +544,8 @@ async def _compile_step(
     verbose: bool,
 ) -> CachedAction | None:
     if kind == "say":
+        return None
+    if kind == "slide":
         return None
     if kind == "navigate":
         url = step.navigate_url()
