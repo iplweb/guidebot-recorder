@@ -956,3 +956,82 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path):
         with pytest.raises(RenderError, match="asynchronicznie"):
             await run_render(path, tmp_path / "out.mp4", SlowTts(), tmp_path / "cache", browser)
         await browser.close()
+
+
+async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    scenario_with_typing = textwrap.dedent(
+        """\
+        config:
+          title: Logowanie
+          viewport: {width: 640, height: 480}
+          tts: {provider: fake, voice: v, lang: pl-PL}
+          typing: {animate: true, speed: 55}
+        steps:
+          - say: "Witaj, zaraz pokażę logowanie."
+          - navigate: "data:text/html,<button>Zaloguj</button>"
+          - teach: "kliknij Zaloguj"
+        """
+    )
+    path = tmp_path / "typing.scenario.yaml"
+    path.write_text(scenario_with_typing, encoding="utf-8")
+
+    overlay_viewports: list = []
+    recorder_kwargs: list = []
+
+    class SpyOverlay(R.Overlay):
+        def __init__(self, cursor=None, viewport=None):
+            overlay_viewports.append(viewport)
+            super().__init__(cursor, viewport)
+
+    class SpyRecorder(R.Recorder):
+        def __init__(self, *a, **k):
+            recorder_kwargs.append(k)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(R, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert overlay_viewports[0] is not None
+    assert overlay_viewports[0].width == 640
+    assert any(k.get("type_delay_ms") == 55 for k in recorder_kwargs)
+
+
+async def test_render_leaves_typing_animation_off_by_default(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "no-typing.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+
+    recorder_kwargs: list = []
+
+    class SpyRecorder(R.Recorder):
+        def __init__(self, *a, **k):
+            recorder_kwargs.append(k)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert recorder_kwargs
+    assert all(k.get("type_delay_ms") is None for k in recorder_kwargs)

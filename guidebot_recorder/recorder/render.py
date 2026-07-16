@@ -548,7 +548,7 @@ async def run_render(
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
         **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
-    overlay = Overlay(cfg.cursor)
+    overlay = Overlay(cfg.cursor, cfg.viewport)
     # Role-gating contract: cursor.js MUST be registered before chrome.js. Inside
     # the site iframe cursor.js relies on reading the real ``window.top`` to bail;
     # chrome.js is what shadows ``top`` (frame-bust neutralization). If these two
@@ -661,6 +661,7 @@ async def run_render(
                 overlay,
                 settle_ms=cfg.cursor.settle,
                 frame=site_frame if on_shell else None,
+                type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
             )
             try:
                 opened = await _render_step(
