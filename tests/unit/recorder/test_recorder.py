@@ -1,7 +1,7 @@
 import pytest
 from playwright.async_api import async_playwright
 
-from guidebot_recorder.models.target import RoleTarget
+from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import Recorder
 
@@ -81,3 +81,37 @@ async def test_hover_emits_no_click_sound(page):
     rec = Recorder(page, None, on_sfx=events.append)
     await rec.hover(RoleTarget(role="button", name="ok"))
     assert "click" not in events
+
+
+async def test_enter_text_instant_when_no_delay(page):
+    await page.set_content('<label for="i">E</label><input id="i">')
+    events = []
+    rec = Recorder(page, None, on_sfx=events.append)  # type_delay_ms=None
+    await rec.enter_text(RoleTarget(role="textbox", name="E"), "abc")
+    assert await page.locator("#i").input_value() == "abc"
+    assert events == []  # no key events on instant path
+
+
+async def test_enter_text_animated_types_char_by_char_and_emits_keys(page):
+    await page.set_content('<label for="i">E</label><input id="i">')
+    events = []
+    rec = Recorder(page, None, type_delay_ms=1, on_sfx=events.append)
+    await rec.enter_text(RoleTarget(role="textbox", name="E"), "hi!")
+    assert await page.locator("#i").input_value() == "hi!"
+    assert events == ["key", "key", "key"]  # exactly len(text)
+
+
+async def test_enter_text_contenteditable_does_not_crash(page):
+    await page.set_content('<div data-testid="d" contenteditable="true"></div>')
+    rec = Recorder(page, None, type_delay_ms=1, on_sfx=lambda k: None)
+    await rec.enter_text(TestidTarget(testid="d"), "xy")  # input_value() raises → guarded fill
+    assert await page.locator('[data-testid="d"]').text_content() == "xy"
+
+
+async def test_enter_text_control_char_falls_back_to_instant(page):
+    await page.set_content('<label for="t">T</label><textarea id="t"></textarea>')
+    events = []
+    rec = Recorder(page, None, type_delay_ms=1, on_sfx=events.append)
+    await rec.enter_text(RoleTarget(role="textbox", name="T"), "a\nb")
+    assert await page.locator("#t").input_value() == "a\nb"
+    assert events == []  # instant path, no per-char key events

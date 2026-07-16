@@ -92,8 +92,23 @@ class Recorder:
         await locator.hover()
 
     async def enter_text(self, target: Target, text: str) -> None:
-        locator = await self._point_and_prepare(target)
-        await locator.fill(text)
+        locator = await self._point_and_prepare(target)  # no click sound, no flash
+        if self._type_delay_ms is None or any(c in text for c in "\n\r\t"):
+            await locator.fill(text)
+            return
+        await locator.fill("")
+        for i, ch in enumerate(text):
+            await locator.press_sequentially(ch)
+            if self._on_sfx is not None:
+                self._on_sfx("key")
+            if i < len(text) - 1:
+                await self.page.wait_for_timeout(self._type_delay_ms)
+        try:
+            needs_fix = await locator.input_value() != text
+        except PlaywrightError:
+            needs_fix = True  # non-input target (e.g. contenteditable): re-issue fill()
+        if needs_fix:
+            await locator.fill(text)
 
     async def wait_seconds(self, seconds: float) -> None:
         # A wall-clock pause must survive a popup closing while the pause is in
