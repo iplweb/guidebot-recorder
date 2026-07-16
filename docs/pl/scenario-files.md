@@ -88,6 +88,44 @@ variants:
 Każdy wariant ma własne `locale`, `baseUrl`, `navigate`, targety, narrację i sidecar.
 Szczegóły: [Zlokalizowane zestawy renderów](localized-render-sets.md).
 
+## Plansze (`slide`) i kosmetyka render-only
+
+`config.typing`, `config.sound`, `config.intro` oraz większy, wbudowany kursor
+(`config.cursor.width`/`height`/`click`) to opcjonalne ustawienia wyłącznie renderu:
+włączanie i wyłączanie nigdy nie wymaga kompilacji. Krok `slide` jest inny — to
+zwykły krok, więc jego dodanie, usunięcie lub zmiana kolejności zmienia liczbę
+kroków i wymaga `guidebot compile`.
+
+```yaml
+config:
+  title: "Reset hasła"
+  viewport: { width: 1280, height: 720 }
+  tts: { provider: edge, voice: pl-PL-ZofiaNeural, lang: pl-PL }
+  cursor: { width: 46, height: 62 }
+  typing: { animate: true, speed: 45 }
+  sound: { enabled: true }
+  intro: { enabled: true, subtitle: "Jak zresetować hasło" }
+
+steps:
+  - slide:
+      title: "Reset hasła"
+      subtitle: "Krok po kroku"
+    say: "W tym filmie pokażę, jak zresetować hasło."
+  - navigate: /forgot-password
+  - enterText:
+      into: "pole adresu e-mail"
+      text: "${DEMO_EMAIL}"
+    say: "Wpisuję adres e-mail konta."
+  - teach: "Kliknij przycisk Wyślij link resetujący"
+  - slide:
+      title: "Gotowe"
+      hold: 3
+```
+
+Otwierająca plansza `slide` niesie narrację zamiast pustej strony, a zamykająca nie
+ma `say`, więc po prostu trzyma się przez `hold` sekund po zakończeniu ostatniego
+kroku z narracją.
+
 ## Cykl życia zwykłego scenariusza
 
 ```bash
@@ -138,5 +176,6 @@ niewrażliwych; sekrety zawsze przekazuj przez `enterText` i ENV.
 | Instrukcja targetu, targetowy rodzaj komendy lub stan `wait` | Fingerprint wymaga compile. |
 | `viewport`, `locale`, domyślne `tts.lang` | Zmienia config hash. |
 | Nazwa źródła, liczba kroków, compiler v1 | Mocny preflight odrzuca sidecar. |
-| `say`, `translations`, alternatywne audio, `cursor`, `chrome` | Render-only. |
+| Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Zmienia liczbę kroków — wymaga compile. |
+| `say`, `translations`, alternatywne audio, `cursor` (łącznie z `cursor.click`), `chrome`, `typing`, `sound`, `intro` | Render-only. |
 | DOM, dane, cookies lub zmieniony `navigate` | Użyj `compile --force`; szybkie sprawdzenie nie otwiera strony. |

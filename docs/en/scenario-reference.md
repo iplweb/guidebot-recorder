@@ -64,6 +64,9 @@ steps:
 | `audioTracks` | No | list / `[]` | Alternate narration streams for the same visual flow. |
 | `cursor` | No | object / built-in defaults | Visual cursor appearance and motion. |
 | `chrome` | No | object / disabled | Optional browser-bar overlay used only during render. |
+| `typing` | No | object / instant fill | Character-by-character input animation, render-only. |
+| `sound` | No | object / disabled | Opt-in built-in click/key sound effects, render-only. |
+| `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
 
 ### `viewport`
 
@@ -147,12 +150,14 @@ browser flow, and visual timeline; see [Multilingual audio](multilingual-audio.m
 ### `cursor`
 
 All cursor fields are optional. They affect rendering only and do not require target
-recompilation.
+recompilation. The cursor now starts at the centre of the viewport on every render
+(previously the top-left corner); this is a fixed cosmetic change with no config
+knob.
 
 | YAML field | Default | Unit / meaning |
 |---|---:|---|
-| `width` | `34` | Cursor width in pixels. |
-| `height` | `46` | Cursor height in pixels. |
+| `width` | `34` | Cursor arrow width in pixels. |
+| `height` | `46` | Cursor arrow height in pixels. |
 | `color` | `#ef4444` | Arrow fill CSS color. |
 | `outline` | `#ffffff` | Arrow outline CSS color. |
 | `glow` | `rgba(239,68,68,.75)` | Halo CSS color. |
@@ -161,6 +166,21 @@ recompilation.
 | `minDuration` | `320` | Minimum movement duration in milliseconds. |
 | `maxDuration` | `1400` | Maximum movement duration in milliseconds. |
 | `settle` | `280` | Pause after arrival and before the action, in milliseconds. |
+| `click` | built-in defaults | Click ripple appearance; see `cursor.click` below. |
+
+For a bigger, easier-to-follow pointer at higher-resolution viewports, scale `width`
+and `height` up together, e.g. `46`/`62`.
+
+#### `cursor.click`
+
+The click ripple's appearance. Defaults reproduce today's ripple exactly, so
+omitting `click` entirely keeps the existing look.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `color` | `rgba(37,99,235,.9)` | Ripple ring CSS color. |
+| `scale` | `3.25` | Ring end-scale; must be greater than `0`. |
+| `flash` | `false` | When `true`, adds a brief filled disc under the ring for a stronger click flash. |
 
 ### `chrome`
 
@@ -200,12 +220,51 @@ not want that blank address visible during the intro.
 Unknown fields are rejected. `height` must be positive and `radius` non-negative;
 color strings are passed through as CSS values without validating CSS syntax.
 
+### `typing`
+
+Render-only character-by-character input animation. Compilation always uses instant
+fill; only `render` can animate typing.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `animate` | `false` | When `true`, type each character in the render instead of pasting the value instantly. |
+| `speed` | `60` | Milliseconds **per character** — a delay; higher is slower. Unrelated to `cursor.speed`, which is a pixels-per-millisecond rate; the two are not interchangeable. |
+
+Keep `animate: false` for masked, formatted, or autocomplete-driven fields, where a
+character-by-character render could misrepresent the final value.
+
+### `sound`
+
+Render-only, opt-in built-in sound effects mixed under the narration on every
+language track. Sounds are bundled with Guidebot; there is no author-supplied file.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Turn on the sound effects bed. |
+| `click` | `true` | Play a soft click sound on each click. |
+| `keys` | `true` | Play a subtle key-tick sound per typed character. Only audible when `typing.animate` is also `true`. |
+| `volume` | `-12.0` | dB attenuation applied to the effects bed; must be `0` or lower. |
+
+### `intro`
+
+Render-only, opt-in intro title card. When enabled, it opens the film in place of
+today's blank white first frame; when disabled (the default), the render keeps the
+identical white bootstrap.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Show the intro title card. |
+| `subtitle` | none | Optional subtitle text. |
+| `notes` | none | Optional additional notes text. |
+
+The card is built from `config.title` plus `intro.subtitle` and `intro.notes`.
+
 ## `steps`
 
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, and `wait`;
+  `enterText`, `wait`, and `slide`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - at least `say` when there is no main command.
@@ -223,6 +282,7 @@ page state and align one generated action slot with each source step.
 | `enterText` | Yes, `into` only | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
+| `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
 
 If `say` accompanies an action, narration is rendered before the action. With
 multiple audio tracks, all translations start together and the longest one controls
@@ -359,6 +419,34 @@ identity because there may be no matching element after success.
     for visibility rather than independently polling the enabled predicate. Do not
     rely on it as a strict enabled-state gate yet.
 
+### `slide`
+
+```yaml
+- slide:
+    title: "Logging in to the system"
+    subtitle: "Step by step"       # optional
+    notes: "Training material"     # optional
+    hold: 2.5                      # optional; seconds to hold when there is no `say`
+  say: "Let's get started."        # optional narration, SEPARATE from the on-screen text
+```
+
+A full-frame text card shown anywhere in the flow, without disturbing the underlying
+page. At least one of `title`, `subtitle`, or `notes` is required.
+
+The on-screen slide text is **shown, not spoken**; narration comes only from the
+accompanying `say`. In a multilingual video the on-screen text stays single-language
+(one shared picture) — only `say` (and its `translations`) switches across
+`audioTracks`.
+
+Pacing: with a `say`, the card is paced by the narration and `hold` is ignored;
+without a `say`, it holds for `hold` seconds (default `2.5`). A narrated slide
+therefore cannot linger after its narration ends. To hold a card *after* speech,
+follow it with a second, silent `slide` (same text, a `hold`, no `say`).
+
+Adding, removing, or reordering a `slide` step changes the step count, so it is the
+one step kind that **needs `guidebot compile`**; render preflights the step count
+against the sidecar and fails loudly otherwise.
+
 ## Pop-up behavior
 
 Pop-ups require no source command. If a compiled click (including `teach` inferred as
@@ -377,6 +465,21 @@ The internal step model currently accepts an `expect` field, but the compiler de
 readiness from observed URL change and does not honor the source value as a stable
 user control. Do not add `expect` to authored scenarios. For same-URL SPA updates,
 use explicit waits and verify the result.
+
+## Recompile matrix
+
+| Change | Needs `guidebot compile`? |
+|---|---:|
+| `cursor` (size, `click`, centred start) | No — render-only |
+| `typing`, `sound`, `intro`, `chrome` | No — render-only |
+| Existing `say`/`teach` narration text, `translations` | No — render-only |
+| `enterText.text` value alone | No — render-only |
+| Adding, removing, or reordering a `slide` step | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Yes |
+| Switching a step's command kind | Yes |
+
+See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
+including `viewport`/`locale`/`tts.lang` and application drift.
 
 ## Environment substitution
 

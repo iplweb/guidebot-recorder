@@ -45,6 +45,9 @@ steps:
 | `audioTracks` | Nie | Alternatywne ścieżki narracji w tym samym MP4. |
 | `cursor` | Nie | Wygląd i timing syntetycznego kursora. |
 | `chrome` | Nie | Opcjonalny syntetyczny pasek, wyłącznie podczas renderu. |
+| `typing` | Nie | Animacja wpisywania znak po znaku; wyłącznie podczas renderu. |
+| `sound` | Nie | Opcjonalne wbudowane efekty dźwiękowe; wyłącznie podczas renderu. |
+| `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
 
 ### `baseUrl`
 
@@ -89,16 +92,33 @@ Szczegóły: [Wiele ścieżek audio](multilingual-audio.md).
 
 ### `cursor`
 
-Wszystkie pola są opcjonalne i render-only:
+Wszystkie pola są opcjonalne i render-only. Kursor zaczyna teraz każdy render na
+środku viewportu (wcześniej w lewym górnym rogu) — to stała zmiana kosmetyczna, bez
+osobnego pola konfiguracji.
 
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
-| `width`, `height` | `34`, `46` | Wymiary kursora w px. |
+| `width`, `height` | `34`, `46` | Wymiary strzałki kursora w px. |
 | `color`, `outline`, `glow` | czerwony, biały, czerwony halo | Kolory CSS. |
 | `easing` | `cubic-bezier(.45,.05,.25,1)` | Krzywa ruchu. |
 | `speed` | `1.15` | Piksele na milisekundę. |
 | `minDuration`, `maxDuration` | `320`, `1400` | Granice czasu ruchu w ms. |
 | `settle` | `280` | Pauza po dotarciu do celu w ms. |
+| `click` | wartości domyślne | Wygląd rippla po kliknięciu; patrz niżej. |
+
+Dla większego, lepiej widocznego kursora przy większych viewportach zwiększ razem
+`width` i `height`, np. do `46`/`62`.
+
+#### `cursor.click`
+
+Wygląd rippla po kliknięciu. Wartości domyślne odtwarzają dzisiejszy ripple bez
+zmian, więc pominięcie `click` zachowuje dotychczasowy wygląd.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `color` | `rgba(37,99,235,.9)` | Kolor CSS pierścienia rippla. |
+| `scale` | `3.25` | Docelowa skala pierścienia; musi być większa od `0`. |
+| `flash` | `false` | Gdy `true`, dodaje krótki wypełniony okrąg pod pierścieniem dla mocniejszego błysku kliknięcia. |
 
 ### `chrome`
 
@@ -116,14 +136,54 @@ Pasek nie jest natywnym UI Chromium. Może zmienić responsywny układ strony, a
 URL może trafić do filmu. Wyłącz `showUrl` dla adresów zawierających sekret. Compile
 nie wstrzykuje paska.
 
+### `typing`
+
+Render-only animacja wpisywania znak po znaku. Compile zawsze wypełnia pole
+natychmiast; animuje wyłącznie `render`.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `animate` | `false` | Gdy `true`, wpisuje tekst znak po znaku zamiast wklejać go od razu. |
+| `speed` | `60` | Milisekundy **na znak** — opóźnienie; im więcej, tym wolniej. Nie mylić z `cursor.speed`, które jest tempem (px/ms) — to dwa różne pojęcia. |
+
+Zostaw `animate: false` dla pól maskowanych, formatowanych lub z autouzupełnianiem,
+gdzie animacja znak po znaku mogłaby zniekształcić finalną wartość.
+
+### `sound`
+
+Render-only, opcjonalne, wbudowane efekty dźwiękowe wmiksowane pod narrację na każdej
+ścieżce językowej. Dźwięki są wbudowane w Guidebota — nie podajesz własnych plików.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `enabled` | `false` | Włącza podkład dźwiękowy. |
+| `click` | `true` | Odtwarza cichy dźwięk kliknięcia przy każdym kliknięciu. |
+| `keys` | `true` | Odtwarza cichy dźwięk klawisza przy każdym wpisywanym znaku. Słyszalny tylko, gdy `typing.animate` jest też `true`. |
+| `volume` | `-12.0` | Tłumienie w dB podkładu dźwiękowego; musi być `0` lub mniej. |
+
+### `intro`
+
+Render-only, opcjonalna plansza tytułowa. Gdy włączona, otwiera film zamiast
+dzisiejszej pustej, białej pierwszej klatki; wyłączona (domyślnie) zostawia identyczny
+biały start.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `enabled` | `false` | Pokazuje planszę tytułową. |
+| `subtitle` | brak | Opcjonalny podtytuł. |
+| `notes` | brak | Opcjonalne dodatkowe notatki. |
+
+Plansza powstaje z `config.title` oraz `intro.subtitle` i `intro.notes`.
+
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText` i `wait`. `say` może być jedyną treścią kroku albo towarzyszyć jednej
-akcji. Pusty krok i dwie akcje główne są błędem.
+`enterText`, `wait` i `slide`. `say` może być jedyną treścią kroku albo towarzyszyć
+jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Narracją domyślną jest `say`, a gdy go nie ma — `teach`. Same `click`, `hover`,
-`enterText`, `navigate` i `wait` nie są czytane.
+`enterText`, `navigate`, `wait` i `slide` nie są czytane — tekst planszy `slide` jest
+wyświetlany, nie wypowiadany.
 
 ### `say`
 
@@ -192,11 +252,54 @@ lub `enabled`, a timeout jest w sekundach i domyślnie wynosi 10. `hidden` może
 tożsamości. Obecne `enabled` czeka na widoczność, nie sprawdza osobno aktywności — nie
 traktuj go jeszcze jako ścisłej bramki.
 
+### `slide`
+
+```yaml
+- slide:
+    title: "Logowanie do systemu"
+    subtitle: "Krok po kroku"        # opcjonalne
+    notes: "Materiał szkoleniowy"    # opcjonalne
+    hold: 2.5                        # opcjonalne; sekundy trzymania planszy bez `say`
+  say: "Zaczynamy."                  # opcjonalna narracja, ODDZIELNA od tekstu na planszy
+```
+
+Plansza pełnoekranowa pokazywana w dowolnym miejscu scenariusza, bez naruszania
+strony pod spodem. Wymaga co najmniej jednego z: `title`, `subtitle`, `notes`.
+
+Tekst na planszy jest **wyświetlany, nie czytany**; narrację dostarcza osobno `say`.
+W filmie wielojęzycznym tekst planszy pozostaje jednojęzyczny (jeden wspólny obraz) —
+tylko `say` (i jego `translations`) zmienia się między ścieżkami `audioTracks`.
+
+Tempo: gdy jest `say`, planszę wyznacza długość narracji, a `hold` jest ignorowane;
+bez `say` plansza trzyma się `hold` sekund (domyślnie `2.5`). Naznaczona narracją
+plansza nie może więc pozostać dłużej, niż trwa jej narracja — żeby przytrzymać
+planszę *po* wypowiedzi, dodaj drugą, cichą planszę `slide` (ten sam tekst, `hold`,
+bez `say`).
+
+Dodanie, usunięcie lub zmiana kolejności kroku `slide` zmienia liczbę kroków, więc
+jako jedyny rodzaj kroku **wymaga `guidebot compile`**; render sprawdza liczbę
+kroków przed startem i kończy się błędem przy nieaktualnym sidecarze.
+
 ### `expect`
 
 Model przyjmuje pole `expect`, lecz compiler sam wyprowadza gotowość z obserwowanej
 zmiany URL i nie traktuje źródłowej wartości jako stabilnego sterowania. Nie używaj
 `expect` w scenariuszach; dla SPA dodaj jawny `wait`.
+
+## Macierz przebudowy
+
+| Zmiana | Wymaga `guidebot compile`? |
+|---|---:|
+| `cursor` (rozmiar, `click`, wyśrodkowany start) | Nie — render-only |
+| `typing`, `sound`, `intro`, `chrome` | Nie — render-only |
+| Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
+| Sama wartość `enterText.text` | Nie — render-only |
+| Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
+| Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Tak |
+| Zmiana rodzaju komendy kroku | Tak |
+
+Pełną listę, łącznie z `viewport`/`locale`/`tts.lang` i driftem aplikacji, znajdziesz
+w [Plikach scenariusza](scenario-files.md#co-uniewaznia-sidecar).
 
 ## `translations`
 

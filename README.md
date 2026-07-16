@@ -171,6 +171,34 @@ secret-bearing URLs. The overlay is installed on the initial `about:blank` page;
 place the first `navigate` before introductory narration if that blank address should
 not appear while the intro is spoken.
 
+### Slide cards, sound, typing animation, and a bigger cursor
+
+A few render-only, opt-in polish features round out a video:
+
+- **`slide` step** — a full-frame title/subtitle/notes card shown anywhere in the
+  flow, without touching the underlying page. Its on-screen text is shown, not
+  spoken; narration comes from a separate `say`. Unlike the config blocks below,
+  adding, removing, or reordering a `slide` step changes the step count and needs
+  `guidebot compile`.
+- **`config.typing`** — `animate: true` types `enterText`/`teach` input
+  character-by-character during render instead of pasting it instantly; `speed` sets
+  the delay per character (default `60` ms).
+- **`config.sound`** — `enabled: true` mixes a subtle, built-in key-tick and click
+  sound under the narration on every language track. No author-supplied files.
+- **`config.intro`** — `enabled: true` opens the film with a title card built from
+  `config.title` plus `subtitle`/`notes`, instead of today's blank white first frame.
+- **Bigger cursor** — `config.cursor.width`/`height` control the pointer's size
+  (defaults `34`/`46`); scale both up, e.g. `46`/`62`, for a bigger, easier-to-follow
+  pointer. The click ripple's own look is now configurable under `config.cursor.click`
+  (`color`, `scale`, `flash`). The cursor also now starts at the centre of the
+  viewport on every render, not the top-left corner.
+
+All of these — including the bigger cursor and its ripple, typing animation, sound,
+and the intro card — are render-only, except adding/removing/reordering a `slide`
+step, which needs `guidebot compile`. See the
+[Scenario YAML reference](docs/en/scenario-reference.md#recompile-matrix) for the
+full picture.
+
 ### Pop-up windows and literal `teach` typing
 
 When an actual click opens one new Playwright page — for example `window.open()` or a
@@ -433,6 +461,36 @@ zmienić responsywny układ strony. Pełny URL, w tym query string i fragment, m
 pojawić się w filmie — dla adresów zawierających sekrety wyłącz `showUrl`. Nakładka
 jest instalowana już na początkowej stronie `about:blank`; umieść pierwszy `navigate`
 przed narracją wstępną, jeżeli nie chcesz pokazywać pustego adresu podczas powitania.
+
+### Plansze (`slide`), dźwięk, animacja pisania i większy kursor
+
+Kilka opcjonalnych funkcji wyłącznie renderu dopełnia film:
+
+- **Krok `slide`** — pełnoekranowa plansza z tytułem/podtytułem/notatkami pokazywana
+  w dowolnym miejscu scenariusza, bez naruszania strony pod spodem. Tekst na planszy
+  jest wyświetlany, nie czytany; narrację dostarcza osobny `say`. W odróżnieniu od
+  poniższych bloków konfiguracji, dodanie, usunięcie lub zmiana kolejności kroku
+  `slide` zmienia liczbę kroków i wymaga `guidebot compile`.
+- **`config.typing`** — `animate: true` wpisuje tekst `enterText`/`teach` znak po
+  znaku podczas renderu zamiast wklejać go od razu; `speed` ustawia opóźnienie na
+  znak (domyślnie `60` ms).
+- **`config.sound`** — `enabled: true` wmiksowuje pod narrację na każdej ścieżce
+  językowej cichy, wbudowany dźwięk klawisza i kliknięcia. Bez własnych plików
+  dźwiękowych.
+- **`config.intro`** — `enabled: true` otwiera film planszą tytułową zbudowaną z
+  `config.title` oraz `subtitle`/`notes`, zamiast dzisiejszej pustej, białej
+  pierwszej klatki.
+- **Większy kursor** — `config.cursor.width`/`height` sterują rozmiarem strzałki
+  (domyślnie `34`/`46`); zwiększ oba razem, np. do `46`/`62`, dla większego, lepiej
+  widocznego kursora. Wygląd rippla po kliknięciu można teraz skonfigurować w
+  `config.cursor.click` (`color`, `scale`, `flash`). Kursor zaczyna też każdy render
+  na środku viewportu, a nie w lewym górnym rogu.
+
+Wszystkie te funkcje — łącznie z większym kursorem i jego ripplem, animacją pisania,
+dźwiękiem i planszą tytułową — są wyłącznie renderowe, poza dodaniem, usunięciem lub
+zmianą kolejności kroku `slide`, co wymaga `guidebot compile`. Zobacz
+[dokumentację YAML scenariusza](docs/pl/scenario-reference.md#macierz-przebudowy) po
+pełny obraz.
 
 ### Popupy i literalne wpisywanie przez `teach`
 

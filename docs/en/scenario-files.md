@@ -83,6 +83,44 @@ steps:
 Comments and formatting remain yours because compilation never modifies this file.
 Unknown keys fail validation instead of being silently ignored.
 
+## Slide cards and render-only polish
+
+`config.typing`, `config.sound`, `config.intro`, and a bigger built-in cursor
+(`config.cursor.width`/`height`/`click`) are opt-in, render-only cosmetics: turning
+them on or off never needs a recompile. A `slide` step is different — it is a step
+like any other, so adding, removing, or reordering one changes the step count and
+needs `guidebot compile`.
+
+```yaml
+config:
+  title: "Reset a password"
+  viewport: { width: 1280, height: 720 }
+  tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+  cursor: { width: 46, height: 62 }
+  typing: { animate: true, speed: 45 }
+  sound: { enabled: true }
+  intro: { enabled: true, subtitle: "Password reset walkthrough" }
+
+steps:
+  - slide:
+      title: "Reset a password"
+      subtitle: "Step by step"
+    say: "In this video, I'll show you how to reset your password."
+  - navigate: /forgot-password
+  - enterText:
+      into: "the email address field"
+      text: "${DEMO_EMAIL}"
+    say: "Enter the account email address."
+  - teach: "Click the Send reset link button"
+  - slide:
+      title: "Done"
+      hold: 3
+```
+
+The opening `slide` narrates over a full-frame title card instead of the blank page,
+and the closing `slide` has no `say`, so it simply holds for `hold` seconds after the
+last narrated step ends.
+
 ## The generated sidecar
 
 After compilation, the adjacent file resembles:
@@ -205,13 +243,14 @@ Write `$${NAME}` when the literal output must be `${NAME}`.
 | `enterText.text` or its environment value | Usually render; the field target is unchanged. |
 | `tts.voice`, `provider`, `model`, or `speed` | Render; the audio cache key changes. |
 | Alternate `audioTracks`, `translations`, `title`, or `trackLanguage` | Render only; MP4-only metadata does not invalidate TTS cache. |
-| Any `cursor` field | Render only. |
+| Any `cursor` field, including `cursor.click` | Render only. |
 | Any `chrome` field or `navigate.type` only | Render only; no target or sidecar rebuild. |
+| Any `typing`, `sound`, or `intro` field | Render only. |
 | Target instruction in `teach`/`click`/`hover`/`into`/`until` | Compile. |
 | `viewport`, `locale`, or `tts.lang` | Compile; the target config hash changes. |
 | Application DOM/content drift | `compile --force`. |
 | Navigation URL or `baseUrl` | `compile --force`; neither describes a target fingerprint. |
-| Step kind/order/addition/removal | Compile; use `--force` if route/application state also changed. |
+| Step kind/order/addition/removal, including adding/removing/reordering a `slide` step | Compile; use `--force` if route/application state also changed. |
 | Guidebot upgrade | Compile; an older compiler version is rejected automatically. |
 | Render identity error | `compile --force`. |
 
