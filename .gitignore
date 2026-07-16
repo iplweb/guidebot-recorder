@@ -8,3 +8,6 @@ dist/
 .guidebot/
 .guidebot_video/
 site/
+
+# superpowers SDD scratch (progress ledger)
+.superpowers/
