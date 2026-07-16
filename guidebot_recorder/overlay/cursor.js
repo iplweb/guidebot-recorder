@@ -46,11 +46,13 @@
   const existingCursor = document.querySelector(CURSOR_SELECTOR);
   const initialX = Number.parseFloat(existingCursor?.style.left ?? "");
   const initialY = Number.parseFloat(existingCursor?.style.top ?? "");
+  const START = Array.isArray(CFG.start) ? CFG.start : [0, 0];
   const state = {
-    x: Number.isFinite(initialX) ? initialX : 0,
-    y: Number.isFinite(initialY) ? initialY : 0,
+    x: Number.isFinite(initialX) ? initialX : (Number(START[0]) || 0),
+    y: Number.isFinite(initialY) ? initialY : (Number(START[1]) || 0),
   };
   let mountScheduled = false;
+  let hidden = false; // persistent suppression flag (survives ensure())
 
   function setImportant(element, property, value) {
     element.style.setProperty(property, value, "important");
@@ -120,7 +122,7 @@
     setImportant(cursor, "position", "fixed");
     setImportant(cursor, "left", `${state.x}px`);
     setImportant(cursor, "top", `${state.y}px`);
-    setImportant(cursor, "display", "block");
+    setImportant(cursor, "display", hidden ? "none" : "block");
     setImportant(cursor, "visibility", "visible");
     setImportant(cursor, "opacity", "1");
     setImportant(cursor, "width", `${CURSOR_WIDTH}px`);
@@ -218,7 +220,7 @@
     window.setTimeout(() => element.remove(), fallbackMs);
   }
 
-  function ripple() {
+  function ripple(flash = false) {
     if (!ensure()) {
       return false;
     }
@@ -227,6 +229,10 @@
       return false;
     }
 
+    const click = CFG.click || {};
+    const ringColor = click.color || "rgba(37, 99, 235, .9)";
+    const endScale = Number.isFinite(Number(click.scale)) ? Number(click.scale) : 3.25;
+
     const ring = document.createElement("div");
     ring.setAttribute("data-guidebot-ripple", "");
     styleTransient(ring, "2147483646");
@@ -234,18 +240,41 @@
     setImportant(ring, "top", `${state.y - 8}px`);
     setImportant(ring, "width", "16px");
     setImportant(ring, "height", "16px");
-    setImportant(ring, "border", "3px solid rgba(37, 99, 235, .9)");
+    setImportant(ring, "border", `3px solid ${ringColor}`);
     setImportant(ring, "border-radius", "9999px");
     root.appendChild(ring);
 
     const animation = ring.animate(
       [
         { opacity: 0.95, transform: "scale(.35)" },
-        { opacity: 0, transform: "scale(3.25)" },
+        { opacity: 0, transform: `scale(${endScale})` },
       ],
       { duration: 500, easing: "cubic-bezier(.16,1,.3,1)", fill: "forwards" },
     );
     removeAfterAnimation(ring, animation, 600);
+
+    if (flash && click.flash) {
+      const disc = document.createElement("div");
+      disc.setAttribute("data-guidebot-flash", "");
+      styleTransient(disc, "2147483645");
+      setImportant(disc, "left", `${state.x - 8}px`);
+      setImportant(disc, "top", `${state.y - 8}px`);
+      setImportant(disc, "width", "16px");
+      setImportant(disc, "height", "16px");
+      setImportant(disc, "background", ringColor);
+      setImportant(disc, "border-radius", "9999px");
+      root.appendChild(disc);
+
+      const flashAnimation = disc.animate(
+        [
+          { opacity: 0.55, transform: "scale(.2)" },
+          { opacity: 0, transform: "scale(2)" },
+        ],
+        { duration: 420, easing: "cubic-bezier(.16,1,.3,1)", fill: "forwards" },
+      );
+      removeAfterAnimation(disc, flashAnimation, 520);
+    }
+
     return true;
   }
 
@@ -285,12 +314,27 @@
     return true;
   }
 
+  function hide() {
+    hidden = true;
+    const cursor = document.querySelector(CURSOR_SELECTOR);
+    if (cursor) {
+      setImportant(cursor, "display", "none");
+    }
+  }
+
+  function show() {
+    hidden = false;
+    ensure();
+  }
+
   const api = {
     __guidebotVersion: API_VERSION,
     ensure,
     moveTo,
     ripple,
     highlight,
+    hide,
+    show,
     get position() {
       return [state.x, state.y];
     },
