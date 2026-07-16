@@ -12,7 +12,7 @@ from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
 
 #: "primary" commands (an action/step); `say` may accompany one as narration
-PRIMARY_COMMANDS = ("teach", "navigate", "click", "hover", "enter_text", "wait")
+PRIMARY_COMMANDS = ("teach", "navigate", "click", "hover", "enter_text", "wait", "slide")
 
 
 class EnterText(BaseModel):
@@ -37,6 +37,20 @@ class NavigateConfig(BaseModel):
     type: bool | None = None
 
 
+class Slide(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = None
+    subtitle: str | None = None
+    notes: str | None = None
+    hold: float = 2.5
+
+    @model_validator(mode="after")
+    def _at_least_one_text(self) -> "Slide":
+        if not any((self.title, self.subtitle, self.notes)):
+            raise ValueError("slide wymaga co najmniej jednego z: title/subtitle/notes")
+        return self
+
+
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -47,6 +61,7 @@ class Step(BaseModel):
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     wait: float | WaitUntil | None = None
+    slide: Slide | None = None
     expect: Expect | None = None
     translations: dict[str, str] = Field(default_factory=dict)
 

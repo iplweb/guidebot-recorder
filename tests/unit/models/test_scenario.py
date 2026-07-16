@@ -1,7 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from guidebot_recorder.models.scenario import NavigateConfig, Step
+from guidebot_recorder.models.scenario import NavigateConfig, Scenario, Slide, Step
+from guidebot_recorder.models.config import Config, Viewport, TtsConfig
 
 
 def test_single_command_ok():
@@ -76,3 +77,35 @@ def test_navigate_object_type_is_optional():
 def test_navigate_object_rejects_invalid_shape(navigate):
     with pytest.raises(ValidationError):
         Step.model_validate({"navigate": navigate})
+
+
+def test_slide_requires_at_least_one_text_field():
+    with pytest.raises(ValidationError):
+        Slide()
+    s = Slide(title="Logowanie")
+    assert s.hold == 2.5
+
+
+def test_step_slide_command_kind_and_no_target():
+    step = Step(slide=Slide(title="T"), say="narracja")
+    assert step.command_kind() == "slide"
+    assert step.requires_target() is False
+    assert step.narration() == "narracja"
+
+
+def test_slide_is_mutually_exclusive_with_other_primaries():
+    with pytest.raises(ValidationError):
+        Step(slide=Slide(title="T"), click="ok")
+
+
+def test_silent_slide_forbids_translations_say_slide_requires_them():
+    # silent slide: narration() is None → translations must be empty
+    Step(slide=Slide(title="T"))  # ok, no translations
+    with pytest.raises(ValidationError):
+        # a say-less slide with translations is rejected by the scenario validator;
+        # tested at Scenario level in test_scenario_translations (below/existing).
+        Scenario(
+            config=Config(title="t", viewport=Viewport(width=8, height=6),
+                          tts=TtsConfig(provider="edge", voice="v", lang="pl-PL")),
+            steps=[Step(slide=Slide(title="T"), translations={"en-US": "x"})],
+        )
