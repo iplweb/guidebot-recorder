@@ -79,3 +79,26 @@ def build_sfx_bed(
         f"{total:.6f}",
     ]
     _run_to_output(cmd, out)
+
+
+def mix_sfx_into_bed(narration_bed: Path, sfx_bed: Path, out: Path, total: float) -> None:
+    """Mix the shared (already gain-applied) SFX bed under a narration bed.
+
+    Two-input amix (normalize=0 so neither is auto-scaled) plus a hard limiter with
+    level=disabled (alimiter's `level` defaults to true and would re-normalize the
+    output back toward full scale, defeating the ceiling); re-trimmed to exactly
+    `total` so `mux_audio_tracks`' 0.05 tolerance holds. narration_bed and out MUST
+    be different paths (no in-place).
+    """
+    cmd = [
+        ffmpeg_bin(), "-y",
+        "-i", str(narration_bed),
+        "-i", str(sfx_bed),
+        "-filter_complex",
+        "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[m];"
+        "[m]alimiter=limit=0.95:level=disabled[out]",
+        "-map", "[out]",
+        "-ar", str(SAMPLE_RATE),
+        "-t", f"{total:.6f}",
+    ]
+    _run_to_output(cmd, out)

@@ -16,6 +16,7 @@ import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from importlib.resources import as_file, files
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -33,7 +34,7 @@ from tqdm import tqdm
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
-from guidebot_recorder.models.config import ChromeConfig, TtsConfig, config_hash
+from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
@@ -53,6 +54,7 @@ from guidebot_recorder.video.mux import (
     mux_audio_tracks,
     probe_duration,
 )
+from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
@@ -332,8 +334,15 @@ def _mux_tracks_for_timeline(
     placed_by_language: dict[str, list[Placed]],
     total: float,
     work: Path,
+    *,
+    sfx_bed: Path | None = None,
 ) -> list[MuxAudioTrack]:
-    """Build one full-length bed per language in deterministic stream order."""
+    """Build one full-length bed per language in deterministic stream order.
+
+    When *sfx_bed* is set, narration is rendered to a temp name first, then the
+    shared SFX bed is mixed into the final `bed-<lang>.wav` so ``bed-*.wav`` keeps
+    naming ``_publish_render_artifacts`` relies on.
+    """
 
     tracks: list[MuxAudioTrack] = []
     for index, tts in enumerate(configs):
@@ -343,7 +352,12 @@ def _mux_tracks_for_timeline(
                     f"narracja {tts.lang} wykracza poza nagranie wideo — render przerwany"
                 )
         bed = work / f"bed-{tts.mp4_language()}.wav"
-        build_audio_bed(placed_by_language[tts.lang], total, bed)
+        if sfx_bed is not None:
+            narr = work / f"narr-{tts.mp4_language()}.wav"
+            build_audio_bed(placed_by_language[tts.lang], total, narr)
+            mix_sfx_into_bed(narr, sfx_bed, bed, total)  # bed = narration + SFX
+        else:
+            build_audio_bed(placed_by_language[tts.lang], total, bed)
         tracks.append(
             MuxAudioTrack(
                 path=bed,
@@ -394,16 +408,40 @@ def _assemble_audio_tracks(
     out_mp4: Path,
     *,
     preencoded: bool = False,
+    sound: SoundConfig | None = None,
+    sfx_offsets: list[tuple[str, float]] | None = None,
 ) -> None:
-    """Stage a complete bed set, mux atomically, then publish durable WAVs."""
+    """Stage a complete bed set, mux atomically, then publish durable WAVs.
+
+    When *sound* is enabled and *sfx_offsets* is non-empty, the shared SFX bed is
+    built ONCE in staging (from the packaged click/key assets) and mixed into every
+    language's narration bed via `_mux_tracks_for_timeline`.
+    """
 
     with tempfile.TemporaryDirectory(prefix=".audio-beds-", dir=work) as staging:
         staged_mp4 = Path(staging) / f"{out_mp4.stem}.mp4"
+        sfx_bed = None
+        if sound is not None and sound.enabled and sfx_offsets:
+            sfx_bed = Path(staging) / "sfx-bed.wav"
+            sfx_pkg = files("guidebot_recorder.sfx")
+            with (
+                as_file(sfx_pkg.joinpath("click.wav")) as cp,
+                as_file(sfx_pkg.joinpath("key.wav")) as kp,
+            ):
+                build_sfx_bed(
+                    sfx_offsets,
+                    total,
+                    sfx_bed,
+                    click_path=Path(cp),
+                    key_path=Path(kp),
+                    gain_db=sound.volume,
+                )
         tracks = _mux_tracks_for_timeline(
             configs,
             placed_by_language,
             total,
             Path(staging),
+            sfx_bed=sfx_bed,
         )
         mux_audio_tracks(video, tracks, staged_mp4, preencoded=preencoded)
         _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
@@ -609,6 +647,11 @@ async def run_render(
     await page.wait_for_timeout(100)
     anchor = time.monotonic()
 
+    sfx_events: list[tuple[str, float]] = []
+
+    def sfx_sink(kind: str) -> None:
+        sfx_events.append((kind, time.monotonic()))
+
     placed_by_language: dict[str, list[Placed]] = {tts.lang: [] for tts in audio_configs}
     popup: _PopupSession | None = None
     popup_open_at_end = False
@@ -662,6 +705,7 @@ async def run_render(
                 settle_ms=cfg.cursor.settle,
                 frame=site_frame if on_shell else None,
                 type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
+                on_sfx=(sfx_sink if cfg.sound.enabled else None),
             )
             try:
                 opened = await _render_step(
@@ -750,6 +794,18 @@ async def run_render(
         await asyncio.gather(*prime_tasks, return_exceptions=True)
         await context.close()
 
+    sfx_offsets: list[tuple[str, float]] = []
+    if cfg.sound.enabled:
+        for kind, t in sfx_events:
+            if kind == "click" and not cfg.sound.click:
+                continue
+            if kind == "key" and not cfg.sound.keys:
+                continue
+            off = t - anchor
+            if off < 0:
+                raise RenderError(f"ujemny offset SFX ({off}) — błąd zegara renderu")
+            sfx_offsets.append((kind, off))
+
     main_webm = Path(await video.path())
     if popup is None:
         total = probe_duration(main_webm)
@@ -760,6 +816,8 @@ async def run_render(
             total,
             work,
             out_mp4,
+            sound=cfg.sound,
+            sfx_offsets=sfx_offsets,
         )
         return
 
@@ -784,6 +842,8 @@ async def run_render(
         work,
         out_mp4,
         preencoded=True,
+        sound=cfg.sound,
+        sfx_offsets=sfx_offsets,
     )
 
 
