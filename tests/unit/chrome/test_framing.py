@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from playwright.async_api import Error as PlaywrightError
+
 from guidebot_recorder.chrome.framing import install_framing, strip_framing_headers
 
 
@@ -84,9 +86,25 @@ class TestStripFramingHeaders:
         assert "default-src 'self'" in result["Content-Security-Policy"]
 
 
+class _FakeFrame:
+    def __init__(self, parent_frame: _FakeFrame | None = None) -> None:
+        self.parent_frame = parent_frame
+
+
 class _FakeRequest:
-    def __init__(self, resource_type: str) -> None:
+    def __init__(
+        self, resource_type: str, frame: _FakeFrame | None, frame_raises: bool
+    ) -> None:
         self.resource_type = resource_type
+        self._frame = frame
+        self._frame_raises = frame_raises
+
+    @property
+    def frame(self) -> _FakeFrame | None:
+        if self._frame_raises:
+            # Playwright raises for a navigation issued before its frame exists.
+            raise PlaywrightError("frame not available before creation")
+        return self._frame
 
 
 class _FakeResponse:
@@ -95,16 +113,28 @@ class _FakeResponse:
         self.headers = headers
 
 
+#: A frame whose parent is another frame — i.e. the framed site (a sub-frame).
+_SUBFRAME = _FakeFrame(parent_frame=_FakeFrame())
+#: A top-level frame (no parent) — the main window / a settled popup.
+_TOP_LEVEL = _FakeFrame(parent_frame=None)
+
+
 class _FakeRoute:
-    def __init__(self, resource_type: str, response: _FakeResponse | None = None) -> None:
-        self.request = _FakeRequest(resource_type)
+    def __init__(
+        self,
+        resource_type: str,
+        response: _FakeResponse | None = None,
+        *,
+        frame: _FakeFrame | None = _TOP_LEVEL,
+        frame_raises: bool = False,
+    ) -> None:
+        self.request = _FakeRequest(resource_type, frame, frame_raises)
         self._response = response
         self.fulfilled: dict | None = None
         self.continued = False
+        self.fetched_max_redirects: int | None = None
 
     async def fetch(self, *, max_redirects: int = 20) -> _FakeResponse:
-        # install_framing lets fetch follow redirects internally (no
-        # max_redirects=0), so the final response is returned here.
         self.fetched_max_redirects = max_redirects
         assert self._response is not None
         return self._response
@@ -132,29 +162,50 @@ class TestInstallFraming:
         assert context.pattern == "**/*"
         assert callable(context.handler)
 
-    async def test_document_response_gets_headers_stripped(self) -> None:
+    async def test_subframe_document_follows_chain_and_strips_final(self) -> None:
+        # The framed site: a fulfilled 3xx is blocked in a sub-frame, so fetch
+        # follows the chain (default max_redirects) and strips the final 2xx.
+        context = _FakeContext()
+        await install_framing(context, shell_origin="https://shell.example")
+        final = _FakeResponse(200, {"X-Frame-Options": "DENY", "Content-Type": "text/html"})
+        route = _FakeRoute("document", final, frame=_SUBFRAME)
+        await context.handler(route)
+        assert route.fetched_max_redirects != 0  # followed the chain
+        assert route.fulfilled is not None
+        assert route.fulfilled["response"] is final
+        assert "x-frame-options" not in {k.lower() for k in route.fulfilled["headers"]}
+
+    async def test_top_level_document_2xx_is_stripped(self) -> None:
         context = _FakeContext()
         await install_framing(context, shell_origin="https://shell.example")
         resp = _FakeResponse(200, {"X-Frame-Options": "DENY", "Content-Type": "text/html"})
-        route = _FakeRoute("document", resp)
+        route = _FakeRoute("document", resp, frame=_TOP_LEVEL)
         await context.handler(route)
+        assert route.fetched_max_redirects == 0  # top level does not follow the chain
         assert route.fulfilled is not None
         assert route.fulfilled["response"] is resp
         assert "x-frame-options" not in {k.lower() for k in route.fulfilled["headers"]}
 
-    async def test_fetch_follows_redirects_and_final_is_stripped(self) -> None:
-        # A route-fulfilled 3xx is blocked inside a subframe, so install_framing
-        # lets fetch follow the chain (default max_redirects) and strips the
-        # framing headers off the final response instead of passing 3xx through.
+    async def test_top_level_document_redirect_passes_through_unchanged(self) -> None:
+        # Popups keep native redirects: a 3xx is fulfilled unchanged (no header
+        # rewrite) so the browser performs it and page.url stays truthful.
         context = _FakeContext()
         await install_framing(context, shell_origin="https://shell.example")
-        final = _FakeResponse(200, {"X-Frame-Options": "DENY", "Content-Type": "text/html"})
-        route = _FakeRoute("document", final)
+        redirect = _FakeResponse(301, {"location": "/final"})
+        route = _FakeRoute("document", redirect, frame=_TOP_LEVEL)
         await context.handler(route)
-        assert route.fetched_max_redirects != 0  # did not force max_redirects=0
-        assert route.fulfilled is not None
-        assert route.fulfilled["response"] is final
-        assert "x-frame-options" not in {k.lower() for k in route.fulfilled["headers"]}
+        assert route.fetched_max_redirects == 0
+        assert route.fulfilled == {"response": redirect, "headers": None}
+
+    async def test_popup_navigation_before_frame_created_is_top_level(self) -> None:
+        # A popup's first navigation is issued before its frame exists (frame
+        # raises); it must be treated as top-level, so a 3xx passes through.
+        context = _FakeContext()
+        await install_framing(context, shell_origin="https://shell.example")
+        redirect = _FakeResponse(302, {"location": "/final"})
+        route = _FakeRoute("document", redirect, frame_raises=True)
+        await context.handler(route)
+        assert route.fulfilled == {"response": redirect, "headers": None}
 
     async def test_non_document_resource_is_continued(self) -> None:
         context = _FakeContext()
@@ -172,6 +223,6 @@ class TestInstallFraming:
             async def fetch(self, *, max_redirects: int = 20):
                 raise RuntimeError("boom")
 
-        route = _BoomRoute("document", _FakeResponse(200, {}))
+        route = _BoomRoute("document", _FakeResponse(200, {}), frame=_TOP_LEVEL)
         await context.handler(route)
         assert route.continued is True

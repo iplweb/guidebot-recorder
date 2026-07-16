@@ -3,6 +3,7 @@
 import pytest
 
 from guidebot_recorder.scenario.env import (
+    referenced_env_names,
     substitute_env,
     substitute_scenario_values,
 )
@@ -108,3 +109,25 @@ def test_scenario_values_object_navigate_missing_env_raises():
 
     with pytest.raises(KeyError):
         substitute_scenario_values(raw, {})
+
+
+def test_referenced_env_names_only_from_substitutable_fields():
+    raw = {
+        "steps": [
+            {"navigate": "${A}/x"},
+            {"navigate": {"url": "${B}/login", "type": True}},
+            {"enterText": {"into": "pole", "text": "${C}"}},
+            # ${D} in a narration/instruction field is NOT expanded, so not secret
+            {"say": "${D}"},
+            {"teach": "kliknij ${E}"},
+        ]
+    }
+    assert referenced_env_names(raw) == {"A", "B", "C"}
+
+
+def test_referenced_env_names_ignores_escaped_token():
+    assert referenced_env_names({"steps": [{"navigate": "$${A}/x"}]}) == set()
+
+
+def test_referenced_env_names_empty_when_no_tokens():
+    assert referenced_env_names({"steps": [{"navigate": "https://x/clicked"}]}) == set()
