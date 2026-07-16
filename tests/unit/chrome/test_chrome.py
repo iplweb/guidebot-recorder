@@ -274,6 +274,28 @@ async def test_shell_hidden_flag_survives_ensure_shell_without_hiding_iframe(
     assert bar_display2 != "none"
 
 
+async def test_shell_hidden_flag_survives_reinjection(page: Page) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True))
+    await chrome.install_shell(page)
+
+    await chrome.hide(page)
+
+    # Force the reinjection path: remove the bar node so ensure_shell sees
+    # _SHELL_IS_READY == false and re-evaluates shell.js. window.__guidebot_shell
+    # still exists, so the reentry guard must preserve the closure (and `hidden`)
+    # rather than re-running the whole IIFE and resetting the flag to false.
+    await page.evaluate(
+        "() => document.querySelector('[data-guidebot-shell-bar]').remove()"
+    )
+    await chrome.ensure_shell(page)
+
+    assert await page.locator("[data-guidebot-shell-bar]").count() == 1
+    bar_display = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-shell-bar]')).display"
+    )
+    assert bar_display == "none"
+
+
 async def test_hide_show_are_no_op_when_neither_api_is_present(page: Page) -> None:
     chrome = Chrome(ChromeConfig(enabled=True))
     await page.set_content("<main>plain page, no chrome installed</main>")

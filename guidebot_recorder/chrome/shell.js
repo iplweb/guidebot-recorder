@@ -9,6 +9,7 @@
   // only ever runs inside the shell document served from the sentinel origin.
 
   const API_KEY = "__guidebot_shell";
+  const API_VERSION = 1;
   const BAR_SELECTOR = "[data-guidebot-shell-bar]";
   const IFRAME_ID = "guidebot-site";
   const Z_INDEX = "2147483644";
@@ -27,6 +28,31 @@
     CFG.minimizeColor ?? "#febc2e",
     CFG.maximizeColor ?? "#28c840",
   ];
+
+  // Reentry guard (mirrors chrome.js). When ensure_shell reinjects this script
+  // while a valid instance still lives on `window` (e.g. the bar node was wiped
+  // but the closure survives), reuse the existing instance's rebuild entrypoint
+  // and bail — preserving the closure and, crucially, its persistent `hidden`
+  // flag instead of re-running the whole IIFE and resetting it to false.
+  const previous = window[API_KEY];
+  if (
+    previous &&
+    previous.__guidebotVersion === API_VERSION &&
+    [
+      "ensure",
+      "pillRect",
+      "focusPill",
+      "blurPill",
+      "clearUrl",
+      "appendChar",
+      "setUrl",
+      "hide",
+      "show",
+    ].every((name) => typeof previous[name] === "function")
+  ) {
+    previous.ensure();
+    return;
+  }
 
   let hidden = false; // persistent suppression flag (survives ensure_shell repairs)
 
@@ -223,10 +249,22 @@
     }
   }
 
-  const bar = buildBar();
-  buildIframe();
+  // The live bar node. `ensure()` (re)builds the bar + iframe and refreshes this
+  // reference so every api method operates on the current node even after a
+  // rebuild — the reentry guard above calls the surviving instance's `ensure()`.
+  let bar = null;
+
+  function ensure() {
+    bar = buildBar();
+    buildIframe();
+    return bar;
+  }
+
+  ensure();
 
   const api = {
+    __guidebotVersion: API_VERSION,
+    ensure,
     pillRect() {
       const host = pill(bar);
       if (!host) {
