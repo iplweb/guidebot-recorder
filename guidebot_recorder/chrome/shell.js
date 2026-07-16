@@ -28,8 +28,14 @@
     CFG.maximizeColor ?? "#28c840",
   ];
 
+  let hidden = false; // persistent suppression flag (survives ensure_shell repairs)
+
   function setImportant(element, property, value) {
     element.style.setProperty(property, value, "important");
+  }
+
+  function applyBarVisibility(barNode) {
+    setImportant(barNode, "display", hidden ? "none" : "block");
   }
 
   function lockSvg() {
@@ -51,6 +57,7 @@
   function buildBar() {
     const existing = document.querySelector(BAR_SELECTOR);
     if (existing) {
+      applyBarVisibility(existing);
       return existing;
     }
     const bar = document.createElement("div");
@@ -161,6 +168,7 @@
 
     shadow.appendChild(row);
     document.documentElement.appendChild(bar);
+    applyBarVisibility(bar);
     return bar;
   }
 
@@ -258,6 +266,22 @@
         text.textContent = value;
       }
       syncLock(bar, value);
+    },
+    hide() {
+      hidden = true;
+      const barNode = document.querySelector(BAR_SELECTOR);
+      if (barNode) {
+        applyBarVisibility(barNode);
+      }
+      // The site iframe is intentionally left untouched — hiding the shell
+      // bar must never hide or remove #guidebot-site.
+    },
+    show() {
+      hidden = false;
+      const barNode = document.querySelector(BAR_SELECTOR);
+      if (barNode) {
+        applyBarVisibility(barNode);
+      }
     },
   };
 

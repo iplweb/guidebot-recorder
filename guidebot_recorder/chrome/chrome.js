@@ -69,6 +69,7 @@
     basePadding: null,
   };
   let mountScheduled = false;
+  let hidden = false; // persistent suppression flag (survives ensure())
 
   function setImportant(element, property, value) {
     element.style.setProperty(property, value, "important");
@@ -120,7 +121,7 @@
     setImportant(host, "left", "0");
     setImportant(host, "right", "0");
     setImportant(host, "top", "0");
-    setImportant(host, "display", "block");
+    setImportant(host, "display", hidden ? "none" : "block");
     setImportant(host, "width", "100%");
     setImportant(host, "height", `${HEIGHT}px`);
     setImportant(host, "margin", "0");
@@ -332,10 +333,25 @@
     }
   }
 
+  function hide() {
+    hidden = true;
+    const host = document.querySelector(HOST_SELECTOR);
+    if (host) {
+      setImportant(host, "display", "none");
+    }
+  }
+
+  function show() {
+    hidden = false;
+    ensure();
+  }
+
   const api = {
     __guidebotVersion: API_VERSION,
     ensure,
     setUrl,
+    hide,
+    show,
   };
   Object.defineProperty(window, API_KEY, {
     configurable: true,

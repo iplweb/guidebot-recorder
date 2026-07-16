@@ -35,6 +35,18 @@ _SHELL_IS_READY = """() => {
         && !!document.querySelector("[data-guidebot-shell-bar]");
 }"""
 
+#: Determines which chrome surface (if any) currently owns the page, so
+#: ``hide``/``show`` can dispatch without relying on URL matching.
+_ROLE_PROBE = """() => {
+    if (window.__guidebot_shell) {
+        return "shell";
+    }
+    if (window.__guidebot_chrome) {
+        return "chrome";
+    }
+    return "none";
+}"""
+
 
 class Chrome:
     """Install and control the macOS-style browser bar used during render.
@@ -108,6 +120,35 @@ class Chrome:
             "window.__guidebot_chrome.setUrl(targetUrl, shouldAnimate)",
             [url, animate],
         )
+
+    async def hide(self, page: Page) -> None:
+        """Hide whichever bar currently owns ``page`` (shell or legacy chrome).
+
+        Dispatches by probing which API is present rather than URL matching, so
+        it works regardless of role. A page with neither API installed is a
+        no-op — there is nothing to hide.
+        """
+        role = await page.evaluate(_ROLE_PROBE)
+        if role == "shell":
+            await self.ensure_shell(page)
+            await page.evaluate("() => window.__guidebot_shell.hide()")
+        elif role == "chrome":
+            await self.ensure(page)
+            await page.evaluate("() => window.__guidebot_chrome.hide()")
+
+    async def show(self, page: Page) -> None:
+        """Show whichever bar currently owns ``page`` (shell or legacy chrome).
+
+        Mirrors :meth:`hide`'s role dispatch; a no-op when neither API is
+        installed.
+        """
+        role = await page.evaluate(_ROLE_PROBE)
+        if role == "shell":
+            await self.ensure_shell(page)
+            await page.evaluate("() => window.__guidebot_shell.show()")
+        elif role == "chrome":
+            await self.ensure(page)
+            await page.evaluate("() => window.__guidebot_chrome.show()")
 
     # --- Shell (main render window) -----------------------------------------
 

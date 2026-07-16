@@ -220,3 +220,64 @@ async def test_ensure_does_not_grow_padding_when_spa_removes_marker(page: Page) 
     await chrome.ensure(page)
 
     assert (await _snapshot(page))["rootPadding"] == "66px"
+
+
+# --- hide()/show() persistent flag (role-dispatching) -----------------------
+
+
+async def test_legacy_hidden_flag_survives_ensure(page: Page) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True))
+    await chrome.install(page)
+
+    await chrome.hide(page)
+    await chrome.ensure(page)
+
+    disp = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-chrome]')).display"
+    )
+    assert disp == "none"
+
+    await chrome.show(page)
+    disp2 = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-chrome]')).display"
+    )
+    assert disp2 != "none"
+
+
+async def test_shell_hidden_flag_survives_ensure_shell_without_hiding_iframe(
+    page: Page,
+) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True))
+    await chrome.install_shell(page)
+
+    await chrome.hide(page)
+    await chrome.ensure_shell(page)  # re-assert, as the render loop does every step
+
+    bar_display = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-shell-bar]')).display"
+    )
+    assert bar_display == "none"
+    # the bar node must stay IN THE DOM (display:none, not removed) so
+    # ensure_shell's readiness check keeps passing.
+    assert await page.locator("[data-guidebot-shell-bar]").count() == 1
+    # the site iframe is untouched by the flag — still present and visible.
+    assert await page.locator("iframe#guidebot-site").count() == 1
+    iframe_display = await page.evaluate(
+        "getComputedStyle(document.querySelector('iframe#guidebot-site')).display"
+    )
+    assert iframe_display != "none"
+
+    await chrome.show(page)
+    bar_display2 = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-shell-bar]')).display"
+    )
+    assert bar_display2 != "none"
+
+
+async def test_hide_show_are_no_op_when_neither_api_is_present(page: Page) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True))
+    await page.set_content("<main>plain page, no chrome installed</main>")
+
+    # must not raise even though neither __guidebot_chrome nor __guidebot_shell exist
+    await chrome.hide(page)
+    await chrome.show(page)
