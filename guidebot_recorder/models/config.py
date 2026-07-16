@@ -108,6 +108,15 @@ class ChromeConfig(BaseModel):
     show_caret: bool = Field(default=True, alias="showCaret")
 
 
+class IntroConfig(BaseModel):
+    """Render-only auto-intro title card (replaces the white bootstrap when enabled)."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    subtitle: str | None = None
+    notes: str | None = None
+
+
 class SoundConfig(BaseModel):
     """Render-only, opt-in built-in SFX mixed under the narration."""
 
@@ -142,6 +151,7 @@ class Config(BaseModel):
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
     typing: TypingConfig = Field(default_factory=TypingConfig)
     sound: SoundConfig = Field(default_factory=SoundConfig)
+    intro: IntroConfig = Field(default_factory=IntroConfig)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:

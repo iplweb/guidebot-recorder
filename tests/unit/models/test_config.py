@@ -411,3 +411,11 @@ def test_sound_config_defaults_and_bounds():
         SoundConfig(volume=3.0)   # positive gain rejected (le=0)
     with pytest.raises(ValidationError):
         SoundConfig(bogus=1)
+
+
+# Task 0.4: IntroConfig tests
+def test_intro_config_defaults():
+    from guidebot_recorder.models.config import IntroConfig
+
+    i = IntroConfig()
+    assert i.enabled is False and i.subtitle is None and i.notes is None
