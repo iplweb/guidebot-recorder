@@ -98,14 +98,46 @@ def test_slide_is_mutually_exclusive_with_other_primaries():
         Step(slide=Slide(title="T"), click="ok")
 
 
-def test_silent_slide_forbids_translations_say_slide_requires_them():
-    # silent slide: narration() is None → translations must be empty
-    Step(slide=Slide(title="T"))  # ok, no translations
+def test_slide_rejects_unknown_keys():
     with pytest.raises(ValidationError):
-        # a say-less slide with translations is rejected by the scenario validator;
-        # tested at Scenario level in test_scenario_translations (below/existing).
+        Slide(title="x", bogus=1)
+
+
+def test_silent_slide_forbids_translations():
+    # A silent slide has narration() is None, so the Scenario validator must
+    # reject any translations attached to it.
+    with pytest.raises(ValidationError):
         Scenario(
-            config=Config(title="t", viewport=Viewport(width=8, height=6),
-                          tts=TtsConfig(provider="edge", voice="v", lang="pl-PL")),
+            config=Config(
+                title="t",
+                viewport=Viewport(width=8, height=6),
+                tts=TtsConfig(provider="edge", voice="v", lang="pl-PL"),
+            ),
             steps=[Step(slide=Slide(title="T"), translations={"en-US": "x"})],
         )
+
+
+def test_say_slide_requires_translations_for_each_audio_track():
+    config = Config(
+        title="t",
+        viewport=Viewport(width=8, height=6),
+        tts=TtsConfig(provider="edge", voice="pl", lang="pl-PL", trackLanguage="pol"),
+        audioTracks=[
+            TtsConfig(provider="edge", voice="en", lang="en-US", trackLanguage="eng"),
+        ],
+    )
+
+    # A slide WITH `say` narrates → translations required for each audio track.
+    with pytest.raises(ValidationError):
+        Scenario(
+            config=config,
+            steps=[Step(slide=Slide(title="T"), say="cześć")],
+        )
+
+    # Supplying the missing translation makes it valid.
+    scenario = Scenario(
+        config=config,
+        steps=[Step(slide=Slide(title="T"), say="cześć", translations={"en-US": "hi"})],
+    )
+    assert scenario.steps[0].narration() == "cześć"
+    assert scenario.steps[0].translations == {"en-US": "hi"}
