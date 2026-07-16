@@ -873,6 +873,8 @@ async def _render_step(
     *,
     expect_chrome: bool | None = None,
 ) -> _PopupSession | None:
+    if expect_chrome is None:
+        expect_chrome = chrome is not None
     pages_before_prepare = set(observed_pages)
     # Both visual layers can be removed by an SPA without a navigation.  Check
     # them before every recorded step, including narration-only and timed waits.
@@ -913,11 +915,14 @@ async def _render_step(
         else:
             # Popup / chrome-disabled: legacy in-DOM pill on the page itself. An
             # instant update happens after goto so redirects are reflected; the
-            # animated variant is typed before goto.
-            if show_url and mode != "instant":
+            # animated variant is typed before goto. A bare (floating) popup has
+            # no legacy bar/API (chrome.js bailed on barePopups), so gate the pill
+            # on ``expect_chrome`` — otherwise chrome.set_url would evaluate an
+            # undefined ``window.__guidebot_chrome`` and throw an opaque TypeError.
+            if show_url and expect_chrome and mode != "instant":
                 await chrome.set_url(page, url, animate=True)
             await recorder.navigate(url)
-            if show_url and mode == "instant":
+            if show_url and expect_chrome and mode == "instant":
                 await chrome.set_url(page, page.url, animate=False)
         await _ensure_visuals(page, overlay, chrome, expect_chrome=expect_chrome)
         return None

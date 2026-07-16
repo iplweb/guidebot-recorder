@@ -413,7 +413,9 @@ def _compose_floating(
         )
 
     # --- dimmed backdrop (ramps with the fade so it darkens in step) ----------
-    rise = f"min(1,t/{open_eff:.6f})"
+    # ``open_ms=0`` (a valid "no open animation" config) makes open_eff 0; guard
+    # the division so the eq expression never becomes t/0 (inf/NaN brightness).
+    rise = "1" if open_eff <= 0 else f"min(1,t/{open_eff:.6f})"
     if hold_open_at_end or close_eff <= 0:
         ramp = rise
     else:

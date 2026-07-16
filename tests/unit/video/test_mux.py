@@ -584,6 +584,23 @@ def test_compose_popup_video_floating_composites_popup_over_dimmed_main(
     _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
 
 
+def test_compose_popup_video_floating_zero_transition_ms_renders(tmp_path: Path) -> None:
+    # open_ms=0 (a valid "no open animation" config) must not make the dim ramp
+    # divide by zero (t/0 -> inf/NaN brightness).
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, open_ms=0, close_ms=0
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+
+
 def test_compose_popup_video_floating_cfr_fills_empty_backdrop(tmp_path: Path) -> None:
     main = tmp_path / "main.webm"
     popup = tmp_path / "popup.mp4"
