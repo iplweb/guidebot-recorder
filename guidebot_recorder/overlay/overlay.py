@@ -8,7 +8,7 @@ from importlib.resources import files
 
 from playwright.async_api import BrowserContext, Page
 
-from guidebot_recorder.models.config import CursorConfig
+from guidebot_recorder.models.config import CursorConfig, Viewport
 
 _API_IS_READY = """() => {
     const api = window.__guidebot_cursor;
@@ -35,9 +35,14 @@ class Overlay:
     restores this Python-side position before the next recorded step.
     """
 
-    def __init__(self, cursor: CursorConfig | None = None) -> None:
-        self.pos: tuple[float, float] = (0.0, 0.0)
+    def __init__(
+        self, cursor: CursorConfig | None = None, viewport: Viewport | None = None
+    ) -> None:
         self.cursor = cursor or CursorConfig()
+        if viewport is not None:
+            self.pos: tuple[float, float] = (viewport.width / 2, viewport.height / 2)
+        else:
+            self.pos = (0.0, 0.0)
         body = files("guidebot_recorder.overlay").joinpath("cursor.js").read_text(encoding="utf-8")
         # Prepend the appearance config as a global the injected script reads.
         # Timing (speed/min/max) stays Python-side in _glide_duration.
@@ -48,7 +53,14 @@ class Overlay:
             "stroke": self.cursor.outline,
             "glow": self.cursor.glow,
             "easing": self.cursor.easing,
+            "click": {
+                "color": self.cursor.click.color,
+                "scale": self.cursor.click.scale,
+                "flash": self.cursor.click.flash,
+            },
         }
+        if viewport is not None:
+            appearance["start"] = [self.pos[0], self.pos[1]]
         prelude = f"window.__guidebot_cursor_config = {json.dumps(appearance)};\n"
         self._script = prelude + body
 
@@ -103,10 +115,24 @@ class Overlay:
         )
         self.pos = target
 
-    async def ripple(self, page: Page) -> None:
-        """Start a click ripple at the current cursor position."""
+    async def ripple(self, page: Page, *, flash: bool = False) -> None:
+        """Start a click ripple at the current cursor position.
+
+        ``flash`` requests the optional filled disc under the ring; it is only
+        drawn when the cursor's ``CursorClick.flash`` config also opts in.
+        """
         await self.ensure(page)
-        await page.evaluate("() => window.__guidebot_cursor.ripple()")
+        await page.evaluate("(f) => window.__guidebot_cursor.ripple(f)", flash)
+
+    async def hide(self, page: Page) -> None:
+        """Hide the cursor until :meth:`show` is called."""
+        await self.ensure(page)
+        await page.evaluate("() => window.__guidebot_cursor.hide()")
+
+    async def show(self, page: Page) -> None:
+        """Reveal a cursor previously hidden with :meth:`hide`."""
+        await self.ensure(page)
+        await page.evaluate("() => window.__guidebot_cursor.show()")
 
     async def _restore_position(self, page: Page) -> None:
         await page.evaluate(_RESTORE_POSITION, [self.pos[0], self.pos[1]])

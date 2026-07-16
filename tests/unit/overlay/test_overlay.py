@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 import pytest
 from playwright.async_api import Page, async_playwright
 
-from guidebot_recorder.models.config import CursorConfig
+from guidebot_recorder.models.config import CursorClick, CursorConfig, Viewport
 from guidebot_recorder.overlay.overlay import Overlay
 
 
@@ -121,3 +121,33 @@ async def test_ensure_recreates_wiped_dom_and_restores_position(page: Page) -> N
     assert box is not None
     assert box["x"] == pytest.approx(75, abs=1)
     assert box["y"] == pytest.approx(125, abs=1)
+
+
+def test_overlay_viewport_centers_pos_backcompat_zero() -> None:
+    assert Overlay().pos == (0.0, 0.0)
+    assert Overlay(CursorConfig()).pos == (0.0, 0.0)
+    o = Overlay(CursorConfig(), Viewport(width=1000, height=400))
+    assert o.pos == (500.0, 200.0)
+
+
+def test_prelude_carries_click_and_start() -> None:
+    import json
+    import re
+
+    o = Overlay(CursorConfig(click=CursorClick(flash=True)), Viewport(width=800, height=600))
+    prelude = o._script.split("\n", 1)[0]
+    cfg = json.loads(re.search(r"= (\{.*\});", prelude).group(1))
+    assert cfg["click"]["flash"] is True
+    assert cfg["start"] == [400.0, 300.0]
+
+
+async def test_hide_show_and_ripple_flash(page: Page) -> None:
+    overlay = Overlay(CursorConfig(click=CursorClick(flash=True)), Viewport(width=800, height=600))
+    await overlay.install(page)
+    await overlay.hide(page)
+    disp = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-cursor]')).display"
+    )
+    assert disp == "none"
+    await overlay.show(page)
+    await overlay.ripple(page, flash=True)  # must not raise; TypeError would fail the test
