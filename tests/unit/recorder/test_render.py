@@ -28,6 +28,7 @@ from guidebot_recorder.recorder.render import (
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
+from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import MuxAudioTrack, compose_popup_video, probe_duration
@@ -362,6 +363,71 @@ async def test_render_produces_mp4_with_audio(tmp_path):
     types = _stream_types(out)
     assert types.count("video") == 1
     assert types.count("audio") == 1
+
+
+async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
+    tmp_path, monkeypatch
+):
+    """Locks in render.py's context init-script ordering contract.
+
+    cursor.js and slide.js both rely on reading the real ``window.top`` to
+    decide whether they are running in the top document or a framed site;
+    chrome.js is what shadows ``top`` for frame-bust neutralization. If either
+    ran after chrome.js, it would read the shadowed ``top`` and misidentify
+    its role. This spies on ``install_context`` (rather than asserting on
+    ``window.top`` behavior directly) because modern Chromium already makes
+    ``Object.defineProperty(window, "top", ...)`` a no-op for cross-origin
+    frames, so a black-box DOM assertion can't distinguish a correct order
+    from a swapped one — only the registration order itself can.
+    """
+    path = tmp_path / "chrome.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Chrome
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              chrome: {enabled: true}
+            steps:
+              - say: "Witaj."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    order: list[str] = []
+    original_overlay_install = Overlay.install_context
+    original_slide_install = SlideOverlay.install_context
+    original_chrome_install = Chrome.install_context
+
+    async def spy_overlay_install(self, context):
+        order.append("overlay")
+        return await original_overlay_install(self, context)
+
+    async def spy_slide_install(self, context):
+        order.append("slide")
+        return await original_slide_install(self, context)
+
+    async def spy_chrome_install(self, context):
+        order.append("chrome")
+        return await original_chrome_install(self, context)
+
+    monkeypatch.setattr(Overlay, "install_context", spy_overlay_install)
+    monkeypatch.setattr(SlideOverlay, "install_context", spy_slide_install)
+    monkeypatch.setattr(Chrome, "install_context", spy_chrome_install)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert order == ["overlay", "slide", "chrome"]
 
 
 async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path, monkeypatch):

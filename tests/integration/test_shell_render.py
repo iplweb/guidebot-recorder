@@ -18,6 +18,7 @@ from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.models.config import ChromeConfig, CursorConfig
 from guidebot_recorder.overlay.overlay import Overlay
+from guidebot_recorder.slide import SlideOverlay
 
 pytestmark = pytest.mark.integration
 
@@ -34,8 +35,13 @@ async def _setup_shell(browser, chrome_config: ChromeConfig) -> tuple[Page, Fram
         service_workers="block",
     )
     overlay = Overlay(CursorConfig())
+    slide = SlideOverlay()
     chrome = Chrome(chrome_config)
+    # Mirror render.py's init-script order: cursor (overlay) -> slide -> chrome,
+    # so slide.js's isTop guard reads the real window.top before chrome.js
+    # shadows it (see render.py's cursor/slide-before-chrome contract comment).
     await overlay.install_context(context)
+    await slide.install_context(context)
     await chrome.install_context(context)
     await install_framing(context, shell_origin="https://guidebot.shell/")
     page = await context.new_page()
@@ -104,6 +110,14 @@ async def test_no_second_bar_or_cursor_inside_the_framed_site(browser) -> None:
 
     # None of the overlays leak into the framed site, and no padding-top is
     # injected on its <html> (the legacy padding heuristic must not run here).
+    # __guidebot_slide is checked here alongside chromeApi/cursorApi: slide.js's
+    # isTop guard (like cursor.js's) must bail inside the framed site and never
+    # install its API there. Note this locks in the outcome, not the ordering
+    # itself — real Chromium already makes chrome.js's window.top shadowing a
+    # no-op for cross-origin frames, so this passes regardless of init-script
+    # order; the order contract (cursor/overlay -> slide -> chrome, see
+    # render.py) is separately covered by a registration-order spy test in
+    # tests/unit/recorder/test_render.py.
     leaked = await site_frame.evaluate(
         """() => ({
             legacyBar: document.querySelectorAll("[data-guidebot-chrome]").length,
@@ -112,6 +126,7 @@ async def test_no_second_bar_or_cursor_inside_the_framed_site(browser) -> None:
             padding: getComputedStyle(document.documentElement).paddingTop,
             chromeApi: typeof window.__guidebot_chrome,
             cursorApi: typeof window.__guidebot_cursor,
+            slideApi: typeof window.__guidebot_slide,
         })"""
     )
     assert leaked == {
@@ -121,6 +136,7 @@ async def test_no_second_bar_or_cursor_inside_the_framed_site(browser) -> None:
         "padding": "0px",
         "chromeApi": "undefined",
         "cursorApi": "undefined",
+        "slideApi": "undefined",
     }
 
 
