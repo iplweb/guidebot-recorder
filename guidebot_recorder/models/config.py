@@ -96,6 +96,27 @@ class ChromeConfig(BaseModel):
     show_caret: bool = Field(default=True, alias="showCaret")
 
 
+class PopupConfig(BaseModel):
+    """Cosmetic settings for the floating popup-window presentation at ``render``.
+
+    Purely visual — like :class:`CursorConfig`, these never affect the compiled
+    targets, so they are *not* part of :func:`config_hash` and changing them does
+    not require a recompile. Every field has a sensible default; omit the whole
+    ``popup:`` block to keep the built-in look and motion.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    floating: bool = True
+    scale: float = 0.72
+    corner_radius: int = Field(default=14, alias="cornerRadius")
+    shadow: bool = True
+    backdrop_dim: float = Field(default=0.45, alias="backdropDim")
+    backdrop_blur: int = Field(default=0, alias="backdropBlur")
+    open_ms: int = Field(default=320, alias="openMs")
+    close_ms: int = Field(default=240, alias="closeMs")
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
@@ -106,6 +127,7 @@ class Config(BaseModel):
     audio_tracks: list[TtsConfig] = Field(default_factory=list, alias="audioTracks")
     cursor: CursorConfig = Field(default_factory=CursorConfig)
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
+    popup: PopupConfig = Field(default_factory=PopupConfig)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:

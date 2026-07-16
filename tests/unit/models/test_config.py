@@ -4,19 +4,26 @@ from pydantic import ValidationError
 from guidebot_recorder.models.config import (
     ChromeConfig,
     Config,
+    PopupConfig,
     TtsConfig,
     Viewport,
     config_hash,
 )
 
 
-def _cfg(w=1280, locale="pl-PL", chrome: ChromeConfig | None = None):
+def _cfg(
+    w=1280,
+    locale="pl-PL",
+    chrome: ChromeConfig | None = None,
+    popup: PopupConfig | None = None,
+):
     return Config(
         title="t",
         viewport=Viewport(width=w, height=720),
         locale=locale,
         tts=TtsConfig(provider="edge", voice="v", lang="pl-PL"),
         **({"chrome": chrome} if chrome is not None else {}),
+        **({"popup": popup} if popup is not None else {}),
     )
 
 
@@ -359,3 +366,121 @@ def test_config_hash_unchanged_when_typing_chrome_field_changes():
     faster = _cfg(chrome=ChromeConfig(enabled=True, char_delay_ms=10))
 
     assert config_hash(faster) == config_hash(baseline)
+
+
+def test_popup_defaults():
+    popup = PopupConfig()
+
+    assert popup.floating is True
+    assert popup.scale == 0.72
+    assert popup.corner_radius == 14
+    assert popup.shadow is True
+    assert popup.backdrop_dim == 0.45
+    assert popup.backdrop_blur == 0
+    assert popup.open_ms == 320
+    assert popup.close_ms == 240
+
+
+def test_config_defaults_popup_to_built_in():
+    cfg = _cfg()
+
+    assert cfg.popup == PopupConfig()
+    assert cfg.popup.floating is True
+
+
+def test_popup_config_parses_from_camelcase_aliases():
+    popup = PopupConfig.model_validate(
+        {
+            "floating": False,
+            "scale": 0.5,
+            "cornerRadius": 20,
+            "shadow": False,
+            "backdropDim": 0.6,
+            "backdropBlur": 8,
+            "openMs": 500,
+            "closeMs": 300,
+        }
+    )
+
+    assert popup.floating is False
+    assert popup.scale == 0.5
+    assert popup.corner_radius == 20
+    assert popup.shadow is False
+    assert popup.backdrop_dim == 0.6
+    assert popup.backdrop_blur == 8
+    assert popup.open_ms == 500
+    assert popup.close_ms == 300
+
+
+def test_popup_config_parses_from_snake_case():
+    popup = PopupConfig.model_validate(
+        {
+            "floating": False,
+            "scale": 0.5,
+            "corner_radius": 20,
+            "shadow": False,
+            "backdrop_dim": 0.6,
+            "backdrop_blur": 8,
+            "open_ms": 500,
+            "close_ms": 300,
+        }
+    )
+
+    assert popup.floating is False
+    assert popup.scale == 0.5
+    assert popup.corner_radius == 20
+    assert popup.shadow is False
+    assert popup.backdrop_dim == 0.6
+    assert popup.backdrop_blur == 8
+    assert popup.open_ms == 500
+    assert popup.close_ms == 300
+
+
+def test_popup_config_from_config_yaml_alias():
+    cfg = Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "voice": "v", "lang": "pl-PL"},
+            "popup": {"cornerRadius": 20, "backdropDim": 0.6, "openMs": 500},
+        }
+    )
+
+    assert cfg.popup.corner_radius == 20
+    assert cfg.popup.backdrop_dim == 0.6
+    assert cfg.popup.open_ms == 500
+
+
+def test_popup_config_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        PopupConfig.model_validate({"floating": True, "unknown": "value"})
+
+
+def test_config_rejects_unknown_popup_fields():
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "title": "t",
+                "viewport": {"width": 1280, "height": 720},
+                "tts": {"provider": "edge", "voice": "v", "lang": "pl-PL"},
+                "popup": {"unknown": "value"},
+            }
+        )
+
+
+def test_config_hash_unchanged_when_any_popup_field_changes():
+    baseline = _cfg(popup=PopupConfig())
+    customized = _cfg(
+        popup=PopupConfig(
+            floating=False,
+            scale=0.5,
+            corner_radius=20,
+            shadow=False,
+            backdrop_dim=0.6,
+            backdrop_blur=8,
+            open_ms=500,
+            close_ms=300,
+        )
+    )
+
+    assert config_hash(customized) == config_hash(baseline)
