@@ -1301,6 +1301,12 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
 
 
 async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypatch):
+    """GAP 1: the card is destroyed by a navigation DURING the say's narration
+    wait, and the say is the LAST step. The pre-narration `_ensure_card` check
+    already passed (card was still alive then); only the post-narration re-check
+    can catch this. Without it the video narrates over the wrong page and render
+    completes silently — so the render MUST raise RenderError instead."""
+
     import guidebot_recorder.recorder.render as R
 
     path = tmp_path / "slide-fail.scenario.yaml"
@@ -1319,19 +1325,27 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
         encoding="utf-8",
     )
 
-    token_calls = 0
+    # The card is "destroyed" (token goes falsy, as a fresh navigated document
+    # would report) only AFTER the narration wait completes — i.e. the
+    # destruction happens DURING the wait, never before it. The pre-narration
+    # check therefore sees a live card; only a post-wait check sees the loss.
+    destroyed = {"value": False}
 
-    class BrokenTokenSlide(R.SlideOverlay):
+    class MidWaitDestroySlide(R.SlideOverlay):
         async def token(self, page):
-            nonlocal token_calls
-            token_calls += 1
-            if token_calls > 1:
-                # Simulate a navigation that destroyed the JS context: a fresh
-                # document never called show(), so the real API would return 0.
+            if destroyed["value"]:
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R, "SlideOverlay", BrokenTokenSlide)
+    monkeypatch.setattr(R, "SlideOverlay", MidWaitDestroySlide)
+
+    original_wait = R._wait_for_step_narration
+
+    async def destroy_during_wait(segments):
+        await original_wait(segments)
+        destroyed["value"] = True  # a navigation replaced the document mid-say
+
+    monkeypatch.setattr(R, "_wait_for_step_narration", destroy_during_wait)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1344,7 +1358,153 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
             await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert token_calls > 1
+    assert destroyed["value"], "the narration-wait wrapper never ran"
+    assert not out.exists()
+
+
+async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkeypatch):
+    """GAP 2 (shape): a `[slide, say, slide]` scenario where the middle say's
+    card is destroyed during its narration wait must also raise RenderError —
+    the shape must never complete silently.
+
+    The spy models reality: `token` is falsy while destroyed, but a real
+    `show()` (the trailing slide's repaint) restores a truthy token. Without the
+    post-narration re-check this shape completes SILENTLY, because the trailing
+    slide repaints a fresh card over the wrong page, restoring a valid token, so
+    that slide's own hold-loop check then passes."""
+
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "slide-say-slide.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Prezentacja
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+            steps:
+              - slide: {title: "Krok 1", hold: 0.0}
+              - say: "Narracja nad znikającą kartą."
+              - slide: {title: "Krok 2", hold: 0.0}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    destroyed = {"value": False}
+
+    class GhostNavSlide(R.SlideOverlay):
+        async def show(self, page, card):
+            await super().show(page, card)
+            destroyed["value"] = False  # a repaint restores a truthy token
+
+        async def token(self, page):
+            if destroyed["value"]:
+                return 0
+            return await super().token(page)
+
+    monkeypatch.setattr(R, "SlideOverlay", GhostNavSlide)
+
+    original_wait = R._wait_for_step_narration
+
+    async def destroy_during_wait(segments):
+        await original_wait(segments)
+        destroyed["value"] = True  # a navigation replaced the document mid-say
+
+    monkeypatch.setattr(R, "_wait_for_step_narration", destroy_during_wait)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        with pytest.raises(RenderError, match="karta slajdu zniknęła"):
+            await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert not out.exists()
+
+
+async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, monkeypatch):
+    """GAP 2 (isolates the slide-dismiss token assert): a navigation lands
+    AFTER the say has fully completed (so its post-narration re-check already
+    passed) but BEFORE the following slide dismisses the card. This reproduces
+    the realistic race the slide-dismiss `_assert_card_alive` guards: without
+    it, the next slide silently repaints a fresh card (restoring a truthy
+    token) over the navigated page, and the render succeeds silently.
+
+    The spy models reality: `token` is falsy while the ghost-navigation is in
+    effect, but a real `show()` (the next slide's repaint) restores a truthy
+    token — exactly what a fresh document's first `show()` would do."""
+
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "slide-say-slide-race.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Prezentacja
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+            steps:
+              - slide: {title: "Krok 1", hold: 0.0}
+              - say: "Narracja, po której następuje nawigacja."
+              - slide: {title: "Krok 2", hold: 0.0}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    slide_ref: dict = {}
+
+    class GhostNavSlide(R.SlideOverlay):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._ghost = False
+            slide_ref["slide"] = self
+
+        async def show(self, page, card):
+            await super().show(page, card)
+            # A real show() in a fresh document bumps the token to truthy; model
+            # the repaint restoring a valid token so the bug (silent repaint over
+            # the wrong page) is faithfully reproduced.
+            self._ghost = False
+
+        async def token(self, page):
+            if self._ghost:
+                return 0
+            return await super().token(page)
+
+    monkeypatch.setattr(R, "SlideOverlay", GhostNavSlide)
+
+    original_render_step = R._render_step
+
+    async def render_step_spy(*args):
+        # args[6] is `kind` (see _render_step's signature). A navigation lands
+        # the instant the say step finishes — after its post-narration re-check.
+        kind = args[6]
+        result = await original_render_step(*args)
+        if kind == "say":
+            slide_ref["slide"]._ghost = True
+        return result
+
+    monkeypatch.setattr(R, "_render_step", render_step_spy)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        with pytest.raises(RenderError, match="karta slajdu zniknęła"):
+            await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
     assert not out.exists()
 
 

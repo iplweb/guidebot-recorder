@@ -737,6 +737,11 @@ async def run_render(
             if kind == "slide":
                 assert step.slide is not None  # guaranteed by command_kind()
                 if card_active:
+                    # Fail loud before repainting: a slide following a say whose
+                    # card was destroyed mid-narration must NOT silently swap in a
+                    # fresh card over the wrong page (mirrors the generic dismiss
+                    # branch's token assert below).
+                    await _assert_card_alive(active_page)
                     await slide.hide(active_page)
                     await overlay.show(active_page)
                     await _chrome_show(active_page)
@@ -783,7 +788,16 @@ async def run_render(
             if _unexpected_pages(observed_pages, page, popup):
                 raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
             await active_page.bring_to_front()
-            await _ensure_visuals(active_page, overlay, chrome)
+            # Card-aware post-narration re-assert: a navigation that destroyed the
+            # card DURING the narration wait (a say/slide over a live card) must
+            # fail loud here — this is the checkpoint that catches a mid-wait
+            # destruction even when the say is the LAST step (the loop still fully
+            # processes that step before exiting). When no card is active this is
+            # exactly today's unconditional `_ensure_visuals` (back-compat).
+            if card_active:
+                await _ensure_card(active_page)
+            else:
+                await _ensure_visuals(active_page, overlay, chrome)
             cached = compiled.actions[index]
             if cached is not None and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
