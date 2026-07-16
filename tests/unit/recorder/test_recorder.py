@@ -55,3 +55,29 @@ async def test_apply_readiness_none_is_noop(page):
     await page.set_content("<p>ok</p>")
     rec = Recorder(page, overlay=None)
     await rec.apply_readiness("none")  # does not raise
+
+
+async def test_click_emits_exactly_one_click_sound_even_without_overlay(page):
+    await page.set_content("<button>ok</button>")
+    events = []
+    rec = Recorder(page, None, on_sfx=events.append)  # overlay=None → fallback path
+    await rec.click(RoleTarget(role="button", name="ok"))
+    assert events == ["click"]
+
+
+async def test_click_emits_one_click_sound_with_overlay(page):
+    await page.set_content("<button>ok</button>")
+    events = []
+    overlay = Overlay()
+    await overlay.install(page)
+    rec = Recorder(page, overlay, on_sfx=events.append)
+    await rec.click(RoleTarget(role="button", name="ok"))
+    assert events == ["click"]
+
+
+async def test_hover_emits_no_click_sound(page):
+    await page.set_content("<button>ok</button>")
+    events = []
+    rec = Recorder(page, None, on_sfx=events.append)
+    await rec.hover(RoleTarget(role="button", name="ok"))
+    assert "click" not in events

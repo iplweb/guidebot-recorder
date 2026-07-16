@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from playwright.async_api import Frame, Locator, Page
+from playwright.async_api import Error as PlaywrightError, Frame, Locator, Page
 
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.target import Target
@@ -29,6 +29,9 @@ class Recorder:
         overlay: Overlay | None,
         settle_ms: float = 280,
         frame: Page | Frame | None = None,
+        *,
+        type_delay_ms: float | None = None,
+        on_sfx: Callable[[str], None] | None = None,
     ) -> None:
         self.page = page
         # Locators, navigation and reuse-validation run against ``frame``; the
@@ -40,20 +43,31 @@ class Recorder:
         # Pause (ms) after the cursor lands and ripples, before the action fires —
         # gives the viewer a beat to register *where* the cursor stopped.
         self.settle_ms = settle_ms
+        # Per-character pause (ms) for the animated `enter_text` path; None keeps
+        # the instant `locator.fill()` behavior (compile-mode / no polish).
+        self._type_delay_ms = type_delay_ms
+        # Sound-effect hook, called with "click" or "key"; None means silent.
+        self._on_sfx = on_sfx
 
-    async def _point_and_prepare(self, target: Target) -> Locator:
+    async def _point_and_prepare(self, target: Target, *, click_sound: bool = False) -> Locator:
         locator = await build_locator(self.frame, target)
         # scroll to the target on BOTH axes — an element can be off-screen horizontally
         # too, and Playwright's auto-scroll is vertically centric
         await locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+        rippled = False
         if self.overlay is not None:
             box = await locator.bounding_box()
             if box is not None:
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
                 await self.overlay.move_to(self.page, cx, cy)
-                await self.overlay.ripple(self.page)
+                await self.overlay.ripple(self.page, flash=click_sound)
+                if click_sound and self._on_sfx is not None:
+                    self._on_sfx("click")  # AT ripple time, before the settle pause
+                rippled = True
                 await self.page.wait_for_timeout(self.settle_ms)
+        if click_sound and not rippled and self._on_sfx is not None:
+            self._on_sfx("click")  # fallback: no overlay / no bbox
         return locator
 
     async def navigate(self, url: str) -> None:
@@ -68,7 +82,7 @@ class Recorder:
         *,
         before_click: Callable[[], None] | None = None,
     ) -> None:
-        locator = await self._point_and_prepare(target)
+        locator = await self._point_and_prepare(target, click_sound=True)
         if before_click is not None:
             before_click()
         await locator.click()
