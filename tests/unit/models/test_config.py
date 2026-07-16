@@ -359,3 +359,31 @@ def test_config_hash_unchanged_when_typing_chrome_field_changes():
     faster = _cfg(chrome=ChromeConfig(enabled=True, char_delay_ms=10))
 
     assert config_hash(faster) == config_hash(baseline)
+
+
+# Task 0.1: CursorClick tests
+def test_cursor_click_defaults_match_todays_ripple():
+    from guidebot_recorder.models.config import CursorClick
+
+    c = CursorClick()
+    assert c.color == "rgba(37,99,235,.9)"
+    assert c.scale == 3.25
+    assert c.flash is False
+
+
+def test_cursor_click_rejects_unknown_keys_and_nonpositive_scale():
+    from guidebot_recorder.models.config import CursorClick
+
+    with pytest.raises(ValidationError):
+        CursorClick(bogus=1)
+    with pytest.raises(ValidationError):
+        CursorClick(scale=0)
+
+
+def test_cursor_config_has_click_field_with_defaults():
+    from guidebot_recorder.models.config import CursorConfig
+
+    c = CursorConfig()
+    assert c.click.color == "rgba(37,99,235,.9)"
+    assert c.click.scale == 3.25
+    assert c.click.flash is False

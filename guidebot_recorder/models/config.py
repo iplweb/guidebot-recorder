@@ -36,6 +36,15 @@ class TtsConfig(BaseModel):
         return self.track_language or "und"
 
 
+class CursorClick(BaseModel):
+    """Appearance of the click ripple. Defaults reproduce today's hard-coded ring."""
+
+    model_config = ConfigDict(extra="forbid")
+    color: str = "rgba(37,99,235,.9)"          # today's ring colour (cursor.js:227)
+    scale: float = Field(default=3.25, gt=0)   # today's end-scale (cursor.js:234); > 0
+    flash: bool = False                        # opt-in filled disc under the ring
+
+
 class CursorConfig(BaseModel):
     """Cosmetic settings for the synthetic cursor shown during ``render``.
 
@@ -60,6 +69,9 @@ class CursorConfig(BaseModel):
     min_duration: float = Field(default=320.0, alias="minDuration")  # ms floor
     max_duration: float = Field(default=1400.0, alias="maxDuration")  # ms ceiling
     settle: float = 280.0  # ms pause after arrival, before the action fires
+
+    # --- Click ripple appearance (render-only; injected into cursor.js) ---
+    click: CursorClick = Field(default_factory=CursorClick)
 
 
 class ChromeConfig(BaseModel):
