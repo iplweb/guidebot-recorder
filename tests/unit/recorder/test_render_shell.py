@@ -125,6 +125,11 @@ def _shell_scenario(step: Step, chrome: ChromeConfig) -> Scenario:
     )
 
 
+async def _noop_ensure_card(page: FakePage) -> None:
+    """These tests never paint a slide card — a no-op stands in for the real
+    card-aware `_ensure_card` closure `run_render` builds."""
+
+
 async def _run_shell(step: Step, chrome: ChromeConfig, final_url: str) -> list[tuple]:
     events: list[tuple] = []
     page = FakePage()
@@ -135,7 +140,18 @@ async def _run_shell(step: Step, chrome: ChromeConfig, final_url: str) -> list[t
     scenario = _shell_scenario(step, chrome)
 
     await _render_step(
-        page, recorder, overlay, chrome_ctl, scenario, step, "navigate", 3, None, 0.0, {}
+        page,
+        recorder,
+        overlay,
+        chrome_ctl,
+        scenario,
+        step,
+        "navigate",
+        3,
+        None,
+        0.0,
+        {},
+        _noop_ensure_card,
     )
     return events
 

@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -46,6 +46,7 @@ from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
@@ -63,6 +64,10 @@ _VIDEO_POSTROLL_SECONDS = 0.1
 
 class RenderError(RuntimeError):
     """A step needs (re-)compile: missing action or mismatched identity."""
+
+
+#: A slide card's on-screen content, as consumed by ``SlideOverlay.show``/``.ensure``.
+Card = dict[str, str | None]
 
 
 @dataclass(slots=True)
@@ -598,6 +603,46 @@ async def run_render(
         await chrome.install_context(context)
         # Strip X-Frame-Options / CSP frame-ancestors so arbitrary sites frame.
         await install_framing(context, shell_origin=SHELL_URL)
+    slide = SlideOverlay()
+    await slide.install_context(context)
+
+    # --- Slide card state -----------------------------------------------------
+    # `card_active`/`active_card` track whether a slide card currently owns the
+    # screen (painted either by a `slide` step or the auto-intro below). When no
+    # card is ever painted (no `slide` steps, `intro.enabled=False`), these stay
+    # False/None for the whole render and every helper below is a pure pass-
+    # through to today's `_ensure_visuals` — i.e. byte-identical back-compat.
+    card_active = False
+    active_card: Card | None = None
+
+    async def _chrome_hide(pg: Page) -> None:
+        if chrome is not None:
+            await chrome.hide(pg)
+
+    async def _chrome_show(pg: Page) -> None:
+        if chrome is not None:
+            await chrome.show(pg)
+
+    async def _assert_card_alive(pg: Page) -> None:
+        """Fail loud when a navigation destroyed the card mid-say.
+
+        A fresh, tokenless document (``slide.token`` falsy) means the picture
+        on screen is no longer the card the narration/scenario describes —
+        never narrate over — or silently dismiss — the wrong picture.
+        """
+        if not await slide.token(pg):
+            raise RenderError("karta slajdu zniknęła po nawigacji — narracja nad złym obrazem")
+
+    async def _ensure_card(pg: Page) -> None:
+        """Card-aware replacement for `_ensure_visuals`: re-mount the active
+        card (rebuild-from-missing only; a live card's content is untouched)
+        and re-assert the hidden cursor/chrome layers.
+        """
+        await _assert_card_alive(pg)
+        assert active_card is not None  # guaranteed by the card_active invariant
+        await slide.ensure(pg, active_card)
+        await overlay.hide(pg)
+        await _chrome_hide(pg)
 
     observed_pages: dict[Page, _PageObservation] = {}
 
@@ -637,11 +682,24 @@ async def run_render(
     # bounded pre-roll; it avoids losing an arbitrarily long opening narration.
     # With chrome enabled the neutral document IS the shell (bar + empty iframe),
     # so the recording opens on the browser chrome rather than a bare white page.
+    # Auto-intro (`cfg.intro.enabled`) replaces this neutral document with a
+    # title card instead — render-only, so `intro.enabled=False` keeps today's
+    # bootstrap byte-identical.
     site_frame: Frame | None = None
     if chrome is not None:
         site_frame = await chrome.install_shell(page)
-    else:
+    elif not cfg.intro.enabled:
         await page.set_content("<style>html,body{margin:0;background:white}</style>")
+    if cfg.intro.enabled:
+        active_card = {
+            "title": cfg.title,
+            "subtitle": cfg.intro.subtitle,
+            "notes": cfg.intro.notes,
+        }
+        await slide.show(page, active_card)
+        await overlay.hide(page)
+        await _chrome_hide(page)
+        card_active = True
     await _ensure_visuals(page, overlay, chrome)
     await page.screenshot()
     await page.wait_for_timeout(100)
@@ -670,7 +728,39 @@ async def run_render(
 
             active_page = _active_page(page, popup)
             await active_page.bring_to_front()
-            await _ensure_visuals(active_page, overlay, chrome)
+            # Card-aware visual prep, ahead of the narration block: a `slide`
+            # step paints (replacing any prior card); a `say` step keeps a live
+            # card up while it narrates; any other step dismisses the card
+            # first (asserting it survived, fail-loud) before its normal
+            # `_ensure_visuals`. With no card ever painted this is exactly
+            # today's unconditional `_ensure_visuals` call (back-compat).
+            if kind == "slide":
+                assert step.slide is not None  # guaranteed by command_kind()
+                if card_active:
+                    await slide.hide(active_page)
+                    await overlay.show(active_page)
+                    await _chrome_show(active_page)
+                active_card = {
+                    "title": step.slide.title,
+                    "subtitle": step.slide.subtitle,
+                    "notes": step.slide.notes,
+                }
+                await slide.show(active_page, active_card)
+                await overlay.hide(active_page)
+                await _chrome_hide(active_page)
+                card_active = True
+            elif kind == "say" and card_active:
+                await _ensure_card(active_page)
+            elif card_active:
+                await _assert_card_alive(active_page)
+                await slide.hide(active_page)
+                await overlay.show(active_page)
+                await _chrome_show(active_page)
+                card_active = False
+                active_card = None
+                await _ensure_visuals(active_page, overlay, chrome)
+            else:
+                await _ensure_visuals(active_page, overlay, chrome)
 
             step_segments: list[Segment] = []
             narration_offset = time.monotonic() - anchor
@@ -720,6 +810,7 @@ async def run_render(
                     cached,
                     anchor,
                     observed_pages,
+                    _ensure_card,
                 )
                 if opened is not None:
                     popup = opened
@@ -733,7 +824,7 @@ async def run_render(
                 _sync_popup_close(popup, observed_pages, anchor)
                 if popup is not None and popup.page.is_closed():
                     if not popup.close_handled:
-                        if opened is not None or kind in {"say", "navigate", "wait"}:
+                        if opened is not None or kind in {"say", "navigate", "wait", "slide"}:
                             raise RenderError(
                                 "popup zamknął się asynchronicznie poza obsługiwaną akcją"
                             )
@@ -859,6 +950,7 @@ async def _render_step(
     cached: CachedAction | None,
     anchor: float,
     observed_pages: dict[Page, _PageObservation],
+    ensure_card: Callable[[Page], Awaitable[None]],
 ) -> _PopupSession | None:
     pages_before_prepare = set(observed_pages)
     # Both visual layers can be removed by an SPA without a navigation.  Check
@@ -873,6 +965,25 @@ async def _render_step(
 
     if kind == "say":
         return None
+    if kind == "slide":
+        assert step.slide is not None  # guaranteed by command_kind()
+        if _narration(step) is not None:
+            # The loop already waited out the narration before calling us (one
+            # picture timeline); re-assert the card and force a captured frame.
+            await ensure_card(page)
+            await page.screenshot()
+            return None
+        # No `say` on this slide: hold the card ourselves, SPA-safe — re-assert
+        # on a short cadence rather than a single blind sleep, so a same-
+        # document rewrite mid-hold is repaired (and a real navigation still
+        # fails loud via `ensure_card`'s token check).
+        deadline = time.monotonic() + step.slide.hold
+        while True:
+            await ensure_card(page)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(0.1, remaining))
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()

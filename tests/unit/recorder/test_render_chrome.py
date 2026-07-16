@@ -65,6 +65,12 @@ def _scenario(step: Step, *, type_on_navigate: bool = True, show_url: bool = Tru
     )
 
 
+async def _noop_ensure_card(page: FakePage) -> None:
+    """These tests never paint a slide card; `_render_step`'s `say`/`navigate`
+    branches don't call it either — a no-op stands in for the real card-aware
+    `_ensure_card` closure `run_render` builds."""
+
+
 async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = True):
     events: list[tuple] = []
     page = FakePage()
@@ -89,6 +95,7 @@ async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = Tr
         None,
         0.0,
         {},
+        _noop_ensure_card,
     )
     return events
 

@@ -1167,3 +1167,268 @@ async def test_render_sound_gates_keys_when_disabled(tmp_path, monkeypatch):
     assert "key" not in kinds
     assert "click" in kinds
     assert probe_duration(out) > 0
+
+
+# --- Slide cards + auto-intro (Task 5.3) -------------------------------------
+
+SLIDE_SCENARIO = textwrap.dedent(
+    """\
+    config:
+      title: Prezentacja
+      viewport: {width: 640, height: 480}
+      tts: {provider: fake, voice: v, lang: pl-PL}
+    steps:
+      - slide: {title: "Witaj w GuideBot", hold: 0.05}
+      - say: "To jest wprowadzenie."
+    """
+)
+
+
+async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "slide.scenario.yaml"
+    path.write_text(SLIDE_SCENARIO, encoding="utf-8")
+
+    slide_events: list[tuple[str, dict]] = []
+
+    class SpySlide(R.SlideOverlay):
+        async def show(self, page, card):
+            await super().show(page, card)
+            slide_events.append(("show", dict(card)))
+
+        async def ensure(self, page, card):
+            await super().ensure(page, card)
+            dom_count = await page.locator("[data-guidebot-slide]").count()
+            cursor_display = await page.evaluate(
+                "() => document.querySelector('[data-guidebot-cursor]')?.style.display"
+            )
+            slide_events.append(
+                (
+                    "ensure",
+                    {"card": dict(card), "dom_count": dom_count, "cursor_display": cursor_display},
+                )
+            )
+
+    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    show_events = [payload for kind, payload in slide_events if kind == "show"]
+    ensure_events = [payload for kind, payload in slide_events if kind == "ensure"]
+    assert show_events, "the slide step never called SlideOverlay.show"
+    assert show_events[0] == {
+        "title": "Witaj w GuideBot",
+        "subtitle": None,
+        "notes": None,
+    }
+    assert ensure_events, "the say step never re-asserted the card via _ensure_card"
+    # While the `say` narrates, the card must be mounted and the cursor hidden.
+    assert ensure_events[0]["dom_count"] == 1
+    assert ensure_events[0]["cursor_display"] == "none"
+    assert out.exists()
+    assert probe_duration(out) > 0
+
+
+async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "slide-navigate.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Prezentacja
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+            steps:
+              - slide: {title: "Krok 1", hold: 0.05}
+              - navigate: "data:text/html,<p>Po slajdzie</p>"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    slide_hide_calls = 0
+    overlay_show_calls = 0
+    dom_state_before_navigate: list[int] = []
+
+    class SpySlide(R.SlideOverlay):
+        async def hide(self, page):
+            nonlocal slide_hide_calls
+            slide_hide_calls += 1
+            await super().hide(page)
+
+    class SpyOverlay(R.Overlay):
+        async def show(self, page):
+            nonlocal overlay_show_calls
+            overlay_show_calls += 1
+            await super().show(page)
+
+    class SpyRecorder(R.Recorder):
+        async def navigate(self, url):
+            dom_state_before_navigate.append(
+                await self.page.locator("[data-guidebot-slide]").count()
+            )
+            await super().navigate(url)
+
+    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert slide_hide_calls >= 1, "the navigate step never dismissed the card"
+    assert overlay_show_calls >= 1, "the navigate step never restored the cursor"
+    assert dom_state_before_navigate == [0], "the card was still mounted when navigate ran"
+    assert out.exists()
+
+
+async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "slide-fail.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Prezentacja
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+            steps:
+              - slide: {title: "Krok 1", hold: 0.0}
+              - say: "Narracja nad znikającą kartą."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    token_calls = 0
+
+    class BrokenTokenSlide(R.SlideOverlay):
+        async def token(self, page):
+            nonlocal token_calls
+            token_calls += 1
+            if token_calls > 1:
+                # Simulate a navigation that destroyed the JS context: a fresh
+                # document never called show(), so the real API would return 0.
+                return 0
+            return await super().token(page)
+
+    monkeypatch.setattr(R, "SlideOverlay", BrokenTokenSlide)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        with pytest.raises(RenderError, match="karta slajdu zniknęła"):
+            await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert token_calls > 1
+    assert not out.exists()
+
+
+async def test_intro_enabled_replaces_bootstrap(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "intro-on.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Logowanie
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              intro: {enabled: true, subtitle: "Poznaj system", notes: "Zaczynamy"}
+            steps:
+              - say: "Witaj, zaraz pokażę logowanie."
+              - navigate: "data:text/html,<button>Zaloguj</button>"
+              - teach: "kliknij Zaloguj"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    show_calls: list[dict] = []
+
+    class SpySlide(R.SlideOverlay):
+        async def show(self, page, card):
+            show_calls.append(dict(card))
+            await super().show(page, card)
+
+    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert show_calls, "intro.enabled=True never painted a card at bootstrap"
+    # The FIRST show() call is the bootstrap intro card (no `slide` step exists
+    # in this scenario, so there is no other candidate call).
+    assert show_calls[0] == {
+        "title": "Logowanie",
+        "subtitle": "Poznaj system",
+        "notes": "Zaczynamy",
+    }
+    assert out.exists()
+    assert probe_duration(out) > 0
+
+
+async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
+    """The critical back-compat guarantee: `intro.enabled=False` never paints a
+    card and never calls SlideOverlay.show — bootstrap is byte-identical to
+    pre-Task-5.3 behavior."""
+
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "intro-off.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")  # intro defaults to disabled
+
+    show_calls: list[dict] = []
+
+    class SpySlide(R.SlideOverlay):
+        async def show(self, page, card):
+            show_calls.append(dict(card))
+            await super().show(page, card)
+
+    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert show_calls == []
+    assert out.exists()
+    assert probe_duration(out) > 0
