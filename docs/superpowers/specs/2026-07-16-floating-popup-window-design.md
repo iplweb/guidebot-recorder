@@ -80,10 +80,12 @@ the existing approximate sync.
   floating-window render mounts neither bar). The cursor overlay MAY still be shown
   inside the popup (it participates in popup interactions) — TBD-free default: keep
   the cursor, drop the bar.
-- **Capture the click point.** The click that opens the popup already runs through
-  the cursor choreography; record the cursor's viewport position (or the target's
-  center) at `mark_click_started` as `(cx, cy)` and thread it to the compositor as
-  the scale-in origin.
+- **Capture the click point.** The opening click's `before_click`/`mark_click_started`
+  callback records *timing only*, not coordinates. The scale-in origin `(cx, cy)`
+  is therefore taken from the cursor's last viewport position — `Overlay.pos` after
+  `_point_and_prepare` moved it to the target center — captured at the opening click
+  and threaded to the compositor. (Only needed if the scale-from-point polish is
+  enabled; fade-in needs no coordinates.)
 - Everything else in the one-popup lifecycle (detection window, `opened_at`/
   `closed_at`, quiescence, fail-loud on a second/unexpected popup) is unchanged.
 
@@ -108,14 +110,26 @@ untuned:
 - `backdrop_dim: float = 0.45` (0 = none), `backdrop_blur: int = 0`.
 - `open_ms: int = 320`, `close_ms: int = 240`.
 
+## Feasibility (probed with ffmpeg — 2026-07-16)
+
+The **core composite is proven**: `eq=brightness=-0.30` dims the main; the popup is
+`scale`d to `0.72` (922×518 at 1280×720), given rounded corners via a `format=rgba`
++ `geq` alpha mask (corner radius `r`, alpha 0 outside the rounded rect), faded in
+with `fade=t=in:alpha=1:d=0.32`, and `overlay`-ed centered over the dimmed main —
+produced a valid stream. So the **primary** rendering is: dim backdrop + rounded
+scaled popup + drop shadow (a pre-blurred black rounded rect `overlay`-ed just
+behind the popup) + **fade-in/out**. High confidence.
+
+The **scale-from-the-click-point growth is optional polish**, not load-bearing:
+`scale` is not time-animatable, so the growth needs `zoompan` (or a per-frame
+scaled layer). If that proves brittle at integration time, ship fade-only — the
+dimmed-backdrop framed window already delivers the effect. The spec therefore
+treats scale-from-point as an enhancement gated behind a clean `zoompan` probe.
+
 ## Risks and mitigations
 
-- **ffmpeg expression complexity.** Animated scale from a point is fiddly in
-  ffmpeg; `scale` is not smoothly time-animatable, so the open/close uses `zoompan`
-  or an `overlay` of a per-frame-scaled layer via `scale2ref`+`overlay=x=f(t)`.
-  Mitigation: prototype the filtergraph against the two test recordings first;
-  fall back to a fade-only (no scale) open if the scale animation proves brittle,
-  keeping the dimmed-backdrop floating window.
+- **Animated scale (polish only).** See Feasibility: primary is fade-in (proven);
+  scale-from-point is a gated enhancement with a proven fade-only fallback.
 - **VFR / backgrounded frames** (north-star): the dimmed main behind the popup
   relies on the main recording still having frames during the popup interval; if
   the main page is backgrounded and emits none, hold its last frame. Verify.
