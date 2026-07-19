@@ -2,8 +2,9 @@
 
 import pytest
 
+import guidebot_recorder.scenario.loader as loader_module
 from guidebot_recorder.models.scenario import Scenario
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
 SCENARIO_YAML = """\
 config:
@@ -51,6 +52,64 @@ def test_env_defaults_to_os_environ(tmp_path, monkeypatch):
     monkeypatch.setenv("DEMO_EMAIL", "env@b.example")
     scenario = load_scenario(_write(tmp_path))  # env=None → os.environ
     assert scenario.steps[1].navigate == "https://env.example"
+
+
+def test_unchanged_source_yaml_is_parsed_once_across_scenario_reads(tmp_path, monkeypatch):
+    unique = SCENARIO_YAML.replace("Logowanie do systemu", "Jednorazowy parse 91e8b7")
+    path = _write(tmp_path, unique)
+    yaml_loads = 0
+    yaml_factory = loader_module.YAML
+
+    def counting_yaml(*args, **kwargs):
+        nonlocal yaml_loads
+        yaml = yaml_factory(*args, **kwargs)
+        original_load = yaml.load
+
+        def count_load(*load_args, **load_kwargs):
+            nonlocal yaml_loads
+            yaml_loads += 1
+            return original_load(*load_args, **load_kwargs)
+
+        yaml.load = count_load
+        return yaml
+
+    monkeypatch.setattr(loader_module, "YAML", counting_yaml)
+
+    first = load_scenario(path, env=ENV)
+    second = load_scenario(path, env=ENV)
+    references = scenario_env_references(path, env=ENV)
+
+    assert first == second
+    assert references == ENV
+    assert yaml_loads == 1
+
+
+def test_yaml_parse_cache_does_not_hide_source_edits(tmp_path):
+    path = _write(tmp_path)
+    assert load_scenario(path, env=ENV).config.title == "Logowanie do systemu"
+
+    path.write_text(
+        SCENARIO_YAML.replace("Logowanie do systemu", "Zmieniony tytuł"),
+        encoding="utf-8",
+    )
+
+    assert load_scenario(path, env=ENV).config.title == "Zmieniony tytuł"
+
+
+def test_yaml_parse_cache_keeps_environment_substitution_isolated(tmp_path):
+    path = _write(tmp_path)
+    first = load_scenario(path, env=ENV)
+    other_env = {
+        "BASE_URL": "https://other.example",
+        "DEMO_EMAIL": "other@example.test",
+    }
+
+    second = load_scenario(path, env=other_env)
+
+    assert first.steps[1].navigate == "https://app.example.com"
+    assert first.steps[3].enter_text.text == "a@b.example"
+    assert second.steps[1].navigate == "https://other.example"
+    assert second.steps[3].enter_text.text == "other@example.test"
 
 
 def test_loads_complete_multilingual_narration(tmp_path):

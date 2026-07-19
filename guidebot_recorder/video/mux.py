@@ -6,6 +6,7 @@ All helpers are fail-loud: a missing binary or a non-zero exit raises immediatel
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
@@ -29,6 +30,15 @@ class MuxAudioTrack:
     language: str
     title: str | None = None
     default: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ProbeResult:
+    """Metadata read together by one fresh ffprobe process."""
+
+    duration: float
+    fps: float
+    size: tuple[int, int] | None
 
 
 def _resolve(binary: str) -> str:
@@ -92,23 +102,67 @@ def probe_duration(path: Path) -> float:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
+    return _probe_all(path).duration
+
+
+def _probe_all(path: Path, default_fps: float = 25.0) -> _ProbeResult:
+    """Read duration, average video FPS, and video size in one ffprobe call.
+
+    Results deliberately are not cached across calls: render outputs are written
+    atomically and callers may replace a path between probes. Sharing this result
+    is therefore limited to one top-level composition operation, during which its
+    input files are immutable.
+    """
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
     proc = _run(
         [
             ffprobe_bin(),
             "-v",
             "error",
+            "-select_streams",
+            "v:0",
             "-show_entries",
-            "format=duration",
+            "format=duration:stream=avg_frame_rate,width,height",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
             str(path),
         ]
     )
-    raw = proc.stdout.strip()
     try:
-        return float(raw)
-    except ValueError as exc:  # pragma: no cover - defensive
-        raise RuntimeError(f"ffprobe returned non-numeric duration: {raw!r}") from exc
+        payload = json.loads(proc.stdout)
+    except (json.JSONDecodeError, TypeError) as exc:  # pragma: no cover - defensive
+        raise RuntimeError("ffprobe returned invalid JSON metadata") from exc
+    if not isinstance(payload, dict):  # pragma: no cover - defensive
+        raise RuntimeError("ffprobe returned invalid JSON metadata")
+
+    raw_duration = payload.get("format", {}).get("duration", "")
+    try:
+        duration = float(raw_duration)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"ffprobe returned non-numeric duration: {raw_duration!r}") from exc
+
+    streams = payload.get("streams", [])
+    stream = streams[0] if isinstance(streams, list) and streams else {}
+    if not isinstance(stream, dict):  # pragma: no cover - defensive
+        stream = {}
+
+    raw_fps = stream.get("avg_frame_rate", "")
+    try:
+        num, _, den = str(raw_fps).partition("/")
+        fps = float(num) / float(den) if den else float(num)
+    except (ValueError, ZeroDivisionError):
+        fps = default_fps
+    if fps <= 0:
+        fps = default_fps
+
+    try:
+        size = (int(stream["width"]), int(stream["height"]))
+    except (KeyError, TypeError, ValueError):
+        size = None
+    return _ProbeResult(duration=duration, fps=fps, size=size)
 
 
 def _check_sources(*paths: Path) -> None:
@@ -126,27 +180,7 @@ def _probe_fps(path: Path, default: float = 25.0) -> float:
     *default* whenever ffprobe cannot report a usable positive rate. The value
     only picks the CFR grid the floating backdrop is normalised onto.
     """
-    proc = _run(
-        [
-            ffprobe_bin(),
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=avg_frame_rate",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ]
-    )
-    raw = proc.stdout.strip()
-    try:
-        num, _, den = raw.partition("/")
-        rate = float(num) / float(den) if den else float(num)
-    except (ValueError, ZeroDivisionError):
-        return default
-    return rate if rate > 0 else default
+    return _probe_all(path, default_fps=default).fps
 
 
 def _probe_size(path: Path) -> tuple[int, int]:
@@ -156,26 +190,10 @@ def _probe_size(path: Path) -> tuple[int, int]:
     two overlays tile across (``overlay``'s ``W`` variable then references this
     base width in the push expressions). Fail loud if ffprobe cannot report them.
     """
-    proc = _run(
-        [
-            ffprobe_bin(),
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=s=x:p=0",
-            str(path),
-        ]
-    )
-    raw = proc.stdout.strip()
-    try:
-        width_str, height_str = raw.split("x")
-        return int(width_str), int(height_str)
-    except ValueError as exc:  # pragma: no cover - defensive
-        raise RuntimeError(f"ffprobe returned non-numeric size: {raw!r}") from exc
+    size = _probe_all(path).size
+    if size is None:  # pragma: no cover - defensive
+        raise RuntimeError("ffprobe returned non-numeric size")
+    return size
 
 
 def compose_popup_video(
@@ -244,7 +262,8 @@ def compose_popup_video(
     if visual_ready_delay < 0:
         raise ValueError(f"visual_ready_delay must be >= 0, got {visual_ready_delay}")
 
-    main_duration = probe_duration(main)
+    main_probe = _probe_all(main)
+    main_duration = main_probe.duration
     # Container durations are frame-rounded.  Accept a sub-frame overshoot from
     # the monotonic browser clock, but fail loudly on a genuinely invalid range.
     tolerance = 0.05
@@ -324,6 +343,7 @@ def compose_popup_video(
             open_ms=open_ms,
             close_ms=close_ms,
             hold_open_at_end=hold_open_at_end,
+            rate=main_probe.fps,
         )
         return
 
@@ -341,6 +361,8 @@ def compose_popup_video(
             has_tail=has_tail,
             slide_ms=slide_ms,
             hold_open_at_end=hold_open_at_end,
+            rate=main_probe.fps,
+            size=main_probe.size,
         )
         return
 
@@ -424,6 +446,7 @@ def _compose_floating(
     open_ms: int,
     close_ms: int,
     hold_open_at_end: bool,
+    rate: float,
 ) -> None:
     """Assemble and run the floating-popup composite filtergraph.
 
@@ -437,8 +460,6 @@ def _compose_floating(
     span = popup_span
     open_eff = min(open_ms / 1000.0, span / 2.0)
     close_eff = min(close_ms / 1000.0, span - open_eff)
-    rate = _probe_fps(main)
-
     filters: list[str] = []
 
     # --- CFR normalise, then 3-way split (mid is ALWAYS consumed) -------------
@@ -583,6 +604,8 @@ def _compose_slide(
     has_tail: bool,
     slide_ms: int,
     hold_open_at_end: bool,
+    rate: float,
+    size: tuple[int, int] | None,
 ) -> None:
     """Assemble and run the sliding-popup composite filtergraph.
 
@@ -605,8 +628,9 @@ def _compose_slide(
     # a ``t/0`` (which would be inf/NaN and warp the push geometry).
     d_in = min(slide_ms / 1000.0, span / 2.0)
     d_out = min(slide_ms / 1000.0, span - d_in)
-    rate = _probe_fps(main)
-    width, height = _probe_size(main)
+    if size is None:
+        raise RuntimeError("ffprobe returned non-numeric size")
+    width, height = size
 
     # prog: 0->1 push-in over D_in, hold at 1, then 1->0 push-out over D_out.
     # A collapsed phase (D<=0) becomes the constant "1" (no division). With
@@ -663,9 +687,7 @@ def _compose_slide(
     # can leave ``mid_main``/``popup_cut`` one frame short of the CFR base, and
     # ``pass`` would flash black on that final frame (right before the tail);
     # ``repeat`` holds the last real frame while the base pins output length.
-    filters.append(
-        f"[base][mid_main]overlay=x='-W*({prog})':y=0:eof_action=repeat[wmain]"
-    )
+    filters.append(f"[base][mid_main]overlay=x='-W*({prog})':y=0:eof_action=repeat[wmain]")
     filters.append(
         f"[wmain][popup_cut]overlay=x='W*(1-({prog}))':y=0:eof_action=repeat,"
         "settb=AVTB,setsar=1,setpts=PTS-STARTPTS,format=yuv420p[mid]"
@@ -763,6 +785,7 @@ def mux_audio_tracks(
     out: Path,
     *,
     preencoded: bool = False,
+    video_duration: float | None = None,
 ) -> None:
     """Attach one or more language-tagged audio tracks to a single MP4 video.
 
@@ -771,6 +794,8 @@ def mux_audio_tracks(
     is deliberately avoided so a malformed short track cannot truncate the film.
     ``preencoded`` copies an already H.264-compatible picture (the popup
     compositor path); otherwise Playwright's WebM picture is encoded to H.264.
+    Callers that just probed an immutable staged video may pass ``video_duration``
+    to avoid launching ffprobe for the same artifact again.
     """
 
     video, out = Path(video), Path(out)
@@ -795,7 +820,10 @@ def mux_audio_tracks(
         raise ValueError("audio track languages must be unique")
 
     _check_sources(video, *(track.path for track in tracks))
-    video_duration = probe_duration(video)
+    if video_duration is None:
+        video_duration = probe_duration(video)
+    elif not math.isfinite(video_duration) or video_duration <= 0:
+        raise ValueError("video_duration must be finite and positive")
     duration_tolerance = 0.05
     for track in tracks:
         audio_duration = probe_duration(track.path)

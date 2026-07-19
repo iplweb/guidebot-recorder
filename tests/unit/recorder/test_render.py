@@ -625,7 +625,7 @@ async def test_render_rejects_sidecar_from_other_scenario_before_tts_or_browser(
     assert not (tmp_path / "cache").exists()
 
 
-def test_audio_timeline_rejects_even_subframe_narration_overrun(tmp_path):
+async def test_audio_timeline_rejects_even_subframe_narration_overrun(tmp_path):
     tts = TtsConfig(
         provider="fake",
         voice="pl",
@@ -635,7 +635,7 @@ def test_audio_timeline_rejects_even_subframe_narration_overrun(tmp_path):
     segment = Segment(text="koniec", path=tmp_path / "unused.mp3", duration=0.08)
 
     with pytest.raises(RenderError, match="wykracza poza nagranie"):
-        _mux_tracks_for_timeline(
+        await _mux_tracks_for_timeline(
             [tts],
             {"pl-PL": [Placed(segment=segment, offset=0.95)]},
             total=1.0,
@@ -708,7 +708,7 @@ def test_publish_render_artifacts_rolls_back_keyboard_interrupt(tmp_path, monkey
 
 
 @pytest.mark.parametrize("failure_point", ["second_bed", "mux"])
-def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
+async def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
     tmp_path, monkeypatch, failure_point
 ):
     work = tmp_path / "work"
@@ -730,7 +730,8 @@ def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
             raise RuntimeError("second bed failed")
         destination.write_bytes(f"new bed {build_calls}".encode())
 
-    def staged_mux(video, tracks, destination, *, preencoded=False):
+    def staged_mux(video, tracks, destination, *, preencoded=False, video_duration=None):
+        assert video_duration == 1.0
         if failure_point == "mux":
             raise RuntimeError("mux failed")
         destination.write_bytes(b"new master")
@@ -739,7 +740,7 @@ def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
     monkeypatch.setattr("guidebot_recorder.recorder.render.mux_audio_tracks", staged_mux)
 
     with pytest.raises(RuntimeError, match="failed"):
-        _assemble_audio_tracks(
+        await _assemble_audio_tracks(
             tmp_path / "video.webm",
             configs,
             {"pl-PL": [], "en-US": []},

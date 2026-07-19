@@ -4,6 +4,7 @@ import textwrap
 import pytest
 from playwright.async_api import async_playwright
 
+import guidebot_recorder.recorder.compile as compile_module
 from guidebot_recorder.models.action import COMPILER_VERSION
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.scenario import Step
@@ -93,6 +94,119 @@ async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     second = MockReasoner()
     await run_compile(path, page, second)
     assert second.calls == 0  # reuse — LLM nie wołany
+
+
+async def test_recompile_reuses_cache_without_rewriting_unchanged_sidecar(
+    tmp_path, page, monkeypatch
+):
+    path = tmp_path / "login.scenario.yaml"
+    path.write_text(SCENARIO, encoding="utf-8")
+    writes = 0
+    original_write = compile_module.write_compiled
+
+    def count_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "write_compiled", count_write)
+
+    await run_compile(path, page, MockReasoner())
+    assert writes == 1  # fresh resolve checkpoint; navigate does not rewrite the sidecar
+
+    writes = 0
+    reasoner = MockReasoner()
+    await run_compile(path, page, reasoner)
+
+    assert reasoner.calls == 0
+    assert writes == 0
+
+
+async def test_fresh_resolution_is_checkpointed_before_a_later_failure(tmp_path, page):
+    path = tmp_path / "partial.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Częściowa kompilacja
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - navigate: "data:text/html,<button>Pierwszy</button><button>Drugi</button>"
+              - teach: "kliknij Pierwszy"
+              - teach: "kliknij Drugi"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    class FailsSecondResolution:
+        async def resolve(self, instruction, candidates):
+            if "Drugi" in instruction:
+                raise RuntimeError("synthetic second-step failure")
+            return ReasonerResult(
+                action="click",
+                target=RoleTarget(role="button", name="Pierwszy", exact=True),
+            )
+
+    with pytest.raises(RuntimeError, match="synthetic second-step failure"):
+        await run_compile(path, page, FailsSecondResolution())
+
+    compiled = load_compiled(compiled_path(path))
+    assert compiled.actions[1] is not None
+    assert compiled.actions[2] is None
+
+
+async def test_targetless_compile_still_writes_final_aligned_sidecar(tmp_path, page, monkeypatch):
+    path = tmp_path / "narration.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Narracja
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              - say: "Cześć"
+            """
+        ),
+        encoding="utf-8",
+    )
+    writes = 0
+    original_write = compile_module.write_compiled
+
+    def count_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(compile_module, "write_compiled", count_write)
+
+    await run_compile(path, page, MockReasoner())
+
+    compiled = load_compiled(compiled_path(path))
+    assert compiled.actions == [None]
+    assert writes == 1
+
+
+async def test_empty_scenario_still_does_not_create_sidecar(tmp_path, page):
+    path = tmp_path / "empty.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Pusty scenariusz
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps: []
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    await run_compile(path, page, MockReasoner(), force=True)
+
+    assert not compiled_path(path).exists()
 
 
 async def test_slide_compiles_to_null_without_reasoner(tmp_path, page):

@@ -311,6 +311,26 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
     return result.reverse();
   };
 
+  const nthOfTypeCache = new WeakMap();
+  const nthOfType = (element) => {
+    const cached = nthOfTypeCache.get(element);
+    if (cached !== undefined) return cached;
+
+    let index = 1;
+    for (let sibling = element.previousElementSibling; sibling;
+         sibling = sibling.previousElementSibling) {
+      if (sibling.localName !== element.localName) continue;
+      const siblingIndex = nthOfTypeCache.get(sibling);
+      if (siblingIndex !== undefined) {
+        index += siblingIndex;
+        break;
+      }
+      index += 1;
+    }
+    nthOfTypeCache.set(element, index);
+    return index;
+  };
+
   const domPath = (element) => {
     const parts = [];
     let current = element;
@@ -319,9 +339,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
       const parent = current.parentElement;
       let segment = tag;
       if (parent) {
-        const sameTagSiblings = Array.from(parent.children)
-          .filter((sibling) => sibling.localName === current.localName);
-        segment += `:nth-of-type(${sameTagSiblings.indexOf(current) + 1})`;
+        segment += `:nth-of-type(${nthOfType(current)})`;
       }
       parts.push(segment);
       if (parent) {

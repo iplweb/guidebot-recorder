@@ -196,9 +196,7 @@ def _sample_rgb(path: Path, at: float) -> tuple[int, int, int]:
     return _sample_region_rgb(path, at, None)
 
 
-def _sample_region_rgb(
-    path: Path, at: float, crop: str | None
-) -> tuple[int, int, int]:
+def _sample_region_rgb(path: Path, at: float, crop: str | None) -> tuple[int, int, int]:
     """Decode one frame (optionally cropped to *crop*) and average it to one RGB.
 
     *crop* is an ffmpeg ``crop`` spec ``w:h:x:y`` selecting a region before the
@@ -337,6 +335,19 @@ def test_probe_duration_matches(tmp_path: Path) -> None:
 def test_probe_duration_missing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         probe_duration(tmp_path / "nope.mp4")
+
+
+def test_probe_all_is_fresh_after_input_is_rewritten(tmp_path: Path) -> None:
+    video = tmp_path / "rewritten.mp4"
+    _make_video(video, 1.0)
+
+    first = mux_module._probe_all(video)
+
+    _make_video(video, 2.0)
+    second = mux_module._probe_all(video)
+
+    assert first.duration == pytest.approx(1.0, abs=0.3)
+    assert second.duration == pytest.approx(2.0, abs=0.3)
 
 
 def test_atomic_output_preserves_previous_artifact_after_ffmpeg_failure(
@@ -490,6 +501,34 @@ def test_mux_audio_tracks_preencoded_copies_video_with_multiple_audio_streams(
         "pol",
         "eng",
     ]
+
+
+def test_mux_audio_tracks_reuses_known_video_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video = tmp_path / "v.mp4"
+    audio = tmp_path / "a.wav"
+    out = tmp_path / "out.mp4"
+    _make_video(video, 1.0)
+    _make_audio(audio, 1.0)
+    probed: list[Path] = []
+    original_probe = mux_module.probe_duration
+
+    def recording_probe(path: Path) -> float:
+        probed.append(Path(path))
+        return original_probe(path)
+
+    monkeypatch.setattr(mux_module, "probe_duration", recording_probe)
+
+    mux_audio_tracks(
+        video,
+        [MuxAudioTrack(audio, language="pol", default=True)],
+        out,
+        video_duration=1.0,
+    )
+
+    assert probed == [audio]
+    assert out.exists()
 
 
 def test_compose_popup_video_switches_main_popup_main(tmp_path: Path) -> None:
@@ -746,6 +785,38 @@ def test_compose_popup_video_slide_pushes_in_holds_and_out(tmp_path: Path) -> No
     # (unlike float, where the border stays dimmed main).
     _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
     _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+def test_slide_composition_probes_each_artifact_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "out.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+    probed_paths: list[Path] = []
+    original_run = mux_module._run
+
+    def recording_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        if Path(cmd[0]).name == "ffprobe":
+            probed_paths.append(Path(cmd[-1]))
+        return original_run(cmd)
+
+    monkeypatch.setattr(mux_module, "_run", recording_run)
+
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        opened_at=1.0,
+        closed_at=2.0,
+        transition="slide",
+    )
+
+    assert probed_paths.count(main) == 1
+    assert probed_paths.count(popup) == 1
+    assert probed_paths.count(out) == 1
 
 
 def test_compose_popup_video_slide_no_black_flash_at_push_out_end(tmp_path: Path) -> None:

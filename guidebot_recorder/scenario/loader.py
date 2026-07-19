@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -35,11 +36,25 @@ def _to_plain(node):
     return str(node)
 
 
-def _read_raw(path: Path) -> dict:
-    """Read the scenario YAML into plain Python types (``${ENV}`` still intact)."""
+@lru_cache(maxsize=32)
+def _parse_source(source: str) -> dict:
+    """Parse unchanged source text once; callers never mutate the cached value."""
+
     yaml = YAML(typ="safe")
-    data = yaml.load(path.read_text(encoding="utf-8"))
+    data = yaml.load(source)
     return _to_plain(data)
+
+
+def _read_raw(path: Path) -> dict:
+    """Read the scenario YAML into plain Python types (``${ENV}`` still intact).
+
+    The file is read on every call, so edits are observed immediately. Only the
+    deterministic YAML parse is shared when the exact source text is unchanged;
+    environment substitution still receives a deep copy in
+    :func:`substitute_scenario_values`.
+    """
+
+    return _parse_source(path.read_text(encoding="utf-8"))
 
 
 def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Scenario:
