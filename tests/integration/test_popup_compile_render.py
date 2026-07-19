@@ -405,16 +405,19 @@ async def test_floating_popup_renders_as_inset_over_visible_main(tmp_path: Path)
     assert stream_types.count("video") == 1
     assert stream_types.count("audio") == 1
 
-    # Sample centre vs left edge across the timeline: floating mode must yield at
-    # least one frame where the popup (yellow) fills the centre while the edge is
-    # NOT popup-yellow (dimmed main backdrop showing through). A hard cut would
-    # paint the entire frame — centre and edge alike — popup-yellow.
+    # Sample centre vs left edge across the timeline. The defining property of the
+    # floating composite is that the dimmed MAIN page (blue) shows at the border
+    # while the popup (not blue) fills the centre inset. A hard cut would paint the
+    # popup edge-to-edge, so the border is never the main page during the popup
+    # interval. We key on the main-blue backdrop rather than the popup's exact
+    # centre colour, which depends on how the popup content renders (fonts/layout
+    # differ across platforms) and is not a reliable single-pixel signal.
     inset_frame_found = False
     for fraction in range(1, 40):
         seconds = duration * fraction / 40
         centre = _rgb_at_pixel(out, seconds, x=319, y=239)
         edge = _rgb_at_pixel(out, seconds, x=4, y=239)
-        if _is_popup_yellow(centre) and not _is_popup_yellow(edge):
+        if _is_main_blue(edge) and not _is_main_blue(centre):
             inset_frame_found = True
             break
     assert inset_frame_found, "expected a floating popup inset over a visible main backdrop"
