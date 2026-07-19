@@ -45,6 +45,7 @@ steps:
 | `audioTracks` | Nie | Alternatywne ścieżki narracji w tym samym MP4. |
 | `cursor` | Nie | Wygląd i timing syntetycznego kursora. |
 | `chrome` | Nie | Opcjonalny syntetyczny pasek, wyłącznie podczas renderu. |
+| `popup` | Nie | Sposób kompozycji okna pop-up w filmie (tylko render). |
 | `typing` | Nie | Animacja wpisywania znak po znaku; wyłącznie podczas renderu. |
 | `sound` | Nie | Opcjonalne wbudowane efekty dźwiękowe; wyłącznie podczas renderu. |
 | `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
@@ -122,19 +123,86 @@ zmian, więc pominięcie `click` zachowuje dotychczasowy wygląd.
 
 ### `chrome`
 
+Pasek w stylu macOS jest **powłoką z iframe**, wyłącznie podczas renderu. Docelowa
+strona renderuje się w `<iframe>` osadzonym **poniżej** paska, więc pasek nigdy nie
+zasłania treści strony — to gwarancja strukturalna, a nie górny padding. Przy
+włączonym chrome viewport układu strony to `width × (height − chrome.height)`.
+
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
 | `enabled` | `false` | Włącza pasek podczas renderu. |
-| `showUrl` | `true` | Pokazuje pole adresu. |
+| `showUrl` | `true` | Pokazuje pole adresu. Gdy `false`, wpisywanie URL-a i jego opóźnienie są wyłączone. |
 | `typeOnNavigate` | `true` | Domyślnie animuje wpisanie URL-a przed `goto`. |
-| `height` | `56` | Wysokość zajęta wewnątrz viewportu. |
+| `height` | `56` | Wysokość paska w px; musi być dodatnia. Zmniejsza viewport strony. |
 | `barColor`, `textColor`, `radius` | `#f3f4f6`, `#374151`, `12` | Wygląd paska. |
 | `showLock` | `true` | Pokazuje dekoracyjną kłódkę dla HTTPS. |
 | `closeColor`, `minimizeColor`, `maximizeColor` | kolory macOS | Kolory dekoracyjnych kropek. |
+| `interactOnNavigate` | `true` | W kroku nawigacji kursor podjeżdża do pola adresu, klika, pole dostaje wygląd „w fokusie", a potem URL jest wpisywany. |
+| `charDelayMs` | `110` | Bazowe opóźnienie na znak przy wpisywaniu (ms). |
+| `charJitterMs` | `55` | Losowy jitter dodawany do opóźnienia każdego znaku (ms). |
+| `segmentPauseMs` | `180` | Pauza między segmentami URL-a (ms). |
+| `preNavigatePauseMs` | `400` | Pauza po zakończeniu wpisywania, przed załadowaniem (ms). |
+| `focusColor` | `#3b82f6` | Kolor akcentu pola „w fokusie" (CSS). |
+| `showCaret` | `true` | Pokazuje migający kursor w polu podczas wpisywania. |
 
-Pasek nie jest natywnym UI Chromium. Może zmienić responsywny układ strony, a pełny
-URL może trafić do filmu. Wyłącz `showUrl` dla adresów zawierających sekret. Compile
-nie wstrzykuje paska.
+Większość pól chrome jest kosmetyczna i **poza** config hashem, więc ich zmiana nie
+wymusza rekompilacji. Wyjątki to `enabled` i `height`: oba zmieniają viewport
+kompilacji strony (iframe ma wysokość `height − chrome.height`), więc **wchodzą** do
+config hasha — włączenie lub wyłączenie chrome albo zmiana jego wysokości wymusza
+rekompilację. Pola wpisywania i interakcji (`interactOnNavigate`, `charDelayMs`,
+`charJitterMs`, `segmentPauseMs`, `preNavigatePauseMs`, `focusColor`, `showCaret`) są
+tylko wizualne (render) i pozostają poza hashem.
+
+Aby wczytać dowolne strony w iframe, render usuwa nagłówek `X-Frame-Options` oraz
+dyrektywę CSP `frame-ancestors` z odpowiedzi i blokuje service workery podczas
+renderu. Strona, która przekierowuje na swoim adresie wejściowym, ładuje się pod tym
+adresem wejściowym, a pole adresu pokazuje URL nawigowany, nie ten po przekierowaniu.
+Pełny URL może trafić do filmu — wyłącz `showUrl` dla adresów zawierających sekret.
+Compile nie wstrzykuje paska.
+
+### `popup`
+
+Opcjonalny obiekt `popup` steruje tym, jak okno pop-up (patrz sekcja `teach`) jest
+komponowane w filmie. Jest tylko dla renderu: podobnie jak `cursor`, **żadne** jego
+pole nie wchodzi do config hasha, więc jego zmiana nigdy nie wymaga rekompilacji.
+
+```yaml
+popup:
+  transition: slide
+  slideMs: 400
+```
+
+`transition` wybiera sposób pojawienia się pop-upu:
+
+- `cut` — twarde cięcie do pełnoekranowego nagrania pop-upu (pierwotne zachowanie).
+- `float` — pop-up to zaokrąglone pływające okno z cieniem nad **przyciemnioną**
+  stroną główną, która wciąż jest widoczna w tle; pojawia się i znika przez fade.
+- `slide` — pop-up wjeżdża jako **pełnoekranowe** okno (push-left: strona główna
+  wychodzi w lewo, pop-up wchodzi z prawej), trzyma pełny ekran, a przy zamknięciu
+  wyjeżdża.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `transition` | wyprowadzane z `floating` | `cut`, `float` lub `slide` (patrz wyżej). |
+| `floating` | `true` | Przestarzały alias bool: `true` → `float`, `false` → `cut`. Jawne `transition` ma pierwszeństwo. |
+| `scale` | `0.72` | `float`: rozmiar pływającego okna jako ułamek viewportu. |
+| `cornerRadius` | `14` | `float`: promień zaokrąglenia okna w px. |
+| `shadow` | `true` | `float`: rysuje cień. |
+| `backdropDim` | `0.45` | `float`: krycie ciemnego tła nad stroną główną. |
+| `backdropBlur` | `0` | `float`: promień rozmycia tła w px. |
+| `openMs` | `320` | `float`: czas pojawienia się (fade-in) w ms. |
+| `closeMs` | `240` | `float`: czas zniknięcia (fade-out) w ms. |
+| `slideMs` | `400` | `slide`: czas wjazdu/wyjazdu w ms. |
+
+Komponowane pop-upy (`float` i `slide`) renderują się **bez ozdób**: samo okno
+pop-upu nie ma paska adresu — rysowana jest tylko ramka kompozytora.
+
+!!! note "Znane ograniczenie"
+
+    Pop-up używa rozmiaru, o który poprosiło wywołanie `window.open(...)`. Jeśli jest
+    on mniejszy niż viewport filmu, oprawione lub pełnoekranowe okno pokazuje puste
+    miejsce wokół treści pop-upu. Wymuszenie wypełnienia viewportu przez pop-up jest
+    planowanym usprawnieniem.
 
 ### `typing`
 
