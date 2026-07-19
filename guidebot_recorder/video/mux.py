@@ -117,6 +117,37 @@ def _check_sources(*paths: Path) -> None:
             raise FileNotFoundError(path)
 
 
+def _probe_fps(path: Path, default: float = 25.0) -> float:
+    """Return the average frame rate of *path*'s first video stream.
+
+    Playwright screencasts are VFR, so ``avg_frame_rate`` can be a coarse
+    ``num/den`` ratio (or ``0/0`` for a degenerate stream). Falls back to
+    *default* whenever ffprobe cannot report a usable positive rate. The value
+    only picks the CFR grid the floating backdrop is normalised onto.
+    """
+    proc = _run(
+        [
+            ffprobe_bin(),
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ]
+    )
+    raw = proc.stdout.strip()
+    try:
+        num, _, den = raw.partition("/")
+        rate = float(num) / float(den) if den else float(num)
+    except (ValueError, ZeroDivisionError):
+        return default
+    return rate if rate > 0 else default
+
+
 def compose_popup_video(
     main: Path,
     popup: Path,
@@ -125,6 +156,15 @@ def compose_popup_video(
     closed_at: float,
     *,
     visual_ready_delay: float = 0.0,
+    floating: bool = False,
+    scale: float = 0.72,
+    corner_radius: int = 14,
+    shadow: bool = True,
+    backdrop_dim: float = 0.45,
+    backdrop_blur: int = 0,
+    open_ms: int = 320,
+    close_ms: int = 240,
+    hold_open_at_end: bool = False,
 ) -> None:
     """Cut between the main-page and popup recordings on one timeline.
 
@@ -138,6 +178,17 @@ def compose_popup_video(
     Playwright gives every page in the context the same configured frame size,
     so no scaling is applied.  Each segment has its timestamps reset before the
     concat filter and the final stream is encoded once as H.264 for MP4.
+
+    When ``floating`` is true the popup interval is not a hard cut but a
+    composite: the main page stays on screen (dimmed by ``backdrop_dim``, with an
+    optional ``backdrop_blur``) while the popup is drawn as a centred,
+    ``scale``-d, rounded-corner (``corner_radius``) window with a drop
+    ``shadow``, fading in over ``open_ms`` and out over ``close_ms``. The
+    backdrop is normalised to CFR before the split so a backgrounded main page
+    (which may emit zero frames during the interval) still fills the whole
+    span. When ``hold_open_at_end`` is true the close fade / un-dim is skipped
+    and the framed popup is held to the last frame. All cosmetics have defaults,
+    so existing ``floating=False`` callers are unaffected.
     """
     main, popup, out = Path(main), Path(popup), Path(out)
     _check_sources(main, popup)
@@ -196,6 +247,43 @@ def compose_popup_video(
 
     has_pre = opened_at > tolerance
     has_tail = main_duration - closed_at > tolerance
+
+    # The reused popup cut: identical trim/tpad math for both modes. Only the
+    # consumer differs (concat below vs. the scaled overlay in floating mode).
+    popup_filter = (
+        f"[1:v]settb=AVTB,setpts=PTS-STARTPTS,"
+        f"trim=start={popup_source_start:.6f}:"
+        f"end={popup_source_start + popup_cut_duration:.6f},"
+        "setpts=PTS-STARTPTS"
+    )
+    if startup_gap > tolerance:
+        popup_filter += f",tpad=start_mode=clone:start_duration={startup_gap:.6f}"
+    popup_filter += (
+        f",trim=duration={popup_span:.6f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[popup_cut]"
+    )
+
+    if floating:
+        _compose_floating(
+            main=main,
+            popup=popup,
+            out=out,
+            opened_at=opened_at,
+            closed_at=closed_at,
+            main_duration=main_duration,
+            popup_span=popup_span,
+            popup_filter=popup_filter,
+            has_pre=has_pre,
+            has_tail=has_tail,
+            scale=scale,
+            corner_radius=corner_radius,
+            shadow=shadow,
+            backdrop_dim=backdrop_dim,
+            backdrop_blur=backdrop_blur,
+            open_ms=open_ms,
+            close_ms=close_ms,
+            hold_open_at_end=hold_open_at_end,
+        )
+        return
 
     filters: list[str] = []
     main_sources: dict[str, str] = {}
@@ -265,6 +353,171 @@ def compose_popup_video(
         ],
         out,
     )
+
+
+def _compose_floating(
+    *,
+    main: Path,
+    popup: Path,
+    out: Path,
+    opened_at: float,
+    closed_at: float,
+    main_duration: float,
+    popup_span: float,
+    popup_filter: str,
+    has_pre: bool,
+    has_tail: bool,
+    scale: float,
+    corner_radius: int,
+    shadow: bool,
+    backdrop_dim: float,
+    backdrop_blur: int,
+    open_ms: int,
+    close_ms: int,
+    hold_open_at_end: bool,
+) -> None:
+    """Assemble and run the floating-popup composite filtergraph.
+
+    Shares the caller's validated trim math (``opened_at``/``closed_at`` already
+    shifted by the visual-ready delay, ``popup_filter`` the reused popup cut).
+    The main input is CFR-normalised (``fps``) *before* the 3-way split so the
+    always-consumed middle segment (``main[opened_at:closed_at]``) fills the
+    whole span even when the backgrounded main page emitted no frames there.
+    """
+
+    span = popup_span
+    open_eff = min(open_ms / 1000.0, span / 2.0)
+    close_eff = min(close_ms / 1000.0, span - open_eff)
+    rate = _probe_fps(main)
+
+    filters: list[str] = []
+
+    # --- CFR normalise, then 3-way split (mid is ALWAYS consumed) -------------
+    split_targets: list[str] = []
+    if has_pre:
+        split_targets.append("[main_pre_src]")
+    split_targets.append("[main_mid_src]")
+    if has_tail:
+        split_targets.append("[main_tail_src]")
+    main_norm = f"[0:v]fps={rate:.6f},settb=AVTB,setpts=PTS-STARTPTS"
+    if len(split_targets) == 1:
+        filters.append(f"{main_norm}[main_mid_src]")
+    else:
+        filters.append(f"{main_norm},split={len(split_targets)}{''.join(split_targets)}")
+
+    # --- pre (verbatim main) --------------------------------------------------
+    if has_pre:
+        filters.append(
+            f"[main_pre_src]trim=start=0:end={opened_at:.6f},"
+            "setpts=PTS-STARTPTS,setsar=1,format=yuv420p[main_pre]"
+        )
+
+    # --- dimmed backdrop (ramps with the fade so it darkens in step) ----------
+    # ``open_ms=0`` (a valid "no open animation" config) makes open_eff 0; guard
+    # the division so the eq expression never becomes t/0 (inf/NaN brightness).
+    rise = "1" if open_eff <= 0 else f"min(1,t/{open_eff:.6f})"
+    if hold_open_at_end or close_eff <= 0:
+        ramp = rise
+    else:
+        fall = f"min(1,({span:.6f}-t)/{close_eff:.6f})"
+        ramp = f"min({rise},{fall})"
+    dim_expr = f"-{backdrop_dim:.6f}*{ramp}"
+    backdrop = (
+        f"[main_mid_src]trim=start={opened_at:.6f}:end={closed_at:.6f},"
+        f"setpts=PTS-STARTPTS,eq=brightness='{dim_expr}':eval=frame"
+    )
+    if backdrop_blur > 0:
+        backdrop += f",boxblur={backdrop_blur}"
+    backdrop += ",setsar=1,format=yuv420p[dim]"
+    filters.append(backdrop)
+
+    # --- the reused popup cut -------------------------------------------------
+    filters.append(popup_filter)
+
+    # --- framed popup: scale, rounded-corner alpha mask, fade in/out ----------
+    r = corner_radius
+    # Fully opaque except inside the four corner circles (radius r).
+    alpha_expr = (
+        f"if(gt(abs(X-(W/2)),(W/2-{r}))*gt(abs(Y-(H/2)),(H/2-{r})),"
+        f"if(lte(pow(abs(X-(W/2))-(W/2-{r}),2)+pow(abs(Y-(H/2))-(H/2-{r}),2),pow({r},2)),255,0),"
+        "255)"
+    )
+    framed = (
+        f"[popup_cut]scale=trunc(iw*{scale:.6f}/2)*2:trunc(ih*{scale:.6f}/2)*2,"
+        "format=rgba,"
+        f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{alpha_expr}'"
+    )
+    if open_eff > 0:
+        framed += f",fade=t=in:alpha=1:d={open_eff:.6f}"
+    if not hold_open_at_end and close_eff > 0:
+        framed += f",fade=t=out:alpha=1:st={span - close_eff:.6f}:d={close_eff:.6f}"
+
+    # --- overlay onto the dimmed backdrop (backdrop pins the length) ----------
+    if shadow:
+        framed += ",split=2[framed1][framed2]"
+        filters.append(framed)
+        # Drop shadow: the popup's (faded) alpha, painted black and blurred, so
+        # it fades in step with the window and softly extends past its edges.
+        filters.append("[framed2]geq=r=0:g=0:b=0:a='alpha(X,Y)',boxblur=8[shadow]")
+        filters.append("[dim][shadow]overlay=x=(W-w)/2:y=(H-h)/2+6[with_shadow]")
+        overlay_base = "[with_shadow][framed1]"
+    else:
+        framed += "[framed1]"
+        filters.append(framed)
+        overlay_base = "[dim][framed1]"
+    filters.append(
+        f"{overlay_base}overlay=x=(W-w)/2:y=(H-h)/2,"
+        "settb=AVTB,setsar=1,setpts=PTS-STARTPTS,format=yuv420p[mid]"
+    )
+
+    # --- tail (verbatim main) -------------------------------------------------
+    if has_tail:
+        filters.append(
+            f"[main_tail_src]trim=start={closed_at:.6f},"
+            "setpts=PTS-STARTPTS,setsar=1,format=yuv420p[main_tail]"
+        )
+
+    # --- concat pre? + mid + tail? -------------------------------------------
+    labels: list[str] = []
+    if has_pre:
+        labels.append("[main_pre]")
+    labels.append("[mid]")
+    if has_tail:
+        labels.append("[main_tail]")
+    if len(labels) == 1:
+        filters.append("[mid]null[outv]")
+    else:
+        filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
+
+    _run_to_output(
+        [
+            ffmpeg_bin(),
+            "-y",
+            "-i",
+            str(main),
+            "-i",
+            str(popup),
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[outv]",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+        out,
+    )
+
+    # Fail loud if the CFR backdrop still came out empty: the composite would be
+    # short by ~the popup span and later trip the audio-bed duration guards.
+    produced = probe_duration(out)
+    if produced + 0.2 < main_duration:
+        raise ValueError(
+            f"floating composite duration ({produced:.3f}s) is short of main "
+            f"({main_duration:.3f}s); the CFR backdrop came out empty"
+        )
 
 
 def mux(video: Path, audio: Path, out: Path) -> None:

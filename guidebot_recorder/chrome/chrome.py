@@ -47,8 +47,9 @@ class Chrome:
       the main render window — a bar plus a sandboxed site iframe.
     """
 
-    def __init__(self, config: ChromeConfig | None = None) -> None:
+    def __init__(self, config: ChromeConfig | None = None, *, bare_popups: bool = False) -> None:
         self.config = config or ChromeConfig()
+        self.bare_popups = bare_popups
         body = files("guidebot_recorder.chrome").joinpath("chrome.js").read_text(encoding="utf-8")
         appearance = {
             "showUrl": self.config.show_url,
@@ -61,7 +62,12 @@ class Chrome:
             "minimizeColor": self.config.minimize_color,
             "maximizeColor": self.config.maximize_color,
         }
-        prelude = f"window.__guidebot_chrome_config = {json.dumps(appearance)};\n"
+        # ``barePopups`` suppresses the legacy in-DOM padding bar on popup-site
+        # documents: floating popups are framed by the post-process compositor,
+        # not the page's own chrome (see PopupConfig.floating). It is a behavior
+        # flag, so it rides on the chrome prelude only, not the shell appearance.
+        prelude_config = {**appearance, "barePopups": bare_popups}
+        prelude = f"window.__guidebot_chrome_config = {json.dumps(prelude_config)};\n"
         self._script = prelude + body
 
         shell_body = files("guidebot_recorder.chrome").joinpath("shell.js").read_text(

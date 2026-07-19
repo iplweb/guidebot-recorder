@@ -623,7 +623,16 @@ async def _compile_step(
     # perform the action (reveals the state for later steps)
     url_before = page.url
     if action == "click":
-        await recorder.click(target, before_click=before_click)
+        try:
+            await recorder.click(target, before_click=before_click)
+        except PlaywrightError:
+            # A "close" button whose onclick calls ``window.close()`` can race the
+            # click and raise TargetClosedError once the page tears down. If the
+            # click closed the page, its intent succeeded — swallow it and let the
+            # caller observe the now-closed page (mirrors the apply_readiness
+            # tolerance below). Any other click failure (page still open) raises.
+            if not page.is_closed():
+                raise
     elif action == "hover":
         await recorder.hover(target)
     elif action == "type":
