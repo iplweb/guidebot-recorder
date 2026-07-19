@@ -60,8 +60,8 @@ seamless):
 ```
 base = color=black:size=WxH:rate=FPS:duration=span            # pins output timing (VFR-safe)
 prog = min( min(1, t/D_in), max(0, min(1, (span−t)/D_out)) )  # 0→1 in, 1, 1→0 out
-[base][mid_main] overlay=x='-W*prog':y=0:eof_action=pass      # main slides out left
-[.. ][pop]       overlay=x='W*(1-prog)':y=0:eof_action=pass   # popup slides in from right
+[base][mid_main] overlay=x='-W*prog':y=0:eof_action=repeat    # main slides out left
+[.. ][pop]       overlay=x='W*(1-prog)':y=0:eof_action=repeat # popup slides in from right
 ```
 
 - `mid_main = main[opened:closed]` (from the 3-way split), `pop = [popup_cut]` (the
@@ -74,7 +74,8 @@ prog = min( min(1, t/D_in), max(0, min(1, (span−t)/D_out)) )  # 0→1 in, 1, 1
   `pre? + mid + tail?` (mid always consumed; the `has_pre × has_tail` matrix and the
   no-`null[outv]`-bypass rule are identical to `_compose_floating`).
 - **Shares float's invariants:** CFR-normalize main before the split (backgrounded
-  main may be frameless); the CFR color base + `eof_action=pass` pin timing and
+  main may be frameless); the CFR color base pins length + `eof_action=repeat` holds
+  the last real frame if an input is a frame short (NOT `pass`, which flashes black)
   repeat the popup's last frame (VFR-safe); and the **post-encode duration fail-loud
   guard** (`mux.py`: raise if produced < main_duration − tol) transfers unchanged.
 

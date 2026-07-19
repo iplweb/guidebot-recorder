@@ -590,8 +590,9 @@ def _compose_slide(
     (``fps``) *before* a 3-way split so the always-consumed middle segment
     (``main[opened_at:closed_at]``) fills the whole span even when the
     backgrounded main page emitted no frames there. The mid is two overlays over
-    a CFR colour base (VFR-safe timing, ``eof_action=pass`` repeats the last
-    frame): the main pushes out to the left while the full-size popup pushes in
+    a CFR colour base (VFR-safe timing; ``eof_action=repeat`` holds the last real
+    frame if an input is a frame short of the base): the main pushes out to the
+    left while the full-size popup pushes in
     from the right, tiling exactly (both driven by the same ``prog`` expression,
     so there is never a black seam). ``pre``/``tail`` are verbatim main. Concat
     ``pre? + mid + tail?`` (mid always in). The post-encode duration fail-loud
@@ -657,12 +658,16 @@ def _compose_slide(
     # --- two overlays: main exits left, popup enters right (same prog) --------
     # ``overlay``'s ``W`` is the base width; the two layers cover [-W*prog,
     # W-W*prog) and [W-W*prog, ...) with the same expression/rounding, so they
-    # tile exactly (probe-confirmed: no black seam).
+    # tile exactly (probe-confirmed: no black seam). ``eof_action=repeat`` (NOT
+    # ``pass``, which would show the black base): a fractional ``trim=start=``
+    # can leave ``mid_main``/``popup_cut`` one frame short of the CFR base, and
+    # ``pass`` would flash black on that final frame (right before the tail);
+    # ``repeat`` holds the last real frame while the base pins output length.
     filters.append(
-        f"[base][mid_main]overlay=x='-W*({prog})':y=0:eof_action=pass[wmain]"
+        f"[base][mid_main]overlay=x='-W*({prog})':y=0:eof_action=repeat[wmain]"
     )
     filters.append(
-        f"[wmain][popup_cut]overlay=x='W*(1-({prog}))':y=0:eof_action=pass,"
+        f"[wmain][popup_cut]overlay=x='W*(1-({prog}))':y=0:eof_action=repeat,"
         "settb=AVTB,setsar=1,setpts=PTS-STARTPTS,format=yuv420p[mid]"
     )
 

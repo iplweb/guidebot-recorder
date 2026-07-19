@@ -748,6 +748,32 @@ def test_compose_popup_video_slide_pushes_in_holds_and_out(tmp_path: Path) -> No
     _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
 
 
+def test_compose_popup_video_slide_no_black_flash_at_push_out_end(tmp_path: Path) -> None:
+    # A non-frame-aligned opened/closed leaves the CFR mid one frame short of the
+    # colour base; with eof_action=pass the final mid frame flashed BLACK (the base
+    # showing through) right before the tail. eof_action=repeat holds the last main
+    # frame instead. Interval sits inside the green segment so the push-out returns
+    # to green; assert no near-black frame across the tail of the push-out.
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)  # red 0-1, green 1-2, blue 2-3
+    _make_color_video(popup, "yellow", 1.0)
+
+    # These bounds are deliberately NOT frame-aligned (25fps): they leave the CFR
+    # mid one frame short of the base, which is what triggered the flash. (Verified:
+    # with eof_action=pass the frames at t≈1.97..1.988 render black.)
+    compose_popup_video(
+        main, popup, out, opened_at=1.01, closed_at=1.99, transition="slide", slide_ms=200
+    )
+
+    for offset in (0.02, 0.01, 0.005, 0.002):
+        red, green, blue = _sample_region_rgb(out, 1.99 - offset, _CENTER)
+        assert not (red < 40 and green < 40 and blue < 40), (
+            f"black flash at t={1.99 - offset:.3f}: {(red, green, blue)}"
+        )
+
+
 def test_compose_popup_video_slide_tail_clock_alignment(tmp_path: Path) -> None:
     main = tmp_path / "main.mp4"
     popup = tmp_path / "popup.mp4"
