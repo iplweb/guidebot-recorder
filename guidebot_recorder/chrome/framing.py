@@ -5,15 +5,23 @@ against being framed with the ``X-Frame-Options`` header and the CSP
 ``frame-ancestors`` directive; both must be neutralised on the top-level
 document response.
 
-Redirects: Chromium rejects a route-*fulfilled* 3xx response inside a subframe
-(``net::ERR_BLOCKED_BY_RESPONSE``), so passing a redirect through cannot be
-combined with header stripping in an iframe. We therefore let ``route.fetch``
-follow redirects internally and fulfill the *final* response with its framing
-headers stripped. Consequence: a site that redirects on its entry URL still
-loads, but the frame commits at the entry URL — ``frame.url`` (and the address
-pill) shows the navigated URL, not the post-redirect one. Sub-resources with
-*relative* URLs on a cross-origin-redirecting page resolve against the entry
-URL; sites using absolute URLs (the common case) are unaffected.
+Redirects differ by frame level (Playwright reports both the framed site's
+navigation and a popup's navigation as ``resource_type == "document"``, so the
+resource type cannot tell them apart — the request's frame hierarchy can):
+
+- **Framed site** (a request inside an existing sub-frame): Chromium rejects a
+  route-*fulfilled* 3xx inside a sub-frame (``net::ERR_BLOCKED_BY_RESPONSE``), so
+  a redirect cannot be passed through and header-stripped there. We let
+  ``route.fetch`` follow the chain internally and fulfill the *final* response
+  with framing headers stripped. Consequence: the site still loads, but the
+  frame commits at the entry URL — ``frame.url`` (and the pill) shows the
+  navigated URL, not the post-redirect one, and *relative* sub-resources resolve
+  against the entry URL (absolute URLs, the common case, are unaffected).
+- **Top-level document** (the main window aside — in practice popups): a
+  fulfilled 3xx is legal at the top level, so we pass redirects through
+  unchanged and only strip headers off a 2xx. This keeps popups behaving as
+  before Spec A — the browser performs redirects natively and ``page.url`` stays
+  truthful.
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ from __future__ import annotations
 import re
 
 from playwright.async_api import BrowserContext, Route
+from playwright.async_api import Error as PlaywrightError
 
 _CSP_HEADER = "content-security-policy"
 _XFO_HEADER = "x-frame-options"
@@ -76,20 +85,41 @@ async def install_framing(context: BrowserContext, *, shell_origin: str) -> None
     than hanging the request.
     """
 
+    def _in_subframe(route: Route) -> bool:
+        """True when the request belongs to an existing sub-frame (the framed site).
+
+        A top-level navigation is issued before its frame exists, so ``frame``
+        raises — treat that (a popup) as top-level.
+        """
+        try:
+            return route.request.frame.parent_frame is not None
+        except PlaywrightError:
+            return False
+
     async def handler(route: Route) -> None:
         try:
-            resource_type = route.request.resource_type
-            if resource_type in ("document", "subframe"):
-                # Default max_redirects follows the chain and returns the final
-                # response; a fulfilled 2xx is accepted in a subframe where a
-                # fulfilled 3xx is not.
+            if route.request.resource_type not in ("document", "subframe"):
+                await route.continue_()
+                return
+            if _in_subframe(route):
+                # Follow the chain and fulfill the final 2xx: a fulfilled 3xx is
+                # blocked inside a sub-frame (see module docstring).
                 resp = await route.fetch()
                 await route.fulfill(
                     response=resp,
                     headers=strip_framing_headers(dict(resp.headers), is_document=True),
                 )
             else:
-                await route.continue_()
+                # Top-level (popups): pass 3xx through so the browser redirects
+                # natively and page.url stays truthful; strip a 2xx.
+                resp = await route.fetch(max_redirects=0)
+                if 300 <= resp.status < 400:
+                    await route.fulfill(response=resp)
+                else:
+                    await route.fulfill(
+                        response=resp,
+                        headers=strip_framing_headers(dict(resp.headers), is_document=True),
+                    )
         except Exception:
             await route.continue_()
 

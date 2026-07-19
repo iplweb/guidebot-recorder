@@ -44,7 +44,7 @@ from guidebot_recorder.recorder._debug import (
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
@@ -484,7 +484,7 @@ async def run_render(
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     scenario = load_scenario(path, env)
-    sensitive_values = scenario_sensitive_values(scenario, env)
+    sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cfg = scenario.config
     audio_configs = [cfg.tts, *cfg.audio_tracks]
     providers = {tts.provider for tts in audio_configs}

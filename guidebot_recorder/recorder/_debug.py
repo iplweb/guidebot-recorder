@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
@@ -19,9 +18,15 @@ _REDACTED = "<redacted>"
 
 def scenario_sensitive_values(
     scenario: Scenario,
-    env: Mapping[str, str] | None = None,
+    referenced_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Return input values and expanded navigation secrets for redaction."""
+    """Return input values and expanded navigation secrets for redaction.
+
+    ``referenced_env`` must hold only the env vars the scenario actually
+    references via ``${VAR}`` (see ``scenario.loader.scenario_env_references``).
+    Scanning the whole environment for coincidental substrings would redact
+    unrelated words — e.g. an env value ``cli`` blanking part of ``click``.
+    """
 
     values = {
         step.enter_text.text
@@ -29,8 +34,7 @@ def scenario_sensitive_values(
         if step.enter_text is not None and step.enter_text.text
     }
     navigation_urls = [url for step in scenario.steps if (url := step.navigate_url())]
-    effective_env = os.environ if env is None else env
-    for value in effective_env.values():
+    for value in (referenced_env or {}).values():
         if value and any(value in url for url in navigation_urls):
             values.add(value)
             values.update(url for url in navigation_urls if value in url)
