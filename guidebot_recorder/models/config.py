@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -115,6 +116,26 @@ class PopupConfig(BaseModel):
     backdrop_blur: int = Field(default=0, alias="backdropBlur")
     open_ms: int = Field(default=320, alias="openMs")
     close_ms: int = Field(default=240, alias="closeMs")
+
+    # --- Transition mode. ``None`` derives from ``floating`` (back-compat) ---
+    transition: Literal["cut", "float", "slide"] | None = None
+    slide_ms: int = Field(default=400, alias="slideMs")
+
+    @property
+    def effective_transition(self) -> str:
+        """Resolved transition mode.
+
+        An explicit ``transition`` always wins; when unset it derives from the
+        legacy ``floating`` flag (``True`` → ``"float"``, ``False`` → ``"cut"``).
+        """
+
+        return self.transition or ("float" if self.floating else "cut")
+
+    @property
+    def is_bare(self) -> bool:
+        """Whether the popup is presented without browser chrome (float/slide)."""
+
+        return self.effective_transition in ("float", "slide")
 
 
 class Config(BaseModel):

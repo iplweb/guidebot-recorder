@@ -484,3 +484,93 @@ def test_config_hash_unchanged_when_any_popup_field_changes():
     )
 
     assert config_hash(customized) == config_hash(baseline)
+
+
+def test_popup_transition_defaults():
+    popup = PopupConfig()
+
+    assert popup.transition is None
+    assert popup.slide_ms == 400
+
+
+@pytest.mark.parametrize("mode", ["cut", "float", "slide"])
+def test_popup_transition_parses_each_literal(mode):
+    popup = PopupConfig.model_validate({"transition": mode})
+
+    assert popup.transition == mode
+
+
+def test_popup_slide_ms_parses_from_camelcase_alias():
+    popup = PopupConfig.model_validate({"slideMs": 900})
+
+    assert popup.slide_ms == 900
+
+
+def test_popup_slide_ms_parses_from_snake_case():
+    popup = PopupConfig.model_validate({"slide_ms": 900})
+
+    assert popup.slide_ms == 900
+
+
+def test_popup_rejects_invalid_transition():
+    with pytest.raises(ValidationError):
+        PopupConfig.model_validate({"transition": "fade"})
+
+
+def test_popup_still_forbids_unknown_fields_with_transition():
+    with pytest.raises(ValidationError):
+        PopupConfig.model_validate({"transition": "slide", "unknown": "value"})
+
+
+def test_effective_transition_derives_from_floating_when_unset():
+    assert PopupConfig(floating=True).effective_transition == "float"
+    assert PopupConfig(floating=False).effective_transition == "cut"
+
+
+@pytest.mark.parametrize(
+    ("floating", "transition", "expected"),
+    [
+        (False, "float", "float"),
+        (True, "cut", "cut"),
+        (True, "slide", "slide"),
+        (False, "slide", "slide"),
+        (True, "float", "float"),
+        (False, "cut", "cut"),
+    ],
+)
+def test_effective_transition_explicit_always_wins(floating, transition, expected):
+    popup = PopupConfig(floating=floating, transition=transition)
+
+    assert popup.effective_transition == expected
+
+
+@pytest.mark.parametrize(
+    ("floating", "transition", "expected"),
+    [
+        # driven via floating (transition unset)
+        (True, None, True),
+        (False, None, False),
+        # driven via explicit transition
+        (False, "float", True),
+        (False, "slide", True),
+        (True, "cut", False),
+    ],
+)
+def test_is_bare_matrix(floating, transition, expected):
+    popup = PopupConfig(floating=floating, transition=transition)
+
+    assert popup.is_bare is expected
+
+
+def test_config_hash_unchanged_when_transition_changes():
+    baseline = _cfg(popup=PopupConfig(transition="cut"))
+    changed = _cfg(popup=PopupConfig(transition="slide"))
+
+    assert config_hash(changed) == config_hash(baseline)
+
+
+def test_config_hash_unchanged_when_slide_ms_changes():
+    baseline = _cfg(popup=PopupConfig(slide_ms=400))
+    changed = _cfg(popup=PopupConfig(slide_ms=900))
+
+    assert config_hash(changed) == config_hash(baseline)
