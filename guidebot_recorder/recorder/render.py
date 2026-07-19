@@ -592,10 +592,10 @@ async def run_render(
     # init scripts were swapped, cursor.js would run after ``top`` was shadowed,
     # misidentify as the top window, and mount a duplicate cursor in the frame.
     await overlay.install_context(context)
-    # Floating popups render bare (no in-DOM chrome bar); the compositor frames
-    # them in post. This flips the chrome.js popup-site branch off and gates the
-    # fail-loud "expect chrome" checks on popup pages below.
-    bare_popups = cfg.popup.floating
+    # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
+    # compositor frames them in post. This flips the chrome.js popup-site branch
+    # off and gates the fail-loud "expect chrome" checks on popup pages below.
+    bare_popups = cfg.popup.is_bare
     chrome = Chrome(cfg.chrome, bare_popups=bare_popups) if cfg.chrome.enabled else None
     if chrome is not None:
         await chrome.install_context(context)
@@ -836,7 +836,8 @@ async def run_render(
         popup.opened_at,
         closed_at,
         visual_ready_delay=popup.visual_ready_delay,
-        floating=cfg.popup.floating,
+        transition=cfg.popup.effective_transition,
+        slide_ms=cfg.popup.slide_ms,
         scale=cfg.popup.scale,
         corner_radius=cfg.popup.corner_radius,
         shadow=cfg.popup.shadow,

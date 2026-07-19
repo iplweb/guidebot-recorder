@@ -83,6 +83,24 @@ steps:
 """
 
 
+SLIDE_SCENARIO_TEMPLATE = """\
+config:
+  title: Popup logowania (slide)
+  viewport: {{width: 640, height: 480}}
+  tts: {{provider: fake, voice: v, lang: pl-PL}}
+  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
+  popup: {{transition: slide, slideMs: 200}}
+steps:
+  - navigate: "{url}"
+  - wait: 0.4
+  - teach: "Otwórz popup logowania"
+  - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
+  - wait: 0.4
+  - click: "Zamknij popup logowania"
+  - click: "Zakończ na stronie głównej"
+"""
+
+
 class PopupReasoner:
     def __init__(self) -> None:
         self.calls = 0
@@ -421,6 +439,51 @@ async def test_floating_popup_renders_as_inset_over_visible_main(tmp_path: Path)
             inset_frame_found = True
             break
     assert inset_frame_found, "expected a floating popup inset over a visible main backdrop"
+
+
+async def test_slide_popup_renders_full_frame_over_switched_window(tmp_path: Path) -> None:
+    """Slide mode: the bare popup renders end-to-end (prime stabilizes without a
+    chrome bar) and, unlike float, takes over the FULL frame while active — the
+    window slid in as a push, not an inset."""
+
+    path = tmp_path / "slide-popup.scenario.yaml"
+    path.write_text(
+        SLIDE_SCENARIO_TEMPLATE.format(url=FIXTURE.resolve().as_uri()),
+        encoding="utf-8",
+    )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        compile_page = await browser.new_page()
+        await run_compile(path, compile_page, PopupReasoner())
+        await compile_page.context.close()
+
+        out = tmp_path / "slide-popup.mp4"
+        # A raise here (prime seam regressed) would abort; reaching the asserts
+        # proves the bare-popup prime stabilized without a chrome bar.
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert out.exists()
+    duration = probe_duration(out)
+    assert duration > 0
+    stream_types = _stream_types(out)
+    assert stream_types.count("video") == 1
+    assert stream_types.count("audio") == 1
+
+    # Slide takes over full-frame during the interval: find a frame where NEITHER
+    # centre NOR border is the main page (blue). That distinguishes slide from
+    # float (whose border stays dimmed main-blue) and, combined with the render
+    # completing, proves the slide composite ran with the bare-popup seam intact.
+    full_frame_found = False
+    for fraction in range(1, 40):
+        seconds = duration * fraction / 40
+        centre = _rgb_at_pixel(out, seconds, x=319, y=239)
+        edge = _rgb_at_pixel(out, seconds, x=4, y=239)
+        if not _is_main_blue(centre) and not _is_main_blue(edge):
+            full_frame_found = True
+            break
+    assert full_frame_found, "expected a full-frame popup interval (slide takeover)"
 
 
 async def test_popup_left_open_stays_visible_through_video_end(tmp_path: Path) -> None:
