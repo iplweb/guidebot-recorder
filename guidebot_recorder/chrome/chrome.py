@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from importlib.resources import files
 
 from playwright.async_api import BrowserContext, Frame, Page
@@ -209,6 +210,7 @@ class Chrome:
         *,
         seed: str,
         choreograph: bool,
+        on_sfx: Callable[[str], None] | None = None,
     ) -> None:
         """Drive the address-bar choreography in the shell before navigation.
 
@@ -216,6 +218,8 @@ class Chrome:
         focus); otherwise only the natural typing animation plays. In both cases
         the URL is typed character by character, paced by :func:`typing_schedule`
         so the per-character delay sequence is deterministic across re-renders.
+        ``on_sfx`` (when given) is called ``"click"`` at the pill click and
+        ``"key"`` per typed character, so the address bar is audible like the page.
         """
 
         await self.ensure_shell(page)
@@ -225,6 +229,8 @@ class Chrome:
             cy = rect["y"] + rect["height"] / 2
             await overlay.move_to(page, cx, cy)
             await overlay.ripple(page)
+            if on_sfx is not None:
+                on_sfx("click")
         await page.evaluate("() => window.__guidebot_shell.focusPill()")
         await page.evaluate("() => window.__guidebot_shell.clearUrl()")
         delays = typing_schedule(
@@ -237,5 +243,7 @@ class Chrome:
         for character, delay in zip(url, delays, strict=True):
             await page.wait_for_timeout(delay)
             await page.evaluate("c => window.__guidebot_shell.appendChar(c)", character)
+            if on_sfx is not None:
+                on_sfx("key")
         await page.wait_for_timeout(self.config.pre_navigate_pause_ms)
         await page.evaluate("() => window.__guidebot_shell.blurPill()")
