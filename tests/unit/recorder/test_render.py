@@ -1549,11 +1549,11 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
 
     original_render_step = R._render_step
 
-    async def render_step_spy(*args):
+    async def render_step_spy(*args, **kwargs):
         # args[6] is `kind` (see _render_step's signature). A navigation lands
         # the instant the say step finishes — after its post-narration re-check.
         kind = args[6]
-        result = await original_render_step(*args)
+        result = await original_render_step(*args, **kwargs)
         if kind == "say":
             slide_ref["slide"]._ghost = True
         return result

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -139,6 +140,47 @@ class TypingConfig(BaseModel):
     speed: int = Field(default=60, gt=0)
 
 
+class PopupConfig(BaseModel):
+    """Cosmetic settings for the floating popup-window presentation at ``render``.
+
+    Purely visual — like :class:`CursorConfig`, these never affect the compiled
+    targets, so they are *not* part of :func:`config_hash` and changing them does
+    not require a recompile. Every field has a sensible default; omit the whole
+    ``popup:`` block to keep the built-in look and motion.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    floating: bool = True
+    scale: float = 0.72
+    corner_radius: int = Field(default=14, alias="cornerRadius")
+    shadow: bool = True
+    backdrop_dim: float = Field(default=0.45, alias="backdropDim")
+    backdrop_blur: int = Field(default=0, alias="backdropBlur")
+    open_ms: int = Field(default=320, alias="openMs")
+    close_ms: int = Field(default=240, alias="closeMs")
+
+    # --- Transition mode. ``None`` derives from ``floating`` (back-compat) ---
+    transition: Literal["cut", "float", "slide"] | None = None
+    slide_ms: int = Field(default=400, alias="slideMs")
+
+    @property
+    def effective_transition(self) -> str:
+        """Resolved transition mode.
+
+        An explicit ``transition`` always wins; when unset it derives from the
+        legacy ``floating`` flag (``True`` → ``"float"``, ``False`` → ``"cut"``).
+        """
+
+        return self.transition or ("float" if self.floating else "cut")
+
+    @property
+    def is_bare(self) -> bool:
+        """Whether the popup is presented without browser chrome (float/slide)."""
+
+        return self.effective_transition in ("float", "slide")
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     title: str
@@ -152,6 +194,7 @@ class Config(BaseModel):
     typing: TypingConfig = Field(default_factory=TypingConfig)
     sound: SoundConfig = Field(default_factory=SoundConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
+    popup: PopupConfig = Field(default_factory=PopupConfig)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:

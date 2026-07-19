@@ -186,6 +186,36 @@ async def test_install_context_injects_bar_into_popup_documents(page: Page) -> N
         await popup.close()
 
 
+async def test_bare_popups_suppress_legacy_bar_on_popup_documents(page: Page) -> None:
+    """With ``bare_popups`` the popup-site branch bails before mounting the bar.
+
+    The floating-window compositor frames the popup in post, so no in-DOM chrome
+    (bar host, ``__guidebot_chrome`` API, or reserved padding) must appear on the
+    top-level popup document. The cursor overlay is a separate init script.
+    """
+
+    chrome = Chrome(ChromeConfig(enabled=True), bare_popups=True)
+    await chrome.install_context(page.context)
+    await page.set_content("<button onclick=\"window.open('about:blank')\">open</button>")
+
+    async with page.expect_popup() as popup_info:
+        await page.get_by_role("button", name="open").click()
+    popup = await popup_info.value
+    try:
+        assert await popup.evaluate("() => window.__guidebot_chrome_config.barePopups") is True
+        assert await popup.evaluate("() => window.__guidebot_chrome === undefined") is True
+        assert await popup.locator(HOST_SELECTOR).count() == 0
+
+        await popup.goto("data:text/html,<main>replacement document</main>")
+        await popup.wait_for_load_state()
+        assert await popup.evaluate("() => window.__guidebot_chrome === undefined") is True
+        assert await popup.locator(HOST_SELECTOR).count() == 0
+        padding = await popup.evaluate("() => getComputedStyle(document.documentElement).paddingTop")
+        assert padding in ("0px", "")
+    finally:
+        await popup.close()
+
+
 async def test_ensure_syncs_page_url_and_repairs_spa_wipe_without_padding_growth(
     page: Page,
 ) -> None:

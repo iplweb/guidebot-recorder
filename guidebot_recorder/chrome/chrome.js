@@ -40,6 +40,12 @@
   const Z_INDEX = "2147483644";
 
   const CFG = window.__guidebot_chrome_config || {};
+  // Bare popups (floating-window compositor): frame the popup in post-process,
+  // never with the legacy in-DOM padding bar. Bail before mounting anything —
+  // the cursor overlay is a separate init script and stays on the popup.
+  if (CFG.barePopups) {
+    return;
+  }
   const SHOW_URL = CFG.showUrl ?? true;
   const HEIGHT = CFG.height ?? 56;
   const BAR_COLOR = CFG.barColor ?? "#f3f4f6";

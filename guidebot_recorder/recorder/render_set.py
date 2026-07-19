@@ -12,7 +12,7 @@ from guidebot_recorder.recorder._debug import redact_exception, scenario_sensiti
 from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.reasoner import Reasoner
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.scenario.render_set import RenderSetPlan
 from guidebot_recorder.tts.base import TtsProvider
 
@@ -37,7 +37,9 @@ def _safe_variant_error(
     """Keep explicit input values out of set-level CLI errors."""
 
     try:
-        sensitive_values = scenario_sensitive_values(load_scenario(scenario_path, env), env)
+        sensitive_values = scenario_sensitive_values(
+            load_scenario(scenario_path, env), scenario_env_references(scenario_path, env)
+        )
     except Exception:
         return type(exc).__name__
     return redact_exception(exc, sensitive_values)

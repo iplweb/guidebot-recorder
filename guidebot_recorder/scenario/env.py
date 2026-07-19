@@ -30,6 +30,40 @@ def substitute_env(value: str, env: Mapping[str, str]) -> str:
     return _TOKEN.sub(_repl, value)
 
 
+def _substitutable_values(raw: dict) -> list[str]:
+    """Collect the raw ``navigate``/``enterText.text`` strings (pre-substitution)."""
+
+    texts: list[str] = []
+    for step in raw.get("steps", []) or []:
+        if not isinstance(step, dict):
+            continue
+        nav = step.get("navigate")
+        if isinstance(nav, str):
+            texts.append(nav)
+        elif isinstance(nav, dict) and isinstance(nav.get("url"), str):
+            texts.append(nav["url"])
+        enter = step.get("enterText")
+        if isinstance(enter, dict) and isinstance(enter.get("text"), str):
+            texts.append(enter["text"])
+    return texts
+
+
+def referenced_env_names(raw: dict) -> set[str]:
+    """Env var names actually referenced via ``${VAR}`` (only the substitutable fields).
+
+    Only these were expanded into navigation URLs / typed text, so only their
+    values are candidate secrets. This is what redaction must key on — scanning
+    the whole environment for coincidental substrings redacts unrelated words.
+    """
+
+    names: set[str] = set()
+    for text in _substitutable_values(raw):
+        for match in _TOKEN.finditer(text):
+            if match.group(0) != "$${" and match.group(1) is not None:
+                names.add(match.group(1))
+    return names
+
+
 def substitute_scenario_values(raw: dict, env: Mapping[str, str]) -> dict:
     """Zwróć kopię `raw` z `${ENV}` rozwiniętym tylko w `navigate` i `enterText.text`.
 

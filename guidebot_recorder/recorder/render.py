@@ -45,7 +45,7 @@ from guidebot_recorder.recorder._debug import (
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
@@ -94,6 +94,21 @@ def _active_page(main_page: Page, popup: _PopupSession | None) -> Page:
     if popup is not None and not popup.page.is_closed():
         return popup.page
     return main_page
+
+
+def _expect_chrome(chrome: Chrome | None, bare_popups: bool) -> bool:
+    """Whether the legacy in-DOM chrome bar (``[data-guidebot-chrome]``) is expected.
+
+    The bar is a context-wide init script, so ``bare_popups`` (floating) cannot
+    suppress it on the popup alone — it suppresses it on *every* top-level
+    non-shell document, including the main window's transient ``about:blank``
+    warm-up before it becomes the shell. So the legacy bar is expected only when
+    chrome is enabled and popups are not bare. The main window's real chrome is
+    the shell (``install_shell`` / the shell branch of :func:`_ensure_visuals`),
+    which is independent of this flag; the cursor overlay is always expected.
+    """
+
+    return chrome is not None and not bare_popups
 
 
 def _unexpected_pages(
@@ -174,7 +189,13 @@ def _is_shell_page(page: Page) -> bool:
     return page.url.startswith(SHELL_URL)
 
 
-async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -> None:
+async def _ensure_visuals(
+    page: Page,
+    overlay: Overlay,
+    chrome: Chrome | None,
+    *,
+    expect_chrome: bool | None = None,
+) -> None:
     """Restore both DOM overlays in one browser task to avoid a partial frame.
 
     In the shell (main render window) the invariant is reworded: the site iframe
@@ -182,7 +203,14 @@ async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -
     touch them), and the cursor is restored on the shell page. The pill URL is
     deliberately *not* resynced here — that would flip it to the shell sentinel
     URL; the pill is sourced from the site frame only on navigate steps.
+
+    ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
+    bare (floating) popup so the chrome bar/API is not demanded or asserted while
+    the cursor is still ensured.
     """
+
+    if expect_chrome is None:
+        expect_chrome = chrome is not None
 
     if chrome is not None and _is_shell_page(page):
         await chrome.ensure_shell(page)
@@ -202,11 +230,11 @@ async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -
                 )),
             };
         }""",
-        chrome is not None,
+        expect_chrome,
     )
     # Context init scripts normally make both APIs available. Repair a missing
     # controller first; the final mount still happens atomically below.
-    if chrome is not None and not readiness.get("chrome"):
+    if chrome is not None and expect_chrome and not readiness.get("chrome"):
         await chrome.ensure(page)
     if not readiness.get("cursor"):
         await overlay.ensure(page)
@@ -228,7 +256,7 @@ async def _ensure_visuals(page: Page, overlay: Overlay, chrome: Chrome | None) -
             cursor.ensure();
             return cursor.moveTo(x, y, 0);
         }""",
-        [overlay.pos[0], overlay.pos[1], chrome is not None, page.url],
+        [overlay.pos[0], overlay.pos[1], expect_chrome, page.url],
     )
 
 
@@ -237,6 +265,7 @@ async def _prime_visuals(
     overlay: Overlay,
     chrome: Chrome | None,
     *,
+    expect_chrome: bool | None = None,
     timeout: float = _POPUP_DETECTION_SECONDS,
 ) -> float | None:
     """Mount visual layers from the page event, before its first useful frame.
@@ -244,7 +273,15 @@ async def _prime_visuals(
     Chromium can replace a freshly opened ``about:blank`` document without
     rerunning init-script timers. Keep priming until the document root and both
     layers stay stable for one quiescence window, then force a captured frame.
+
+    ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
+    bare (floating) popup so the prime loop does not wait for a
+    ``[data-guidebot-chrome]`` bar that never mounts (the cursor is still
+    required).
     """
+
+    if expect_chrome is None:
+        expect_chrome = chrome is not None
 
     deadline = time.monotonic() + timeout
     marker = f"{time.monotonic_ns()}-{id(page)}"
@@ -263,7 +300,7 @@ async def _prime_visuals(
     }"""
     while not page.is_closed():
         try:
-            status = await page.evaluate(status_script, [marker, chrome is not None])
+            status = await page.evaluate(status_script, [marker, expect_chrome])
             now = time.monotonic()
             complete = (
                 isinstance(status, dict)
@@ -273,13 +310,13 @@ async def _prime_visuals(
                 and status.get("chrome") is True
             )
             if not complete:
-                await _ensure_visuals(page, overlay, chrome)
+                await _ensure_visuals(page, overlay, chrome, expect_chrome=expect_chrome)
                 stable_since = now
             elif stable_since is None:
                 stable_since = now
             elif now - stable_since >= _POPUP_QUIESCENCE_SECONDS:
                 await page.screenshot()
-                final_status = await page.evaluate(status_script, [marker, chrome is not None])
+                final_status = await page.evaluate(status_script, [marker, expect_chrome])
                 if (
                     isinstance(final_status, dict)
                     and final_status.get("sameRoot") is True
@@ -527,7 +564,7 @@ async def run_render(
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     scenario = load_scenario(path, env)
-    sensitive_values = scenario_sensitive_values(scenario, env)
+    sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cfg = scenario.config
     audio_configs = [cfg.tts, *cfg.audio_tracks]
     providers = {tts.provider for tts in audio_configs}
@@ -602,7 +639,11 @@ async def run_render(
     await overlay.install_context(context)
     slide = SlideOverlay()
     await slide.install_context(context)
-    chrome = Chrome(cfg.chrome) if cfg.chrome.enabled else None
+    # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
+    # compositor frames them in post. This flips the chrome.js popup-site branch
+    # off and gates the fail-loud "expect chrome" checks on popup pages below.
+    bare_popups = cfg.popup.is_bare
+    chrome = Chrome(cfg.chrome, bare_popups=bare_popups) if cfg.chrome.enabled else None
     if chrome is not None:
         await chrome.install_context(context)
         # Strip X-Frame-Options / CSP frame-ancestors so arbitrary sites frame.
@@ -651,10 +692,16 @@ async def run_render(
     def observe_page(candidate: Page) -> None:
         if candidate in observed_pages:
             return
+        # Bare (floating) popups carry no legacy chrome bar; nor does the main
+        # window's about:blank warm-up under that flag. Prime against the cursor
+        # only, or the prime loop deadlocks waiting for a bar that never mounts.
+        expect_chrome = _expect_chrome(chrome, bare_popups)
         observation = _PageObservation(
             opened_at=time.monotonic(),
             video=candidate.video,
-            visual_prime=asyncio.create_task(_prime_visuals(candidate, overlay, chrome)),
+            visual_prime=asyncio.create_task(
+                _prime_visuals(candidate, overlay, chrome, expect_chrome=expect_chrome)
+            ),
         )
         observed_pages[candidate] = observation
 
@@ -765,9 +812,19 @@ async def run_render(
                 await _chrome_show(active_page)
                 card_active = False
                 active_card = None
-                await _ensure_visuals(active_page, overlay, chrome)
+                await _ensure_visuals(
+                    active_page,
+                    overlay,
+                    chrome,
+                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                )
             else:
-                await _ensure_visuals(active_page, overlay, chrome)
+                await _ensure_visuals(
+                    active_page,
+                    overlay,
+                    chrome,
+                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                )
 
             step_segments: list[Segment] = []
             narration_offset = time.monotonic() - anchor
@@ -799,7 +856,12 @@ async def run_render(
             if card_active:
                 await _ensure_card(active_page)
             else:
-                await _ensure_visuals(active_page, overlay, chrome)
+                await _ensure_visuals(
+                    active_page,
+                    overlay,
+                    chrome,
+                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                )
             cached = compiled.actions[index]
             if cached is not None and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
@@ -827,11 +889,17 @@ async def run_render(
                     anchor,
                     observed_pages,
                     _ensure_card,
+                    expect_chrome=_expect_chrome(chrome, bare_popups),
                 )
                 if opened is not None:
                     popup = opened
                     popup.page.set_default_timeout(timeout * 1000)
-                    prepared = await _prepare_popup(popup.page, overlay, chrome)
+                    prepared = await _prepare_popup(
+                        popup.page,
+                        overlay,
+                        chrome,
+                        expect_chrome=_expect_chrome(chrome, bare_popups),
+                    )
                     _sync_popup_close(popup, observed_pages, anchor)
                     if not prepared:
                         raise RenderError("popup zamknął się podczas otwierania")
@@ -939,6 +1007,16 @@ async def run_render(
         popup.opened_at,
         closed_at,
         visual_ready_delay=popup.visual_ready_delay,
+        transition=cfg.popup.effective_transition,
+        slide_ms=cfg.popup.slide_ms,
+        scale=cfg.popup.scale,
+        corner_radius=cfg.popup.corner_radius,
+        shadow=cfg.popup.shadow,
+        backdrop_dim=cfg.popup.backdrop_dim,
+        backdrop_blur=cfg.popup.backdrop_blur,
+        open_ms=cfg.popup.open_ms,
+        close_ms=cfg.popup.close_ms,
+        hold_open_at_end=popup_open_at_end,
     )
     total = probe_duration(composite)
     _assemble_audio_tracks(
@@ -967,11 +1045,16 @@ async def _render_step(
     anchor: float,
     observed_pages: dict[Page, _PageObservation],
     ensure_card: Callable[[Page], Awaitable[None]],
+    *,
+    expect_chrome: bool | None = None,
 ) -> _PopupSession | None:
+    if expect_chrome is None:
+        expect_chrome = chrome is not None
     pages_before_prepare = set(observed_pages)
     # Both visual layers can be removed by an SPA without a navigation.  Check
     # them before every recorded step, including narration-only and timed waits.
-    await _ensure_visuals(page, overlay, chrome)
+    # ``expect_chrome`` is False when ``page`` is a bare (floating) popup.
+    await _ensure_visuals(page, overlay, chrome, expect_chrome=expect_chrome)
 
     # Locators/navigation/reuse run against the recorder's frame: the site iframe
     # for the main window (a Frame distinct from the shell page), the page itself
@@ -1026,13 +1109,16 @@ async def _render_step(
         else:
             # Popup / chrome-disabled: legacy in-DOM pill on the page itself. An
             # instant update happens after goto so redirects are reflected; the
-            # animated variant is typed before goto.
-            if show_url and mode != "instant":
+            # animated variant is typed before goto. A bare (floating) popup has
+            # no legacy bar/API (chrome.js bailed on barePopups), so gate the pill
+            # on ``expect_chrome`` — otherwise chrome.set_url would evaluate an
+            # undefined ``window.__guidebot_chrome`` and throw an opaque TypeError.
+            if show_url and expect_chrome and mode != "instant":
                 await chrome.set_url(page, url, animate=True)
             await recorder.navigate(url)
-            if show_url and mode == "instant":
+            if show_url and expect_chrome and mode == "instant":
                 await chrome.set_url(page, page.url, animate=False)
-        await _ensure_visuals(page, overlay, chrome)
+        await _ensure_visuals(page, overlay, chrome, expect_chrome=expect_chrome)
         return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
@@ -1128,16 +1214,25 @@ async def _prepare_popup(
     page: Page,
     overlay: Overlay,
     chrome: Chrome | None,
+    *,
+    expect_chrome: bool | None = None,
 ) -> bool:
-    """Prepare a new page; translate close races into lifecycle state."""
+    """Prepare a new page; translate close races into lifecycle state.
 
+    ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
+    bare (floating) popup so the chrome bar is not mounted on it (the cursor is
+    still ensured).
+    """
+
+    if expect_chrome is None:
+        expect_chrome = chrome is not None
     if page.is_closed():
         return False
     try:
         await page.bring_to_front()
         await page.wait_for_load_state()
         await overlay.ensure(page)
-        if chrome is not None:
+        if chrome is not None and expect_chrome:
             await chrome.ensure(page)
     except PlaywrightError:
         if page.is_closed():

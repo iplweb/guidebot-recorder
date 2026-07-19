@@ -37,6 +37,7 @@ config:
   audioTracks:
     - {{provider: fake, voice: v-en, lang: en-US, trackLanguage: eng, title: English}}
   chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
+  popup: {{floating: false}}
 steps:
   - navigate: "{url}"
   - wait: 0.4
@@ -55,12 +56,48 @@ config:
   viewport: {{width: 640, height: 480}}
   tts: {{provider: fake, voice: v, lang: pl-PL}}
   chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
+  popup: {{floating: false}}
 steps:
   - navigate: "{url}"
   - wait: 0.4
   - teach: "Otwórz popup logowania"
   - teach: "Wpisz w pole email tekst koparka@poczta.wp.pl"
   - wait: 0.4
+"""
+
+FLOATING_SCENARIO_TEMPLATE = """\
+config:
+  title: Popup logowania (floating)
+  viewport: {{width: 640, height: 480}}
+  tts: {{provider: fake, voice: v, lang: pl-PL}}
+  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
+  popup: {{floating: true, scale: 0.72, backdropDim: 0.5}}
+steps:
+  - navigate: "{url}"
+  - wait: 0.4
+  - teach: "Otwórz popup logowania"
+  - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
+  - wait: 0.4
+  - click: "Zamknij popup logowania"
+  - click: "Zakończ na stronie głównej"
+"""
+
+
+SLIDE_SCENARIO_TEMPLATE = """\
+config:
+  title: Popup logowania (slide)
+  viewport: {{width: 640, height: 480}}
+  tts: {{provider: fake, voice: v, lang: pl-PL}}
+  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
+  popup: {{transition: slide, slideMs: 200}}
+steps:
+  - navigate: "{url}"
+  - wait: 0.4
+  - teach: "Otwórz popup logowania"
+  - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
+  - wait: 0.4
+  - click: "Zamknij popup logowania"
+  - click: "Zakończ na stronie głównej"
 """
 
 
@@ -352,6 +389,101 @@ async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
     for sample_index in (min(main_indices), min(popup_indices), max(main_indices)):
         sample_time = duration * (sample_index + 1) / 20
         assert _is_chrome_gray(_rgb_at_pixel(out, sample_time))
+
+
+async def test_floating_popup_renders_as_inset_over_visible_main(tmp_path: Path) -> None:
+    """Floating mode: the bare popup renders end-to-end (prime stabilizes without
+    a chrome bar) and composites as a centred inset over the still-visible main
+    page — never the full-frame hard cut."""
+
+    path = tmp_path / "floating-popup.scenario.yaml"
+    path.write_text(
+        FLOATING_SCENARIO_TEMPLATE.format(url=FIXTURE.resolve().as_uri()),
+        encoding="utf-8",
+    )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+
+        compile_page = await browser.new_page()
+        await run_compile(path, compile_page, PopupReasoner())
+        await compile_page.context.close()
+
+        out = tmp_path / "floating-popup.mp4"
+        # A raise here (e.g. "nie udało się zainicjować warstw wizualnych") would
+        # mean the bare-popup prime seam regressed; reaching the asserts proves it
+        # stabilized without a [data-guidebot-chrome] bar on the popup page.
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert out.exists()
+    duration = probe_duration(out)
+    assert duration > 0
+    stream_types = _stream_types(out)
+    assert stream_types.count("video") == 1
+    assert stream_types.count("audio") == 1
+
+    # Sample centre vs left edge across the timeline. The defining property of the
+    # floating composite is that the dimmed MAIN page (blue) shows at the border
+    # while the popup (not blue) fills the centre inset. A hard cut would paint the
+    # popup edge-to-edge, so the border is never the main page during the popup
+    # interval. We key on the main-blue backdrop rather than the popup's exact
+    # centre colour, which depends on how the popup content renders (fonts/layout
+    # differ across platforms) and is not a reliable single-pixel signal.
+    inset_frame_found = False
+    for fraction in range(1, 40):
+        seconds = duration * fraction / 40
+        centre = _rgb_at_pixel(out, seconds, x=319, y=239)
+        edge = _rgb_at_pixel(out, seconds, x=4, y=239)
+        if _is_main_blue(edge) and not _is_main_blue(centre):
+            inset_frame_found = True
+            break
+    assert inset_frame_found, "expected a floating popup inset over a visible main backdrop"
+
+
+async def test_slide_popup_renders_full_frame_over_switched_window(tmp_path: Path) -> None:
+    """Slide mode: the bare popup renders end-to-end (prime stabilizes without a
+    chrome bar) and, unlike float, takes over the FULL frame while active — the
+    window slid in as a push, not an inset."""
+
+    path = tmp_path / "slide-popup.scenario.yaml"
+    path.write_text(
+        SLIDE_SCENARIO_TEMPLATE.format(url=FIXTURE.resolve().as_uri()),
+        encoding="utf-8",
+    )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        compile_page = await browser.new_page()
+        await run_compile(path, compile_page, PopupReasoner())
+        await compile_page.context.close()
+
+        out = tmp_path / "slide-popup.mp4"
+        # A raise here (prime seam regressed) would abort; reaching the asserts
+        # proves the bare-popup prime stabilized without a chrome bar.
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert out.exists()
+    duration = probe_duration(out)
+    assert duration > 0
+    stream_types = _stream_types(out)
+    assert stream_types.count("video") == 1
+    assert stream_types.count("audio") == 1
+
+    # Slide takes over full-frame during the interval: find a frame where NEITHER
+    # centre NOR border is the main page (blue). That distinguishes slide from
+    # float (whose border stays dimmed main-blue) and, combined with the render
+    # completing, proves the slide composite ran with the bare-popup seam intact.
+    full_frame_found = False
+    for fraction in range(1, 40):
+        seconds = duration * fraction / 40
+        centre = _rgb_at_pixel(out, seconds, x=319, y=239)
+        edge = _rgb_at_pixel(out, seconds, x=4, y=239)
+        if not _is_main_blue(centre) and not _is_main_blue(edge):
+            full_frame_found = True
+            break
+    assert full_frame_found, "expected a full-frame popup interval (slide takeover)"
 
 
 async def test_popup_left_open_stays_visible_through_video_end(tmp_path: Path) -> None:

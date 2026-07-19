@@ -4,7 +4,22 @@ from dataclasses import dataclass
 
 from guidebot_recorder.models.config import ChromeConfig, Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Step
-from guidebot_recorder.recorder.render import _render_step
+from guidebot_recorder.recorder.render import _expect_chrome, _render_step
+
+
+def test_expect_chrome_tracks_the_legacy_bar() -> None:
+    chrome = object()  # any non-None controller stand-in
+
+    # Chrome disabled → the legacy bar never exists.
+    assert _expect_chrome(None, False) is False
+    assert _expect_chrome(None, True) is False
+
+    # Chrome enabled, non-floating → legacy bar expected (context-wide).
+    assert _expect_chrome(chrome, False) is True
+
+    # Floating (bare) popups suppress the legacy bar everywhere — including the
+    # main window's about:blank warm-up; its real chrome is the shell.
+    assert _expect_chrome(chrome, True) is False
 
 
 @dataclass
@@ -138,3 +153,53 @@ async def test_hidden_url_skips_both_animated_and_instant_updates() -> None:
 
     assert not any(event[0] == "chrome.set_url" for event in events)
     assert ("recorder.navigate", "https://example.com/base/login") in events
+
+
+async def test_bare_popup_step_ensures_cursor_but_not_chrome() -> None:
+    """A bare (floating) popup must restore the cursor without demanding chrome."""
+
+    events: list[tuple] = []
+    page = FakePage()
+    overlay = FakeOverlay(events)
+    chrome = FakeChrome(events)
+    recorder = FakeRecorder(page, events, "unused")
+    step = Step(say="hi")
+    scenario = _scenario(step)
+
+    await _render_step(
+        page,
+        recorder,
+        overlay,
+        chrome,
+        scenario,
+        step,
+        "say",
+        0,
+        None,
+        0.0,
+        {},
+        _noop_ensure_card,
+        expect_chrome=False,
+    )
+
+    assert ("overlay.ensure", "about:blank") in events
+    assert not any(event[0] == "chrome.ensure" for event in events)
+
+
+async def test_non_bare_step_ensures_chrome() -> None:
+    """The default (non-bare) path still repairs the chrome bar on every step."""
+
+    events: list[tuple] = []
+    page = FakePage()
+    overlay = FakeOverlay(events)
+    chrome = FakeChrome(events)
+    recorder = FakeRecorder(page, events, "unused")
+    step = Step(say="hi")
+    scenario = _scenario(step)
+
+    await _render_step(
+        page, recorder, overlay, chrome, scenario, step, "say", 0, None, 0.0, {}, _noop_ensure_card
+    )
+
+    assert ("chrome.ensure", "about:blank") in events
+    assert ("overlay.ensure", "about:blank") in events
