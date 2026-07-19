@@ -262,6 +262,29 @@ def _stream_types(path: Path) -> list[str]:
     return proc.stdout.split()
 
 
+def _frame_count(path: Path) -> int:
+    """Return the decoded video frame count of *path* (via ffprobe)."""
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return int(proc.stdout.strip())
+
+
 def _video_codec(path: Path) -> str:
     proc = subprocess.run(
         [
@@ -687,6 +710,187 @@ def test_compose_popup_video_floating_false_is_a_hard_cut(tmp_path: Path) -> Non
     compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, floating=False)
 
     assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+# Two strips either side of the sliding boundary during a push (320px wide frame):
+# a left strip (main, still on screen) and a right strip (popup, entering).
+_LEFT_STRIP = "40:40:40:100"
+_RIGHT_STRIP = "40:40:240:100"
+
+
+def test_compose_popup_video_slide_pushes_in_holds_and_out(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)  # red 0-1s, green 1-2s, blue 2-3s
+    _make_color_video(popup, "yellow", 1.0)
+
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, transition="slide", slide_ms=200
+    )
+
+    # Full-length film, one H.264 encode, CFR frame count.
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    assert _video_codec(out) == "h264"
+    assert _frame_count(out) == pytest.approx(round(25 * 3.0), abs=3)
+    # Pre/tail are the verbatim main page.
+    _assert_rgb(_sample_region_rgb(out, 0.5, None), (255, 0, 0))
+    _assert_rgb(_sample_region_rgb(out, 2.5, None), (0, 0, 255))
+    # During the push-in a single frame shows BOTH layers: green main still on the
+    # left, yellow popup entering on the right (a moving boundary, not a cut).
+    _assert_rgb(_sample_region_rgb(out, 1.1, _LEFT_STRIP), (0, 255, 0))
+    _assert_yellow(_sample_region_rgb(out, 1.1, _RIGHT_STRIP))
+    # Mid hold is FULL-FRAME popup: centre AND border are both popup yellow
+    # (unlike float, where the border stays dimmed main).
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+def test_compose_popup_video_slide_tail_clock_alignment(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, transition="slide", slide_ms=200
+    )
+
+    # A frame sampled just after closed_at must equal main's colour at that time:
+    # main is blue from 2s, so an offset/time-warp in the tail would show green.
+    _assert_rgb(_sample_region_rgb(out, 2.05, None), (0, 0, 255))
+
+
+def test_compose_popup_video_slide_hold_open_at_end(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 2.0)
+
+    # Popup open to end-of-main: no tail, no push-out; hold full-frame to the end.
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        opened_at=2.0,
+        closed_at=3.0,
+        transition="slide",
+        slide_ms=200,
+        hold_open_at_end=True,
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    # Pre is verbatim main (red then green).
+    _assert_rgb(_sample_region_rgb(out, 0.5, None), (255, 0, 0))
+    _assert_rgb(_sample_region_rgb(out, 1.5, None), (0, 255, 0))
+    # Last frame is full-frame popup (no push-out revealing main): centre + border.
+    _assert_yellow(_sample_region_rgb(out, 2.9, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 2.9, _BORDER))
+
+
+def test_compose_popup_video_slide_no_pre_renders(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    # Popup opens at t~0: no pre segment, mid + tail only. Still pushes in.
+    compose_popup_video(
+        main, popup, out, opened_at=0.0, closed_at=1.0, transition="slide", slide_ms=200
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_yellow(_sample_region_rgb(out, 0.5, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 0.5, _BORDER))
+    _assert_rgb(_sample_region_rgb(out, 2.5, None), (0, 0, 255))
+
+
+def test_compose_popup_video_slide_zero_ms_renders(tmp_path: Path) -> None:
+    # slide_ms=0 (a valid "no slide" config) must not divide by zero (t/0): both
+    # D_in and D_out collapse to 0, so prog is constant 1 (full-frame the whole mid).
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, transition="slide", slide_ms=0
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+def test_compose_popup_video_slide_clamps_short_interval(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 0.5)
+
+    # span (0.3s) < 2 x slide_ms (0.4s): D_in/D_out must clamp, not overrun.
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=1.3, transition="slide", slide_ms=200
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_region_rgb(out, 0.5, None), (255, 0, 0))
+    _assert_rgb(_sample_region_rgb(out, 2.5, None), (0, 0, 255))
+
+
+def test_compose_popup_video_transition_cut_matches_default(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    # transition="cut" reproduces today's hard cut (main -> full-frame popup -> main).
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, transition="cut")
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_rgb(out, 0.5), (255, 0, 0))
+    _assert_rgb(_sample_rgb(out, 1.5), (255, 255, 0))
+    _assert_rgb(_sample_rgb(out, 2.5), (0, 0, 255))
+
+
+def test_compose_popup_video_transition_float_matches_floating(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    # transition="float" reproduces Spec B: scaled popup inset over dimmed main.
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, transition="float")
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    _assert_rgb(_sample_region_rgb(out, 0.5, None), (255, 0, 0))
+    _assert_rgb(_sample_region_rgb(out, 2.5, None), (0, 0, 255))
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+    _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+def test_compose_popup_video_explicit_transition_overrides_floating(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    # An explicit transition wins over the deprecated floating alias.
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, transition="cut"
+    )
+
+    # Hard cut: the border is full popup yellow, not the dimmed backdrop float draws.
     _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
     _assert_yellow(_sample_region_rgb(out, 1.5, _BORDER))
 
