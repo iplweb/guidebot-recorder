@@ -19,6 +19,8 @@ config:
     enabled: true
     showUrl: true
     typeOnNavigate: true
+  # Optional: how the login pop-up is shown — cut | float (default) | slide
+  # popup: { transition: slide }
 steps:
   - say: "I'll show you how to reach the login on the Onet portal. We start on the home page."
 

@@ -63,7 +63,8 @@ steps:
 | `tts` | Yes | object | Narration settings and cache identity. |
 | `audioTracks` | No | list / `[]` | Alternate narration streams for the same visual flow. |
 | `cursor` | No | object / built-in defaults | Visual cursor appearance and motion. |
-| `chrome` | No | object / disabled | Optional browser-bar overlay used only during render. |
+| `chrome` | No | object / disabled | Optional browser-bar shell used only during render. |
+| `popup` | No | object / built-in defaults | How a pop-up window is composited into the film (render-only). |
 | `typing` | No | object / instant fill | Character-by-character input animation, render-only. |
 | `sound` | No | object / disabled | Opt-in built-in click/key sound effects, render-only. |
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
@@ -184,9 +185,11 @@ omitting `click` entirely keeps the existing look.
 
 ### `chrome`
 
-The optional macOS-style browser bar is a render-only overlay. It is disabled by
-default, and none of its fields participates in the target config hash. Changing it
-does not require recompilation.
+The optional macOS-style browser bar is an **iframe shell** rendered only during
+render. It is disabled by default. The target site renders inside an `<iframe>`
+mounted **below** the bar, so the bar can never obscure page content — this is a
+structural guarantee, not top padding. With chrome enabled, the site's layout
+viewport becomes `width × (height − chrome.height)`.
 
 ```yaml
 chrome:
@@ -200,7 +203,7 @@ chrome:
 | `enabled` | `false` | Draw the browser bar. |
 | `showUrl` | `true` | Show the address pill. When false, URL typing and its delay are disabled. |
 | `typeOnNavigate` | `true` | Type navigation URLs that have no explicit step-level `type` override. |
-| `height` | `56` | Bar height in pixels; must be greater than zero. |
+| `height` | `56` | Bar height in pixels; must be greater than zero. Shrinks the site viewport. |
 | `barColor` | `#f3f4f6` | Bar background CSS color. |
 | `textColor` | `#374151` | Address text CSS color. |
 | `radius` | `12` | Corner radius in pixels; must be non-negative. |
@@ -208,14 +211,32 @@ chrome:
 | `closeColor` | `#ff5f57` | Close-dot CSS color. |
 | `minimizeColor` | `#febc2e` | Minimize-dot CSS color. |
 | `maximizeColor` | `#28c840` | Maximize-dot CSS color. |
+| `interactOnNavigate` | `true` | On a navigate step the cursor glides to the address pill, clicks, the pill takes a focused look, then the URL is typed. |
+| `charDelayMs` | `110` | Base per-character typing delay in milliseconds. |
+| `charJitterMs` | `55` | Random jitter added to each character delay, in milliseconds. |
+| `segmentPauseMs` | `180` | Pause between URL segments, in milliseconds. |
+| `preNavigatePauseMs` | `400` | Pause after typing completes and before the load, in milliseconds. |
+| `focusColor` | `#3b82f6` | Focused-pill accent CSS color. |
+| `showCaret` | `true` | Show a blinking caret in the focused pill while typing. |
 
-The overlay adds top padding to the document, so it reduces the page's available
-layout area inside the same configured video viewport. The displayed address is
-synchronized after navigation and when the overlay is ensured, not continuously for
-every History API change. Query strings and fragments can appear in the recording;
-set `showUrl: false` for secret-bearing URLs. The overlay is installed on the initial
-`about:blank` page; put the first `navigate` before introductory narration if you do
-not want that blank address visible during the intro.
+Most chrome fields are cosmetic and stay **outside** the config hash, so tweaking
+them never forces a recompile. The two exceptions are `enabled` and `height`: both
+change the compiled site viewport (the iframe is `height − chrome.height` tall), so
+they **do** participate in the config hash — toggling chrome on or off, or changing
+its height, forces a recompile. The typing and interaction fields
+(`interactOnNavigate`, `charDelayMs`, `charJitterMs`, `segmentPauseMs`,
+`preNavigatePauseMs`, `focusColor`, `showCaret`) are render-only visuals and stay
+outside the hash.
+
+To load arbitrary sites inside the iframe, the render step strips the
+`X-Frame-Options` header and the CSP `frame-ancestors` directive from responses and
+blocks service workers during render. A site that redirects on its entry URL loads
+at that entry URL, and the pill shows the navigated URL, not the post-redirect one.
+The displayed address is synchronized after navigation and when the shell is ensured,
+not continuously for every History API change. Query strings and fragments can appear
+in the recording; set `showUrl: false` for secret-bearing URLs. The shell is
+installed on the initial `about:blank` page; put the first `navigate` before
+introductory narration if you do not want that blank address visible during the intro.
 
 Unknown fields are rejected. `height` must be positive and `radius` non-negative;
 color strings are passed through as CSS values without validating CSS syntax.
@@ -258,6 +279,51 @@ identical white bootstrap.
 | `notes` | none | Optional additional notes text. |
 
 The card is built from `config.title` plus `intro.subtitle` and `intro.notes`.
+
+### `popup`
+
+The optional `popup` object controls how a pop-up window (see
+[Pop-up behavior](#pop-up-behavior)) is composited into the film. It is render-only:
+like `cursor`, **none** of its fields participates in the config hash, so changing it
+never requires a recompile.
+
+```yaml
+popup:
+  transition: slide
+  slideMs: 400
+```
+
+`transition` selects how the pop-up appears:
+
+- `cut` — a hard cut to the full-frame pop-up recording (the original behavior).
+- `float` — the pop-up is a rounded floating window with a drop shadow over the
+  **dimmed** main page, which stays visible behind it; it fades in and out.
+- `slide` — the pop-up slides in as a **full-frame** window (push-left: the main
+  page exits left, the pop-up enters from the right), holds full-frame while active,
+  then slides out on close.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `transition` | derived from `floating` | `cut`, `float`, or `slide` (see above). |
+| `floating` | `true` | Deprecated bool alias: `true` → `float`, `false` → `cut`. An explicit `transition` wins. |
+| `scale` | `0.72` | `float`: floating window size as a fraction of the viewport. |
+| `cornerRadius` | `14` | `float`: window corner radius in pixels. |
+| `shadow` | `true` | `float`: draw the drop shadow. |
+| `backdropDim` | `0.45` | `float`: opacity of the dark backdrop over the main page. |
+| `backdropBlur` | `0` | `float`: backdrop blur radius in pixels. |
+| `openMs` | `320` | `float`: fade-in duration in milliseconds. |
+| `closeMs` | `240` | `float`: fade-out duration in milliseconds. |
+| `slideMs` | `400` | `slide`: slide-in/slide-out duration in milliseconds. |
+
+Composited pop-ups (`float` and `slide`) render **bare**: the pop-up window itself
+has no address bar — only the compositor frame is drawn.
+
+!!! note "Known limitation"
+
+    The pop-up uses the size its `window.open(...)` call requested. If that is
+    smaller than the video viewport, the framed or full-frame window shows empty
+    space around the pop-up content. Forcing the pop-up to fill the viewport is a
+    planned improvement.
 
 ## `steps`
 
