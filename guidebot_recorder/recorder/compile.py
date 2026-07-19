@@ -64,7 +64,7 @@ from guidebot_recorder.resolver.validate import (
     validate_compile_time,
 )
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
 _MAX_REPROMPT = 2
 _POPUP_DETECTION_SECONDS = 1.0
@@ -269,7 +269,7 @@ async def run_compile(
 ) -> None:
     path = Path(path)
     scenario = load_scenario(path, env)
-    sensitive_values = scenario_sensitive_values(scenario, env)
+    sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cfg = scenario.config
     chash = config_hash(cfg)
     # CRUCIAL: the same viewport as render, otherwise frozen positions do not match.

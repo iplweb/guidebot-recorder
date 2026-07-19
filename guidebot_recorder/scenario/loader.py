@@ -15,7 +15,7 @@ from pathlib import Path
 from ruamel.yaml import YAML
 
 from guidebot_recorder.models.scenario import Scenario
-from guidebot_recorder.scenario.env import substitute_scenario_values
+from guidebot_recorder.scenario.env import referenced_env_names, substitute_scenario_values
 
 
 def _to_plain(node):
@@ -35,15 +35,31 @@ def _to_plain(node):
     return str(node)
 
 
-def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Scenario:
-    """Load and validate the source scenario at ``path`` (``env`` defaults to os.environ)."""
-    path = Path(path)
-    if env is None:
-        env = os.environ
-
+def _read_raw(path: Path) -> dict:
+    """Read the scenario YAML into plain Python types (``${ENV}`` still intact)."""
     yaml = YAML(typ="safe")
     data = yaml.load(path.read_text(encoding="utf-8"))
+    return _to_plain(data)
 
-    raw = _to_plain(data)
+
+def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Scenario:
+    """Load and validate the source scenario at ``path`` (``env`` defaults to os.environ)."""
+    if env is None:
+        env = os.environ
+    raw = _read_raw(Path(path))
     substituted = substitute_scenario_values(raw, env)
     return Scenario.model_validate(substituted)
+
+
+def scenario_env_references(
+    path: Path | str, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Return ``{name: env[name]}` for env vars the scenario references via ``${VAR}``.
+
+    Only these values were expanded into navigation URLs / typed text, so only
+    they are candidate secrets for redaction (see ``referenced_env_names``).
+    """
+    if env is None:
+        env = os.environ
+    names = referenced_env_names(_read_raw(Path(path)))
+    return {name: env[name] for name in names if name in env}
