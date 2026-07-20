@@ -144,7 +144,10 @@ def render_cmd(
     hold_frame: bool | None = typer.Option(
         None,
         "--hold-frame/--no-hold-frame",
-        help="Zamroź klatkę na czas narracji zamiast czekać w czasie rzeczywistym.",
+        help=(
+            "Zamroź klatkę na czas narracji zamiast czekać w czasie rzeczywistym "
+            "(domyślnie z konfiguracji)."
+        ),
     ),
     hold_frame_settle: float | None = typer.Option(
         None,
