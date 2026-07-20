@@ -1165,10 +1165,21 @@ async def _ensure_visuals(
             return {cursor: true, chrome: true, mounted: true};
         }"""
     args = [overlay.pos[0], overlay.pos[1], expect_chrome, page.url, False]
-    readiness = await page.evaluate(
-        ensure_script,
-        args,
-    )
+    try:
+        readiness = await page.evaluate(ensure_script, args)
+    except PlaywrightError as exc:
+        # A prior click can trigger a navigation/reload the recorder never asked
+        # for — e.g. a cookie banner whose accept runs `window.location.reload()`,
+        # or a link that leaves for an external login. The next step's visual
+        # mount then races the in-flight document swap and the context is
+        # destroyed. Wait for the replacement document and retry once, re-reading
+        # the URL for the fresh context. Mirrors the opener-settle retry in
+        # `_prepare_main_after_popup_close`. A closed page is a real failure.
+        if page.is_closed():
+            raise RenderError("okno zamknęło się w trakcie montażu warstw wizualnych") from exc
+        await page.wait_for_load_state()
+        args[3] = page.url
+        readiness = await page.evaluate(ensure_script, args)
     if readiness.get("mounted"):
         return
     # Context init scripts normally make both APIs available. Repair a missing
