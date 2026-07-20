@@ -2124,6 +2124,9 @@ async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
             steps:
               - say: "Pierwszy."
               - say: "Drugi."
+              - say: "Trzeci."
+              - say: "Czwarty."
+              - say: "Piaty."
             """
         ),
         encoding="utf-8",
@@ -2149,13 +2152,17 @@ async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
 
     assert seen, "no freezes were recorded at the minimum legal settle"
     timeline = seen[0]
-    # Two 3.0s narrations, almost none of it paid in real time: the finished
+    # Five 3.0s narrations, almost none of it paid in real time: the finished
     # film is well past what the browser actually recorded, and the file on
     # disk is exactly what the model promised — the same shape of assertion
     # `test_hold_frame_film_matches_the_model_exactly` makes, at the opposite
     # (minimum legal) end of the settle range.
     assert timeline.source_frames < timeline.virtual_frames
     assert probe_frame_count(out) == timeline.virtual_frames
+    # Five steps at a two-frame settle land only a frame or two apart, which is
+    # the shape that used to lose a frame in the concat stage — see
+    # `test_closely_spaced_freezes_stay_frame_exact`. Two steps did not reach it.
+    assert len(timeline.edits) >= 3
 
 
 def test_build_timeline_merges_two_freezes_on_the_same_frame() -> None:

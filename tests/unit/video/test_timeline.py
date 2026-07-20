@@ -158,12 +158,11 @@ def test_rejects_non_positive_source_frames() -> None:
 def test_filtergraph_for_a_single_freeze() -> None:
     tl = Timeline.build([TimeEdit(at=75, kind="freeze", frames=59)], source_frames=148)
     assert build_filtergraph(tl) == (
-        "[0:v]fps=25,split=3[s0][s1][s2];"
-        "[s0]trim=start_frame=0:end_frame=75,setpts=PTS-STARTPTS[v0];"
-        "[s1]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,"
-        "tpad=stop_mode=clone:stop=59[v1];"
-        "[s2]trim=start_frame=76,setpts=PTS-STARTPTS[v2];"
-        "[v0][v1][v2]concat=n=3:v=1:a=0[v]"
+        "[0:v]fps=25,split=2[s0][s1];"
+        "[s0]trim=start_frame=0:end_frame=76,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=59[v0];"
+        "[s1]trim=start_frame=76,setpts=PTS-STARTPTS[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0[v]"
     )
 
 
@@ -186,13 +185,12 @@ def test_filtergraph_for_cut_then_freeze() -> None:
         source_frames=148,
     )
     assert build_filtergraph(tl) == (
-        "[0:v]fps=25,split=4[s0][s1][s2][s3];"
+        "[0:v]fps=25,split=3[s0][s1][s2];"
         "[s0]trim=start_frame=0:end_frame=25,setpts=PTS-STARTPTS[v0];"
-        "[s1]trim=start_frame=50:end_frame=75,setpts=PTS-STARTPTS[v1];"
-        "[s2]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,"
-        "tpad=stop_mode=clone:stop=59[v2];"
-        "[s3]trim=start_frame=76,setpts=PTS-STARTPTS[v3];"
-        "[v0][v1][v2][v3]concat=n=4:v=1:a=0[v]"
+        "[s1]trim=start_frame=50:end_frame=76,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=59[v1];"
+        "[s2]trim=start_frame=76,setpts=PTS-STARTPTS[v2];"
+        "[v0][v1][v2]concat=n=3:v=1:a=0[v]"
     )
 
 
@@ -205,9 +203,55 @@ def test_filtergraph_rejects_an_empty_timeline() -> None:
 def test_filtergraph_handles_a_freeze_on_the_last_frame() -> None:
     tl = Timeline.build([TimeEdit(at=147, kind="freeze", frames=25)], source_frames=148)
     assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=1[s0];"
+        "[s0]trim=start_frame=0,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=25[v0];"
+        "[v0]concat=n=1:v=1:a=0[v]"
+    )
+
+
+def test_filtergraph_never_emits_a_single_frame_segment_between_freezes() -> None:
+    """Freezes two frames apart must not leave a one-frame segment behind.
+
+    ``concat`` measures an input's frame duration from the frames it receives,
+    so a one-frame input measures as zero-length and the next segment lands on
+    top of it. Folding each freeze into the run it terminates keeps every
+    segment at least two frames long.
+    """
+    tl = Timeline.build(
+        [TimeEdit(at=at, kind="freeze", frames=2) for at in (2, 4, 7)],
+        source_frames=148,
+    )
+    assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=4[s0][s1][s2][s3];"
+        "[s0]trim=start_frame=0:end_frame=3,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=2[v0];"
+        "[s1]trim=start_frame=3:end_frame=5,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=2[v1];"
+        "[s2]trim=start_frame=5:end_frame=8,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=2[v2];"
+        "[s3]trim=start_frame=8,setpts=PTS-STARTPTS[v3];"
+        "[v0][v1][v2][v3]concat=n=4:v=1:a=0[v]"
+    )
+
+
+def test_filtergraph_rejects_a_lone_kept_frame_before_a_cut() -> None:
+    """The one shape freezes cannot produce, and concat cannot render."""
+    tl = Timeline.build(
+        [TimeEdit(at=0, kind="freeze", frames=2), TimeEdit(at=2, kind="cut", frames=5)],
+        source_frames=148,
+    )
+    with pytest.raises(TimelineError, match="single frame"):
+        build_filtergraph(tl)
+
+
+def test_filtergraph_allows_a_lone_kept_frame_as_the_final_segment() -> None:
+    """Nothing is concatenated after the last segment, so its length is free."""
+    tl = Timeline.build([TimeEdit(at=146, kind="freeze", frames=2)], source_frames=148)
+    assert build_filtergraph(tl) == (
         "[0:v]fps=25,split=2[s0][s1];"
-        "[s0]trim=start_frame=0:end_frame=147,setpts=PTS-STARTPTS[v0];"
-        "[s1]trim=start_frame=147:end_frame=148,setpts=PTS-STARTPTS,"
-        "tpad=stop_mode=clone:stop=25[v1];"
+        "[s0]trim=start_frame=0:end_frame=147,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=2[v0];"
+        "[s1]trim=start_frame=147,setpts=PTS-STARTPTS[v1];"
         "[v0][v1]concat=n=2:v=1:a=0[v]"
     )

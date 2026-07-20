@@ -151,26 +151,36 @@ class Timeline:
         return frames_to_seconds(self.virtual_frames)
 
 
-def _segments(timeline: Timeline) -> list[tuple[str, int, int]]:
+def _segments(timeline: Timeline) -> list[tuple[int, int, int]]:
     """Decompose a timeline into ordered output segments.
 
-    Yields ``("keep", start_frame, end_frame)`` and ``("freeze", at, frames)``.
-    A freeze emits source frame ``[at, at+1)`` a total of ``frames + 1`` times
-    and adds ``frames`` net; the following kept span therefore resumes at
-    ``at + 1``.
+    Yields ``(start_frame, end_frame, pad)``: source frames ``[start, end)``
+    followed by ``pad`` extra copies of frame ``end - 1``. A segment is one
+    contiguous run of the recording; it ends at a cut, at the end of the
+    recording, or at a freeze — and a freeze is exactly "this run's last frame,
+    held ``pad`` frames longer", so it needs no segment of its own.
+
+    Folding the freeze into the run that precedes it is not cosmetic. ``concat``
+    infers each input's duration from the frames it sees, so a single-frame
+    input has no measurable frame duration and advances the running offset by
+    zero — the next segment then starts on top of it and one frame is lost
+    downstream. Emitting the freeze separately produced exactly that: a freeze
+    two frames after its predecessor left a one-frame ``keep`` between them.
+    Folded, a freeze-terminated run is always at least two frames long
+    (one source frame plus at least one clone).
     """
-    out: list[tuple[str, int, int]] = []
+    out: list[tuple[int, int, int]] = []
     cursor = 0
     for edit in timeline.edits:
-        if edit.at > cursor:
-            out.append(("keep", cursor, edit.at))
         if edit.kind == "freeze":
-            out.append(("freeze", edit.at, edit.frames))
+            out.append((cursor, edit.at + 1, edit.frames))
             cursor = edit.at + 1
         else:
+            if edit.at > cursor:
+                out.append((cursor, edit.at, 0))
             cursor = edit.at + edit.frames
     if cursor < timeline.source_frames:
-        out.append(("keep", cursor, timeline.source_frames))
+        out.append((cursor, timeline.source_frames, 0))
     return out
 
 
@@ -183,6 +193,13 @@ def build_filtergraph(timeline: Timeline) -> str:
 
     The leading ``fps=25`` is a no-op on current Playwright output (verified
     frame-for-frame identical) and is kept only as a defensive normaliser.
+
+    No segment but the last may be a single frame: ``concat`` derives an input's
+    frame duration from the frames it receives, so a one-frame input measures as
+    zero-length and the following segment is concatenated on top of it instead of
+    after it. :func:`_segments` cannot produce such a segment from freezes; only
+    a lone kept frame butting up against a cut can, and that is rejected here
+    rather than rendered into a silently mistimed film.
     """
     if timeline.is_empty:
         raise TimelineError("cannot build a filtergraph for an empty timeline")
@@ -192,20 +209,22 @@ def build_filtergraph(timeline: Timeline) -> str:
     splits = "".join(f"[s{i}]" for i in range(count))
     parts = [f"[0:v]fps={FPS},split={count}{splits}"]
 
-    for i, (kind, a, b) in enumerate(segments):
-        if kind == "keep":
-            # The tail segment omits end_frame so it runs to the end of input.
-            bounds = (
-                f"trim=start_frame={a}:end_frame={b}"
-                if b < timeline.source_frames
-                else f"trim=start_frame={a}"
+    for i, (start, end, pad) in enumerate(segments):
+        if end - start + pad < 2 and i < count - 1:
+            raise TimelineError(
+                f"segment [{start}, {end}) would emit a single frame ahead of "
+                f"{count - i - 1} more; concat cannot measure a one-frame input"
             )
-            parts.append(f"[s{i}]{bounds},setpts=PTS-STARTPTS[v{i}]")
-        else:
-            parts.append(
-                f"[s{i}]trim=start_frame={a}:end_frame={a + 1},setpts=PTS-STARTPTS,"
-                f"tpad=stop_mode=clone:stop={b}[v{i}]"
-            )
+        # The final segment omits end_frame so it runs to the end of input.
+        bounds = (
+            f"trim=start_frame={start}:end_frame={end}"
+            if end < timeline.source_frames
+            else f"trim=start_frame={start}"
+        )
+        chain = f"[s{i}]{bounds},setpts=PTS-STARTPTS"
+        if pad:
+            chain += f",tpad=stop_mode=clone:stop={pad}"
+        parts.append(f"{chain}[v{i}]")
 
     labels = "".join(f"[v{i}]" for i in range(count))
     parts.append(f"{labels}concat=n={count}:v=1:a=0[v]")
