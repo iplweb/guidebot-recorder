@@ -96,13 +96,23 @@ Two axes result:
 - **`t_real`** — the Playwright recording axis (short: only settle pauses remain)
 - **`t_virtual`** — the finished film axis (`t_real` plus accumulated edits)
 
-`Timeline` exposes one function, and every timestamp in the system goes through
+`Timeline` exposes one *mapping*, and every timestamp in the system goes through
 it:
 
 ```python
 def to_virtual(self, frame: int) -> int          # frame index -> frame index
 def to_virtual_seconds(self, t_real: float) -> float   # convenience at the boundary
 ```
+
+(The class also carries `build`, `virtual_frames`, `virtual_duration`,
+`is_empty` and `to_json`. The design claim is that there is one mapping — not
+one method.)
+
+Its boundary rule is deliberate and load-bearing: a freeze shifts a timestamp
+only when `edit.at < frame`, **strictly**. A stamp landing exactly on its own
+freeze point is not shifted, because narration begins where the picture stops.
+§5 covers the consequence this rule has for the *following* step, which is where
+the design's one real hole turned out to be.
 
 This is the load-bearing decision. `anchor` feeds three consumers, and they
 split into two groups:
@@ -148,24 +158,47 @@ produce byte-identical output to the float form while removing all boundary
 ambiguity.
 
 - kept span: `trim=start_frame=a:end_frame=b, setpts=PTS-STARTPTS`
-- freeze: `trim` of the single frame `[K, K+1)` + `tpad=stop_mode=clone:stop=N`
+- freeze: the run **ending at** frame `K`, with `tpad=stop_mode=clone:stop=N`
+  appended — `tpad` clones that run's last frame, which is `K` itself
 - cut: **absence** of a span from the kept list
 
 followed by `concat`. Cutting needs no new code branch — it is a missing entry.
 
-Verified working shape (freeze of 59 frames at source frame 75):
+Working shape (freeze of 59 frames at source frame 75):
 
 ```
-[0:v]fps=25,split=3[s0][s1][s2];
-[s0]trim=start_frame=0:end_frame=75,setpts=PTS-STARTPTS[a];
-[s1]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=59[b];
-[s2]trim=start_frame=76,setpts=PTS-STARTPTS[c];
-[a][b][c]concat=n=3:v=1:a=0[v]
+[0:v]fps=25,split=2[s0][s1];
+[s0]trim=start_frame=0:end_frame=76,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=59[a];
+[s1]trim=start_frame=76,setpts=PTS-STARTPTS[b];
+[a][b]concat=n=2:v=1:a=0[v]
 ```
 
-with `-r 25 -vsync cfr`. Note the arithmetic: a freeze at frame `K` of `N`
-frames emits segment `[K, K+1)` a total of `N+1` times and adds `N` net frames;
-the following segment resumes at `K+1`.
+with `-r 25 -vsync cfr`. A freeze adds `N` net frames; the following segment
+resumes at `K + 1`.
+
+**A freeze is folded into the run it terminates rather than emitted as its own
+segment, and that is not cosmetic.** The obvious decomposition — a dedicated
+one-frame `trim=start_frame=75:end_frame=76` segment — is broken: `concat`
+derives an input's duration from the frames it receives (`setpts` having cleared
+the frame-rate link), so a **one-frame input measures as zero length**. `concat`
+then advances its offset by zero and stacks the next segment on top, and
+`-vsync cfr` resolves the collision by dropping a frame.
+
+This was found in production of this very feature: two freezes exactly two
+frames apart left a one-frame kept segment between them and the render failed
+with "produced 404 frames but the timeline models 405". Measured: at n=1 the CFR
+encoder recovers the final file (content verified correct), so the frame count
+alone does **not** detect it — a duplicate PTS at the concat output does.
+Regression coverage must assert PTS at the concat stage, not the output frame
+count.
+
+For the same reason `build_filtergraph` rejects any non-final segment shorter
+than two frames (`TimelineError`). Today only one shape can produce it — a lone
+kept frame butting against a cut — which is unreachable because nothing emits
+cuts yet. Note the asymmetry: `Timeline.build` accepts such a timeline and the
+graph builder rejects it, so the failure lands late. If cuts ever ship, the
+check belongs in `Timeline.build`, or the runs either side need a `select`-based
+merge.
 
 The seam was verified lossless (ffv1 + `framemd5` over every frame): exactly one
 run of identical consecutive frames, of exactly the expected length; every other
@@ -220,9 +253,19 @@ New section in `models/config.py`:
 | Field | Default | Meaning |
 |---|---|---|
 | `hold_frame_for_narration` | `True` | hold a still frame instead of waiting out narration |
-| `hold_frame_settle` | `1.0` | seconds of real time waited before each freeze point |
+| `hold_frame_settle` | `1.0` | seconds of real time waited before each freeze point; floor of `2/FPS` |
 
-CLI: `--no-hold-frame`, `--hold-frame-settle`.
+CLI: `--no-hold-frame`, `--hold-frame-settle`, `--dump-timeline`. The
+hold-frame flag is tri-state — unset defers to the scenario, so it turns holding
+both on and off. Overrides are validated against the same bounds as the config
+fields (`validate_assignment` on the model), so a bad `--hold-frame-settle` is
+rejected before the browser launches.
+
+The `2/FPS` floor: one frame is the smallest interval the axis can represent,
+and a hold beginning before its step has drawn a frame has nothing to hold. That
+argument justifies one frame; the second is a deliberate conservative margin,
+not a proven requirement. **The floor does not prevent narration collision** —
+see the sequence below, where that job belongs to monotonic stamping.
 
 The name's subject is the frame, not the narration — the voice-over plays in
 full; the picture is what stops. `hold` matches existing vocabulary
@@ -251,6 +294,33 @@ of narration costs 1 s of recording instead of 6 s.
 Falling back to real time when `D <= settle` also means short narrations lose
 nothing: there is no freeze to get wrong.
 
+**Step 4, which the first draft of this spec omitted — and that omission was the
+design's one real defect.** The sequence above says where a step's *own* stamps
+go. It says nothing about the *next* step's. A freeze is stamped at frame `F`;
+the following step's narration is stamped a few CDP round-trips later. When that
+work takes less than one frame, both land on `F` — and `to_virtual`'s strict
+`edit.at < frame` rule (§1) then maps the new narration to the **start** of the
+hold, so it plays on top of the previous voice-over.
+
+This was not theoretical. Measured on a real render, eight consecutive 2.0 s
+`say` steps **at the default 1.0 s settle**: two of seven gaps came out at 1.0 s
+instead of 2.0 s — a one-second overlap followed by a second of dead air. Sound
+effects share the root cause.
+
+It survived four reviews because **every guard in this design compares lengths,
+never placements**: the film's total length stayed exactly correct, so the
+frame-count check, the mux tolerance and the narration-overrun guard all passed.
+
+Therefore: every wall-clock reading that becomes a placement goes through a
+single clamped stamping function, `max(seconds_to_frames(now - anchor),
+last_freeze_frame + 1)`. The `+1` is exact rather than generous — it is precisely
+what cancels the double rounding of splitting `D` into settle and remainder.
+Placements are carried as integer frames end to end; seconds reappear only when
+the audio bed is built.
+
+The invariant that must be tested — and that nothing tested until it broke — is
+that **no narration starts before its predecessor ends**.
+
 Consequence worth stating plainly: **defaulting to `True` changes the appearance
 of already-produced films.** Re-rendering an existing scenario yields a still
 frame where the page previously animated under the voice-over. This is intended,
@@ -258,17 +328,40 @@ but it is not a purely performance-neutral change.
 
 ### 6. Guards
 
-Three places assume the audio and video axes are identical; all move to
-`t_virtual`:
+This spec originally predicted that three guards assume the audio and video axes
+are identical and would all need rewriting onto `t_virtual`. **None of them were
+touched.** The layering in §2 makes them correct as they stand, and that is worth
+recording as a property of the design rather than an accident:
 
-- `mux.py:827-834` — audio/video duration comparison, 0.05 s tolerance
-- `render.py:472-478` — "narration exceeds video length" guard
-- `audiobed.py:96` — `-t {total}` timeline length
+- `mux.py` audio/video duration comparison (0.05 s tolerance) — receives the
+  *edited* video, so both sides are already virtual
+- `render.py` "narration exceeds video length" — compares offsets against
+  `total`, both now virtual
+- `mux.py` popup `opened_at`/`closed_at` bounds — correctly stays on the
+  recording axis, because composition precedes editing
 
-Plus validation inside `Timeline` itself, run **before** ffmpeg starts: edits
-sorted, non-overlapping, cuts within recording bounds. Failure raises
-`RenderError` immediately rather than surfacing half an hour later as a
-tolerance mismatch.
+One caveat found in review: the mux tolerance is **not** the safety net it looks
+like. `_assemble_audio_tracks` passes `video_duration=total` rather than probing,
+so that guard compares the model against itself. Before this change `total` came
+from `probe_duration`, which anchored it to reality; the model-based `total`
+removed that anchor silently. Hence the explicit check below.
+
+Guards this design *does* add:
+
+- **`Timeline.build`** — edits sorted, non-overlapping, positive, within bounds.
+  Runs before ffmpeg; fails immediately rather than surfacing as a tolerance
+  mismatch half an hour later.
+- **`_apply_timeline_edits`** — after the ffmpeg stage, asserts
+  `probe_frame_count(edited) == timeline.virtual_frames`, **exact integer
+  equality**, no tolerance. This is the only thing verifying the model against
+  reality, and it earned its place immediately: it caught the `concat`
+  one-frame-segment defect described in §3.
+- **`_build_timeline`** — sanitises collected edits before the model sees them:
+  clamps an `at` at or beyond `source_frames` to the last frame, and merges
+  same-frame freezes by *summing* their holds. Merging is the semantically right
+  answer, not a workaround — if two steps want the picture held at one frame, the
+  film should hold it for the total. With monotonic stamping (§5) the merge path
+  is now reachable only via the end-of-recording clamp; it is kept general.
 
 ### 7. Timeline dump
 
@@ -289,6 +382,22 @@ I/O. Test weight goes there:
   counts, and the sum of edits equals the final length exactly, in frames
 - a scenario with five freezes: total drift is exactly zero (the regression that
   would otherwise trip the `mux.py` 0.05 s guard)
+
+**Length tests are not enough — this is the spec's hardest-won lesson.** Every
+defect found in review produced a film of exactly the right length and was
+invisible to length assertions. Two invariants must be asserted directly:
+
+- **Placement:** no narration starts before its predecessor ends, and no sound
+  effect lands inside a hold. Measured on real renders with consecutive fast
+  steps, where the collision actually occurs.
+- **PTS at the concat stage**, not the final frame count: `-vsync cfr` repairs a
+  single collision in the output file, so the frame count stays right while the
+  intermediate stream is wrong.
+
+Both must be falsified — shown to fail against the unfixed code — or they are
+decoration. One caveat carried forward: the SFX placement test is inherently
+probabilistic (the clamp only engages when consecutive events fall inside one
+frame), so it detects a regression roughly one run in five rather than reliably.
 - filtergraph generation compared against a golden string
 
 Beyond that:
@@ -300,11 +409,14 @@ Beyond that:
 ## Decisions
 
 1. Time becomes data — `video/timeline.py`, one `to_virtual` for all timestamps
-2. Freeze by extracting a recorded frame (`trim` + `tpad=clone`), pixel-identical seam
+2. Freeze by cloning a recorded frame (`tpad=clone` on the run it terminates), pixel-identical seam
 3. Time editing is its own stage, between popup composition and audio mux
 4. Integer frames at 25 fps end to end; ffmpeg gets `tpad=stop=N`, never seconds
 5. `cut` built and tested; hang detection deferred to a separate spec
-6. Enabled by default, 1 s settle, opt-out via `--no-hold-frame`
+6. Enabled by default, 1 s settle (floor `2/FPS`), opt-out via `--no-hold-frame`
+7. Every placement is stamped monotonically past the last freeze — length
+   correctness does not imply placement correctness, and only the latter is
+   audible
 
 ## Rejected alternatives
 
