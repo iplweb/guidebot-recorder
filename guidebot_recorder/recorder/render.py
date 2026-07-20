@@ -370,7 +370,12 @@ async def _prepare_main_after_popup_close(
     chrome: Chrome | None,
     settle_ms: float,
 ) -> None:
-    """Let opener navigation settle before touching its execution context again."""
+    """Let opener navigation settle before touching its execution context again.
+
+    This is the single funnel for "the popup is gone, the main window is active
+    again", so it is also where the cursor handed over to the popup by
+    :func:`_hand_cursor_to_popup` is handed back.
+    """
 
     await page.bring_to_front()
     await Recorder(page, None, settle_ms=settle_ms).apply_readiness("none")
@@ -384,6 +389,32 @@ async def _prepare_main_after_popup_close(
         # cursor restoration. Wait for the replacement document and retry once.
         await page.wait_for_load_state()
         await _ensure_visuals(page, overlay, chrome)
+    await overlay.show(page)
+
+
+async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
+    """Suppress the main window's cursor for as long as the popup is on screen.
+
+    The cursor is a DOM element injected into every top-level document, so a
+    popup mounts its *own* instance — leaving two cursors alive at once. The
+    compositor keeps the main window's video visible around/behind the popup
+    (and fully visible for a floating popup), so the stale main-window cursor
+    would be recorded next to the live one. Only the active window paints a
+    cursor; :func:`_prepare_main_after_popup_close` reverses this.
+
+    ``hide`` is a per-page call on purpose — a context-wide init-script flag
+    (like ``barePopups``) cannot target one window.
+    """
+
+    if main_page.is_closed():
+        return
+    try:
+        await overlay.hide(main_page)
+    except PlaywrightError:
+        # The opener can navigate/close under us while the popup is opening;
+        # the loop's own lifecycle checks report that authoritatively.
+        if not main_page.is_closed():
+            raise
 
 
 def _narration(step: Step) -> str | None:
@@ -1040,6 +1071,9 @@ async def run_render(
                     _sync_popup_close(popup, observed_pages, anchor)
                     if not prepared:
                         raise RenderError("popup zamknął się podczas otwierania")
+                    # The popup now owns the cursor (it mounted its own); stop
+                    # painting a second one in the main window behind it.
+                    await _hand_cursor_to_popup(page, overlay)
                 if page.is_closed():
                     raise RenderError("główne okno zostało zamknięte podczas render")
                 _sync_popup_close(popup, observed_pages, anchor)
