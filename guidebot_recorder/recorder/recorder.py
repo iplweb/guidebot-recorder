@@ -137,6 +137,59 @@ class Recorder:
         if needs_fix:
             await locator.fill(text)
 
+    async def select(self, target: Target, option: str) -> None:
+        """Choose ``option`` (a visible label) from a native ``<select>``.
+
+        A native select's option list is drawn by the OS, so no browser-automation
+        tool can unfurl or screenshot it. With an overlay (render) the cursor
+        glides to the control, ripples, and the value is *stepped* to ``option``
+        with arrow keys so the change is visible on the collapsed control; without
+        one (compile) the value is set directly. Either way the element ends on
+        ``option``, so later steps and the render agree.
+        """
+
+        locator = await self._point_and_prepare(target, click_sound=True)
+        if self.overlay is None:
+            await locator.select_option(label=option)
+            return
+        await self._step_option_visibly(locator, option)
+
+    async def _step_option_visibly(self, locator: Locator, option: str) -> None:
+        await locator.focus()
+        plan = await locator.evaluate(
+            """(el, wanted) => {
+                const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
+                const labels = Array.from(el.options, (o) => norm(o.label || o.textContent));
+                const want = norm(wanted);
+                let target = labels.indexOf(want);
+                if (target < 0) {
+                    const lower = want.toLowerCase();
+                    target = labels.findIndex((l) => l.toLowerCase() === lower);
+                }
+                return { target, current: el.selectedIndex };
+            }""",
+            option,
+        )
+        target_index = plan["target"]
+        if target_index < 0:
+            # Unknown label — let Playwright raise its clear "no option" error.
+            await locator.select_option(label=option)
+            return
+        steps = target_index - plan["current"]
+        # A far jump would drag on arrow-by-arrow; set it directly instead.
+        if abs(steps) > 12:
+            await locator.select_option(index=target_index)
+            return
+        key = "ArrowDown" if steps > 0 else "ArrowUp"
+        for _ in range(abs(steps)):
+            await locator.press(key)
+            if self._on_sfx is not None:
+                self._on_sfx("key")
+            await self.page.wait_for_timeout(140)
+        # Guarantee the final value even if a browser skipped a disabled option.
+        if await locator.evaluate("el => el.selectedIndex") != target_index:
+            await locator.select_option(index=target_index)
+
     async def wait_seconds(self, seconds: float) -> None:
         # A wall-clock pause must survive a popup closing while the pause is in
         # progress; binding it to Page.wait_for_timeout would raise TargetClosedError.

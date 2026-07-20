@@ -678,6 +678,10 @@ async def _compile_step(
         if text is None:
             raise RuntimeError("brak tekstu dla akcji type")
         await recorder.enter_text(target, text)
+    elif action == "select":
+        if step.select is None:
+            raise RuntimeError("brak opcji dla akcji select")
+        await recorder.select(target, step.select.option)
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

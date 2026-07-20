@@ -1721,6 +1721,8 @@ def _compiled_from(step: Step) -> str:
         return step.hover
     if kind == "enterText":
         return step.enter_text.into
+    if kind == "select":
+        return step.select.from_
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok {kind} nie wymaga cachedAction")
@@ -1752,6 +1754,7 @@ def _compiled_action_is_current(
         "click": "click",
         "hover": "hover",
         "enterText": "type",
+        "select": "select",
         "wait": "waitFor",
     }.get(kind)
     if expected_action is not None and action.action != expected_action:
@@ -2796,6 +2799,10 @@ async def _render_step(
         if input_text is None:
             raise RenderError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
         await recorder.enter_text(cached.target, input_text)
+    elif cached.action == "select":
+        if step.select is None:
+            raise RenderError(f"krok {index}: brak opcji dla akcji select — uruchom `compile`")
+        await recorder.select(cached.target, step.select.option)
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

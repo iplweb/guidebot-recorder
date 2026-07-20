@@ -13,7 +13,7 @@ from guidebot_recorder.models.target import Target
 #: reference schema version — a bump forces a re-resolve
 COMPILER_VERSION = 2
 
-ActionKind = Literal["click", "hover", "type", "waitFor"]
+ActionKind = Literal["click", "hover", "type", "waitFor", "select"]
 Expect = Literal["navigation", "idle", "none"]
 WaitState = Literal["visible", "hidden", "enabled"]
 

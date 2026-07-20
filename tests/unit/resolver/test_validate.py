@@ -75,6 +75,25 @@ async def test_validate_compile_time_rejects_ambiguous_substring_match(page):
     assert result.reason == "not_unique"
 
 
+async def test_validate_compile_time_select_accepts_native_select(page):
+    await page.set_content(
+        '<select aria-label="Rodzaj"><option>lista</option><option>tabela</option></select>'
+    )
+
+    result = await validate_compile_time(page, RoleTarget(role="combobox", name="Rodzaj"), "select")
+
+    assert isinstance(result, ValidationOk)
+
+
+async def test_validate_compile_time_select_rejects_non_native_combobox(page):
+    await page.set_content('<div role="combobox" aria-label="Rodzaj" tabindex="0">lista</div>')
+
+    result = await validate_compile_time(page, RoleTarget(role="combobox", name="Rodzaj"), "select")
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "not_select"
+
+
 async def test_build_locator_supports_all_structural_strategies(page):
     await page.set_content(
         """

@@ -26,6 +26,7 @@ ValidationReason: TypeAlias = Literal[
     "not_enabled",
     "not_editable",
     "incompatible_type",
+    "not_select",
     "unsupported_action",
     "dom_changed",
 ]
@@ -121,6 +122,12 @@ async def _is_type_compatible(locator: Locator) -> bool:
     )
 
 
+async def _is_native_select(locator: Locator) -> bool:
+    """Return whether the matched element is a native ``<select>`` dropdown."""
+
+    return await locator.evaluate("element => element.tagName.toLowerCase() === 'select'")
+
+
 async def is_sensitive_type_target(locator: Locator) -> bool:
     """Fail closed for fields where a frozen ``teach`` literal may expose a secret."""
 
@@ -157,7 +164,7 @@ async def validate_compile_time(
 ) -> ValidationOk | ValidationFail:
     """Apply the compile-time half of the resolver's trust-but-verify contract."""
 
-    if action not in ("click", "hover", "type", "waitFor"):
+    if action not in ("click", "hover", "type", "waitFor", "select"):
         return ValidationFail("unsupported_action", f"Unsupported action kind: {action!r}.")
 
     try:
@@ -178,7 +185,12 @@ async def validate_compile_time(
                 "incompatible_type", "The type action requires a text-entry element."
             )
 
-        if action in ("click", "type") and not await locator.is_enabled():
+        if action == "select" and not await _is_native_select(locator):
+            return ValidationFail(
+                "not_select", "The select action requires a native <select> element."
+            )
+
+        if action in ("click", "type", "select") and not await locator.is_enabled():
             return ValidationFail("not_enabled", "The matched element is disabled.")
 
         if action == "type" and not await locator.is_editable():

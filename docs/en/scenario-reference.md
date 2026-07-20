@@ -359,7 +359,7 @@ has no address bar — only the compositor frame is drawn.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `wait`, `slide`, and `closeWindow`;
+  `enterText`, `select`, `wait`, `slide`, and `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -379,6 +379,7 @@ page state and align one generated action slot with each source step.
 | `click` | Yes | No |
 | `hover` | Yes | No |
 | `enterText` | Yes, `into` only | Only accompanying `say` |
+| `select` | Yes, `from` only | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
 | `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
@@ -481,6 +482,30 @@ only in `text`, not `into`.
 
 Playwright uses `fill`, which replaces the current value. A normal text field can
 show the value in the recording; Guidebot does not add masking.
+
+### `select`
+
+```yaml
+- select:
+    from: "the report type dropdown"
+    option: "tabela"
+  say: "From the report type list I choose the table format."
+```
+
+Choose an option from a native `<select>` dropdown. `from` is a semantic target
+instruction sent to the reasoner and must resolve to a native `<select>` element —
+resolving to a non-select control (a custom `role="combobox"` widget, a button) is a
+`not_select` validation error. `option` is the visible label of the option to pick;
+it is shown, never spoken, and is **not** environment-substituted.
+
+A native select's option list is drawn by the operating system, so no
+browser-automation tool — Playwright included — can unfurl or screenshot it. During
+`render` the cursor therefore glides to the control, shows the click ripple, and
+*steps* the collapsed control's value to `option` with arrow keys, so the value
+visibly changes even though the list never opens (a jump of more than twelve options
+is set directly to keep the animation short). During `compile` the value is set
+directly. Either way the element ends on `option`, so later steps and the render
+agree. Pair it with a `say` such as "from this list I choose …" to narrate the intent.
 
 ### Numeric `wait`
 
@@ -705,8 +730,9 @@ use explicit waits and verify the result.
 | `holdFrameForNarration`, `holdFrameSettle` | No — render-only |
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
+| `select.option` value alone | No — render-only |
 | Adding, removing, or reordering a `slide` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) | Yes |
 | Switching a step's command kind | Yes |
 
 See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
@@ -720,7 +746,7 @@ including `viewport`/`locale`/`tts.lang` and application drift.
 - `enterText.text`.
 
 Substitution does not run in `baseUrl`, `say`, `teach`, `translations`, target
-instructions, or any TTS/config field.
+instructions, `select.option`, or any TTS/config field.
 
 A variable may appear more than once. Missing variables raise an error. `$${` escapes
 a literal `${` sequence:
