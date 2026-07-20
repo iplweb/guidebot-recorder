@@ -10,9 +10,11 @@ from playwright.async_api import Page
 
 from guidebot_recorder.guide.annotate import annotations_for
 from guidebot_recorder.guide.model import GuidePage, page_text
-from guidebot_recorder.guide.prolog import classify
+from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
+from guidebot_recorder.models.scenario import WaitUntil
 from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.resolver.validate import reuse_is_valid
 
 
 def scenario_resolve_url(scenario, url: str | None) -> str:
@@ -69,10 +71,14 @@ async def capture_pages(
                 target = action.target if isinstance(action, CachedAction) else None
                 if target is None:
                     skipped_branch = fs.branch
+                    if verbose:
+                        print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
                     continue
                 await recorder.wait_for(target, "visible", timeout)
             except PlaywrightError:
                 skipped_branch = fs.branch  # branch element absent -> skip whole branch
+                if verbose:
+                    print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
             continue
 
         if kind == "navigate":
@@ -116,22 +122,37 @@ async def capture_pages(
         if kind == "wait":
             if isinstance(step.wait, int | float):
                 await recorder.wait_seconds(float(step.wait))
+                continue
+            if isinstance(action, CachedAction) and action.action == "waitFor":
+                timeout_wait = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
+                await recorder.wait_for(action.target, action.state or "visible", timeout_wait)
+            elif verbose and not step.optional:
+                print(f"pomijam krok {index}: oczekiwanie nierozwiązane — uruchom `compile`")
             continue
 
         # kind == "action": click / hover / type (dispatch on cached.action)
         if not isinstance(action, CachedAction):
             if step.optional:
+                if verbose:
+                    print(f"pomijam krok {index}: cel nieobecny")
                 continue  # optional branch never compiled -> skip page
             raise RuntimeError(f"krok {index}: nierozwiązana akcja obowiązkowa")
         act = action.action
+        if not step.optional and act != "waitFor":
+            if not await reuse_is_valid(recorder.frame, action):
+                raise GuideError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
         try:
             res = await recorder.point(action.target, ripple=False)
         except PlaywrightError:
             if step.optional:
+                if verbose:
+                    print(f"pomijam krok {index}: cel nieobecny")
                 continue
             raise
         if act == "type":
-            text = (step.enter_text.text if step.enter_text else None) or action.input_text or ""
+            text = (step.enter_text.text if step.enter_text else None) or action.input_text
+            if text is None:
+                raise GuideError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
             await res.locator.fill(text)
             shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
         else:
