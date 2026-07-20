@@ -71,16 +71,25 @@ Explicitly out of scope:
 New module `guidebot_recorder/video/timeline.py` — the only place in the
 codebase aware that two time axes exist.
 
+Time is modelled in **integer frames at 25 fps**, never in seconds. See §4 for
+the measurements that force this.
+
 ```python
+FPS = 25  # hardcoded constant in Playwright's video recorder; asserted, not adapted to
+
+
 @dataclass(frozen=True)
 class TimeEdit:
-    at: float                      # position on the recording axis (t_real)
+    at: int                        # frame index on the recording axis
     kind: Literal["freeze", "cut"]
-    duration: float                # always positive
+    frames: int                    # always positive, whole frames
 ```
 
-- `freeze` inserts `duration` seconds of held frame at `at`
-- `cut` removes the span `[at, at + duration]` from the recording
+- `freeze` holds the frame at index `at` for `frames` additional frames
+- `cut` removes frames `[at, at + frames)` from the recording
+
+Seconds appear only at the boundaries: wall-clock readings convert in with
+`round(t_real * FPS)`, and audio offsets convert out with `frames / FPS`.
 
 Two axes result:
 
@@ -91,7 +100,8 @@ Two axes result:
 it:
 
 ```python
-def to_virtual(self, t_real: float) -> float
+def to_virtual(self, frame: int) -> int          # frame index -> frame index
+def to_virtual_seconds(self, t_real: float) -> float   # convenience at the boundary
 ```
 
 This is the load-bearing decision. `anchor` currently feeds **three** consumers:
@@ -124,30 +134,76 @@ already-composed frame means popups freeze correctly for free.
 
 ### 3. Filtergraph
 
-One graph handles both edit kinds uniformly:
+One graph handles both edit kinds uniformly. All boundaries are **frame
+indices**, never float seconds — `trim=start_frame/end_frame` was verified to
+produce byte-identical output to the float form while removing all boundary
+ambiguity.
 
-- kept span: `trim=start=a:end=b, setpts=PTS-STARTPTS`
-- freeze: `trim` of a single frame + `tpad=stop_mode=clone:stop_duration=d`
+- kept span: `trim=start_frame=a:end_frame=b, setpts=PTS-STARTPTS`
+- freeze: `trim` of the single frame `[K, K+1)` + `tpad=stop_mode=clone:stop=N`
 - cut: **absence** of a span from the kept list
 
 followed by `concat`. Cutting needs no new code branch — it is a missing entry.
 
-### 4. Frame quantisation
+Verified working shape (freeze of 59 frames at source frame 75):
 
-`tpad=stop_duration=2.37` clones a whole number of frames, so the real result is
-2.36 or 2.40. Computing audio offsets from the unrounded value injects tens of
-milliseconds per freeze. Across 30 steps that is roughly 0.3 s of accumulating
-drift, and the `mux.py:827-834` guard (0.05 s tolerance) only fires at the end,
-after a full recording has been paid for.
+```
+[0:v]fps=25,split=3[s0][s1][s2];
+[s0]trim=start_frame=0:end_frame=75,setpts=PTS-STARTPTS[a];
+[s1]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=59[b];
+[s2]trim=start_frame=76,setpts=PTS-STARTPTS[c];
+[a][b][c]concat=n=3:v=1:a=0[v]
+```
 
-Therefore: **every `duration` is quantised to a whole number of frames before
-any audio offset is computed.** The audio axis then matches the video axis by
-construction rather than approximately.
+with `-r 25 -vsync cfr`. Note the arithmetic: a freeze at frame `K` of `N`
+frames emits segment `[K, K+1)` a total of `N+1` times and adds `N` net frames;
+the following segment resumes at `K+1`.
 
-Open implementation question: Playwright writes variable-frame-rate WebM, so
-"fps" is not a single number. The likely fix is forcing CFR with an `fps=N`
-filter ahead of `trim`. This must be verified during implementation, not
-assumed.
+The seam was verified lossless (ffv1 + `framemd5` over every frame): exactly one
+run of identical consecutive frames, of exactly the expected length; every other
+source frame present exactly once; nothing dropped or duplicated. The freeze
+frame's checksum equals the source frame's checksum — pixel-identical.
+
+### 4. Frame quantisation (measured)
+
+Playwright records **strictly CFR at 25 fps**. Verified two ways: every measured
+inter-frame delta is exactly 0.040000 s — including a recording whose main
+thread was deliberately stalled with synchronous busy-loops, where Chromium
+repeats the last frame rather than dropping the grid — and `fps = 25` is a
+hardcoded module constant in Playwright's `videoRecorder`, not exposed through
+the API, with explicit frame duplication (`repeatCount`) to fill gaps.
+
+The danger is `tpad` rounding to the **nearest** frame on the 40 ms grid, which
+puts up to ±20 ms of error into every freeze. Measured:
+
+| `stop_duration` | frames added | actual | error |
+|---|---|---|---|
+| 2.36 | 59 | 2.36 | 0 ms |
+| 2.37 | 59 | 2.36 | **−10 ms** |
+| 2.39 | 60 | 2.40 | **+10 ms** |
+
+The error is **additive across freezes**: three freezes of 2.37 s produced
+13.000000 s against a naive 13.03 s — **−30 ms**. The `mux.py:827-834` guard
+allows 0.05 s, so four or five freezes trip it. The failure would be
+data-dependent and read as flaky rather than as systematic drift.
+
+Therefore: **the time model is integer frames end to end, and ffmpeg receives a
+frame count (`tpad=stop=N`), not a duration.** Measured with frame-exact values:
+three freezes → 13.000000 s, and cut + freeze combined → 7.280000 s, both at
+**exactly 0 ms error**.
+
+`fps=25` at the head of the graph is a verified no-op on current input
+(`framemd5` identical, 148 frames in and out, no drops or duplicates). It is
+kept purely as a defensive normaliser against a future Playwright or ffmpeg
+change; it costs nothing.
+
+FPS handling: read `avg_frame_rate` from the probe, parse it as the rational it
+is, and **fail loud if it is not exactly `25/1`** rather than adapting. A changed
+value would mean a Playwright upgrade altered the recorder — worth noticing
+loudly, not silently re-quantising the entire audio timeline onto a new grid.
+
+Implementation note: WebM reports `nb_frames` as `N/A`; use `-count_frames` or
+`round(duration * 25)`.
 
 ### 5. Configuration
 
@@ -209,7 +265,10 @@ I/O. Test weight goes there:
 - freezes only, cuts only, the two interleaved
 - timestamps exactly on an edit boundary
 - a timestamp inside a cut span (clamp policy)
-- quantisation: the sum of quantised freezes equals the final length to the frame
+- quantisation: seconds converted in at the boundary round to the expected frame
+  counts, and the sum of edits equals the final length exactly, in frames
+- a scenario with five freezes: total drift is exactly zero (the regression that
+  would otherwise trip the `mux.py` 0.05 s guard)
 - filtergraph generation compared against a golden string
 
 Beyond that:
@@ -223,16 +282,22 @@ Beyond that:
 1. Time becomes data — `video/timeline.py`, one `to_virtual` for all timestamps
 2. Freeze by extracting a recorded frame (`trim` + `tpad=clone`), pixel-identical seam
 3. Time editing is its own stage, between popup composition and audio mux
-4. Quantise to frames before computing audio
+4. Integer frames at 25 fps end to end; ffmpeg gets `tpad=stop=N`, never seconds
 5. `cut` built and tested; hang detection deferred to a separate spec
 6. Enabled by default, 1 s settle, opt-out via `--no-hold-frame`
 
 ## Rejected alternatives
 
-**Screenshot as a still.** `page.screenshot()` at freeze time, inserted as a
-static clip. Conceptually simpler, but the PNG takes a different encoding path
-than WebM frames — a real risk of a visible flicker at the seam (subpixel,
-colour, scaling). Not acceptable for a production mode.
+**Screenshot / PNG as a still.** Extract the frame to PNG and re-insert it with
+`-loop 1 -t D`. Measured and rejected: produced 206 frames where 207 were
+expected (an off-by-one, −40 ms), and the round-trip through RGB left the PNG
+**not** pixel-identical to its source frame (differing `framemd5`), so the held
+frame would visibly differ in colour from its neighbours. Also costs an extra
+input, temp file and process. Strictly worse than `tpad`.
+
+**`loop` filter instead of `tpad`.** Measured as exactly equivalent (8.280000 s
+/ 207 frames), but needs a manual `setpts` rebuild and has easier-to-misuse
+`loop`/`size`/`start` semantics. No advantage.
 
 **CDP `Emulation.setVirtualTimePolicy`.** Speeds up the page clock.
 `record_video` records wall-clock regardless of the page's virtual time, so this
