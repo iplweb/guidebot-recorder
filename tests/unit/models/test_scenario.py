@@ -385,3 +385,35 @@ def test_optional_is_refused_on_a_desktop_step():
     # No target to be absent, so `optional` promises tolerance we cannot deliver.
     with pytest.raises(ValidationError):
         Step.model_validate({"desktop": {"icon": "chrome"}, "optional": True})
+
+
+def test_close_window_command_kind_and_no_target():
+    step = Step.model_validate({"closeWindow": True})
+    assert step.command_kind() == "closeWindow"
+    assert step.requires_target() is False
+    assert step.narration() is None
+
+
+def test_close_window_accepts_narration():
+    step = Step.model_validate({"closeWindow": True, "say": "Wracamy."})
+    assert step.command_kind() == "closeWindow"
+    assert step.narration() == "Wracamy."
+
+
+def test_close_window_false_is_rejected():
+    # `_exactly_one_command` tests `is not None`, so a plain `bool` field would let
+    # `closeWindow: false` count as a present command that does nothing. Literal[True]
+    # turns that into a validation error instead of a silent no-op.
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": False})
+
+
+def test_close_window_is_mutually_exclusive_with_other_primaries():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": True, "click": "ok"})
+
+
+def test_close_window_rejects_optional():
+    # No target, not a numeric wait -> `_optional_only_where_it_can_be_honoured` rejects it.
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": True, "optional": True})

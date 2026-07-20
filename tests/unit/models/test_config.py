@@ -6,6 +6,7 @@ from guidebot_recorder.models.config import (
     ChromeConfig,
     Config,
     DesktopConfig,
+    FadeConfig,
     PopupConfig,
     TtsConfig,
     Viewport,
@@ -767,3 +768,29 @@ def test_desktop_config_does_not_change_the_config_hash():
     tinted = _cfg()
     tinted.desktop = DesktopConfig(color="#ff0000")
     assert config_hash(plain) == config_hash(tinted)
+
+
+def test_fade_is_off_by_default_and_reads_the_in_out_aliases():
+    assert not Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "voice": "v", "lang": "pl-PL"},
+        }
+    ).fade.enabled
+
+    fade = FadeConfig.model_validate({"enabled": True, "in": 0.4, "out": 1.2, "color": "white"})
+    assert (fade.fade_in, fade.fade_out, fade.color, fade.audio) == (0.4, 1.2, "white", True)
+
+
+def test_fade_rejects_a_negative_duration():
+    with pytest.raises(ValidationError):
+        FadeConfig.model_validate({"in": -0.1})
+
+
+def test_fade_is_render_only_and_does_not_change_the_config_hash():
+    # Toggling a fade must not invalidate a compiled sidecar.
+    plain = _cfg()
+    faded = _cfg()
+    faded.fade = FadeConfig(enabled=True, **{"in": 1.0})
+    assert config_hash(plain) == config_hash(faded)

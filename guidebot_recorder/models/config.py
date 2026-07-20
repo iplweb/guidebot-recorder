@@ -164,6 +164,27 @@ class DesktopConfig(BaseModel):
     color: str = "#1f3a63"  # granatowy — a calm desktop navy
 
 
+class FadeConfig(BaseModel):
+    """Render-only fade from/to a flat colour at the film's two ends.
+
+    Off by default: enabling it re-encodes the picture in the final mux (a fade
+    cannot be applied to a copied stream), so a scenario that does not ask for
+    one keeps today's output byte-identical. Not part of :func:`config_hash` —
+    fades change no compiled reference, so toggling one needs no recompile.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    enabled: bool = False
+    # ``in`` is a Python keyword, hence the alias; scenarios write `in:`.
+    fade_in: float = Field(default=0.6, alias="in", ge=0)
+    fade_out: float = Field(default=0.8, alias="out", ge=0)
+    color: str = "black"
+    # The narration is mixed to the full film length, so a picture that fades to
+    # black over a still-audible voice reads as a glitch. Fading both is the
+    # sane default; opt out when the bed is meant to run to the last sample.
+    audio: bool = True
+
+
 class SoundConfig(BaseModel):
     """Render-only built-in SFX mixed under the narration (on by default)."""
 
@@ -262,6 +283,7 @@ class Config(BaseModel):
     sound: SoundConfig = Field(default_factory=SoundConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
     desktop: DesktopConfig = Field(default_factory=DesktopConfig)
+    fade: FadeConfig = Field(default_factory=FadeConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
 
     # --- Render pacing (render-only; deliberately absent from config_hash) ---
