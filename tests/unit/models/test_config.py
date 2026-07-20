@@ -661,3 +661,51 @@ def test_config_hash_unchanged_when_slide_ms_changes():
     changed = _cfg(popup=PopupConfig(slide_ms=900))
 
     assert config_hash(changed) == config_hash(baseline)
+
+
+def test_hold_frame_defaults_to_on() -> None:
+    cfg = Config(
+        title="t",
+        viewport=Viewport(width=1280, height=720),
+        tts=TtsConfig(provider="edge", lang="pl", voice="pl-PL-ZofiaNeural"),
+    )
+    assert cfg.hold_frame_for_narration is True
+    assert cfg.hold_frame_settle == 1.0
+
+
+def test_hold_frame_accepts_camel_case_aliases() -> None:
+    cfg = Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+            "holdFrameForNarration": False,
+            "holdFrameSettle": 0.5,
+        }
+    )
+    assert cfg.hold_frame_for_narration is False
+    assert cfg.hold_frame_settle == 0.5
+
+
+def test_hold_frame_settle_rejects_negative() -> None:
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "title": "t",
+                "viewport": {"width": 1280, "height": 720},
+                "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+                "holdFrameSettle": -1.0,
+            }
+        )
+
+
+def test_hold_frame_is_not_part_of_config_hash() -> None:
+    """Render-only pacing must never invalidate compiled references."""
+    base = {
+        "title": "t",
+        "viewport": {"width": 1280, "height": 720},
+        "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+    }
+    a = Config.model_validate(base)
+    b = Config.model_validate({**base, "holdFrameForNarration": False, "holdFrameSettle": 3.0})
+    assert config_hash(a) == config_hash(b)

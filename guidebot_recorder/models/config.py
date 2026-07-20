@@ -215,6 +215,16 @@ class Config(BaseModel):
     intro: IntroConfig = Field(default_factory=IntroConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
 
+    # --- Render pacing (render-only; deliberately absent from config_hash) ---
+    # Holding a still frame instead of waiting out the voice-over. The narration
+    # still plays in full; it is the picture that stops. `hold` matches the sense
+    # it already carries in `step.slide.hold`.
+    hold_frame_for_narration: bool = Field(default=True, alias="holdFrameForNarration")
+    # Real seconds recorded before the frame is held, paid OUT OF the narration
+    # (not on top of it) so the finished film keeps its length. Gives entry
+    # animations triggered by this step time to finish before the picture stops.
+    hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=0)
+
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:
         tracks = [self.tts, *self.audio_tracks]

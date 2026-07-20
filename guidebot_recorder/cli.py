@@ -141,6 +141,21 @@ def render_cmd(
     timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
+    hold_frame: bool = typer.Option(
+        True,
+        "--hold-frame/--no-hold-frame",
+        help="Zamroź klatkę na czas narracji zamiast czekać w czasie rzeczywistym.",
+    ),
+    hold_frame_settle: float | None = typer.Option(
+        None,
+        "--hold-frame-settle",
+        help="Sekundy realnego czasu przed zamrożeniem klatki (domyślnie z konfiguracji).",
+    ),
+    dump_timeline: bool = typer.Option(
+        False,
+        "--dump-timeline",
+        help="Zapisz wyliczoną oś czasu obok pliku wideo (diagnostyka).",
+    ),
 ) -> None:
     """Zrenderuj `.mp4` z jedną lub wieloma ścieżkami lektora (0×LLM)."""
     if auto_heal:
@@ -148,7 +163,17 @@ def render_cmd(
         raise typer.Exit(code=2)
 
     scenario = load_scenario(path)
-    providers = {track.provider for track in [scenario.config.tts, *scenario.config.audio_tracks]}
+    cfg = scenario.config
+    if not hold_frame:
+        cfg.hold_frame_for_narration = False
+    if hold_frame_settle is not None:
+        cfg.hold_frame_settle = hold_frame_settle
+    # NOTE: `run_render` (Task 4) currently reloads the scenario from `path`
+    # itself rather than accepting this already-loaded/overridden `scenario`,
+    # so the two mutations above are not yet consumed by the renderer — Task 4
+    # wires that up. `dump_timeline` is collected here but not threaded through
+    # `run_render` yet: that parameter is added in Task 5.
+    providers = {track.provider for track in [cfg.tts, *cfg.audio_tracks]}
     if providers != {"edge"}:
         configured = ", ".join(sorted(providers))
         typer.echo(
