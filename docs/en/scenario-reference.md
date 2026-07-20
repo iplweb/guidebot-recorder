@@ -359,7 +359,7 @@ has no address bar — only the compositor frame is drawn.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `wait`, and `slide`;
+  `enterText`, `wait`, `slide`, and `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -382,6 +382,7 @@ page state and align one generated action slot with each source step.
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
 | `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
+| `closeWindow` | No | Only accompanying `say` |
 
 If `say` accompanies an action, narration is rendered before the action. With
 multiple audio tracks, all translations start together and the longest one controls
@@ -545,9 +546,32 @@ without a `say`, it holds for `hold` seconds (default `2.5`). A narrated slide
 therefore cannot linger after its narration ends. To hold a card *after* speech,
 follow it with a second, silent `slide` (same text, a `hold`, no `say`).
 
-Adding, removing, or reordering a `slide` step changes the step count, so it is the
-one step kind that **needs `guidebot compile`**; render preflights the step count
-against the sidecar and fails loudly otherwise.
+Adding, removing, or reordering a `slide` step changes the step count, so it
+**needs `guidebot compile`**; render preflights the step count against the sidecar and
+fails loudly otherwise. The same holds for `closeWindow` (below).
+
+### `closeWindow`
+
+```yaml
+- teach: "Click the link that opens in a new tab"
+- say: "We've read it; now back."
+- closeWindow: true
+```
+
+Closes the **active** window and returns to the one that opened it. It accepts only
+`true`; `closeWindow: false` is a validation error, not a silent no-op. With no window
+open the step fails.
+
+A new window appears on its own when a click on the page opens one — via `window.open`
+or a `target="_blank"` link. Guidebot recognises it by its `opener()`, so a link with
+`rel="noopener"` (which nulls `opener()`) is **not** recognised as opening a window. A
+window that fills the whole canvas (e.g. a `target="_blank"` tab that requested no size)
+is shown full-frame with its own address bar; a smaller `window.open` window keeps the
+floating presentation. The scenario never opens a window itself — there is no "open a
+window" command.
+
+Like `slide`, `closeWindow` changes the step count, so it **needs `guidebot compile`**.
+Full example: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
 
 ## Optional branches
 

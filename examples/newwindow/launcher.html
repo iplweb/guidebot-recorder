@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Skrzynka pocztowa</title>
+<style>
+  body { margin:0; font:16px/1.5 system-ui, sans-serif; background:#f6f8fc; color:#202124;
+         display:flex; align-items:center; justify-content:center; height:100vh; }
+  .card { background:#fff; padding:48px 56px; border-radius:12px;
+          box-shadow:0 1px 3px rgba(60,64,67,.3), 0 4px 8px rgba(60,64,67,.15); text-align:center; }
+  h1 { font-size:22px; font-weight:400; margin:0 0 8px; }
+  p  { color:#5f6368; margin:0 0 28px; }
+  a  { display:inline-block; background:#1a73e8; color:#fff; text-decoration:none;
+       padding:12px 28px; border-radius:6px; font-weight:500; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Twoja poczta</h1>
+    <p>Skrzynka otworzy się w nowym oknie przeglądarki.</p>
+    <!-- Dwie rzeczy, o które łatwo się potknąć — patrz sekcja `closeWindow`
+         w docs/pl/scenario-reference.md:
+
+         1. NIE dodawaj rel="noopener". Zeruje ono opener() nowego okna, po
+            którym Guidebot rozpoznaje otwarcie; z noopener kliknięcie zostałoby
+            zapisane jako nieotwierające okna i closeWindow zgłosiłby brak okna.
+
+         2. Cel jest LOKALNY celowo i pojawia się natychmiast. Strona, która
+            przy otwarciu długo przekierowuje (np. na ekran logowania), może nie
+            zdążyć w krótkim oknie obserwacji kliknięcia i zostać pominięta. -->
+    <a href="./inbox.html" target="_blank">Otwórz pocztę</a>
+  </div>
+</body>
+</html>
