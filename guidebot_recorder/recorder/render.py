@@ -552,10 +552,11 @@ def _build_timeline(edits: Iterable[TimeEdit], *, source_frames: int) -> Timelin
     ``Timeline`` is deliberately strict — it rejects two edits on one frame, and
     anything at or past the end of the recording — because those are nonsense as
     a *model*. They are not nonsense as *observations*: the pacing loop stamps
-    ``at`` from the wall clock, so a small ``holdFrameSettle`` (0 is a legal
-    config value) makes consecutive fast steps land on the same frame, and a
-    freeze recorded near the end can round past the 0.1s postroll. Both would
-    otherwise blow up after the entire recording is finished, losing the render.
+    ``at`` from the wall clock, so even a small legal ``holdFrameSettle`` (as low
+    as ``models.config.MIN_HOLD_FRAME_SETTLE``, two frames) can make consecutive
+    fast steps land on the same frame, and a freeze recorded near the end can
+    round past the 0.1s postroll. Both would otherwise blow up after the entire
+    recording is finished, losing the render.
 
     So the collected list is reconciled here, where the observations are:
 

@@ -13,6 +13,19 @@ from guidebot_recorder.languages import is_iso_639_2
 #: version of the canonical config projection used for the hash
 CONFIG_HASH_VERSION = 2
 
+# Lower bound for `Config.hold_frame_settle`, in seconds: two frames at the
+# renderer's frame rate (guidebot_recorder.video.timeline.FPS = 25). Not
+# imported from there — this model module should stay free of a dependency
+# on the video package, so the value is restated here with FPS named as its
+# source of truth.
+#
+# Below this bound the wall-clock stamp for a step's narration offset can
+# round onto the SAME 25fps frame as the previous step's freeze, which is not
+# merely a visual quirk: the axis mapping then gives that narration a zero
+# shift, so consecutive narrations collapse onto one timestamp instead of
+# playing in sequence. Two frames (80ms) keeps consecutive stamps apart.
+MIN_HOLD_FRAME_SETTLE = 2 / 25
+
 
 class Viewport(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -223,7 +236,9 @@ class Config(BaseModel):
     # Real seconds recorded before the frame is held, paid OUT OF the narration
     # (not on top of it) so the finished film keeps its length. Gives entry
     # animations triggered by this step time to finish before the picture stops.
-    hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=0)
+    # Floor is MIN_HOLD_FRAME_SETTLE (two 25fps frames): below it, narration
+    # placement silently collapses (see that constant's comment).
+    hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=MIN_HOLD_FRAME_SETTLE)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:

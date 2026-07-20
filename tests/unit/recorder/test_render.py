@@ -9,11 +9,17 @@ from pathlib import Path
 
 import pytest
 from playwright.async_api import async_playwright
+from pydantic import ValidationError
 
 from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.models.action import COMPILER_VERSION
 from guidebot_recorder.models.compiled import CompiledScenario
-from guidebot_recorder.models.config import ChromeConfig, CursorConfig, TtsConfig
+from guidebot_recorder.models.config import (
+    MIN_HOLD_FRAME_SETTLE,
+    ChromeConfig,
+    CursorConfig,
+    TtsConfig,
+)
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.compile import run_compile
@@ -33,6 +39,7 @@ from guidebot_recorder.recorder.render import (
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
+from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
@@ -2055,15 +2062,16 @@ async def test_hold_frame_film_matches_the_model_exactly(tmp_path, monkeypatch):
         assert probe_duration(bed) == pytest.approx(probe_duration(out), abs=0.05)
 
 
-async def test_zero_settle_still_renders(tmp_path, monkeypatch):
-    """`holdFrameSettle: 0` is a legal config value and must not lose the render.
+def test_zero_settle_is_rejected_at_scenario_load(tmp_path) -> None:
+    """`holdFrameSettle: 0` is sub-frame and must never reach the recorder.
 
-    With no settle the pacing loop stamps several steps onto the same frame, and
-    the strict `Timeline` rejected that — after the whole recording had already
-    completed.
+    It used to be a legal config value: the pacing loop stamped several steps
+    onto the same 25fps frame, and the strict `Timeline` rejected that — but
+    only after the whole recording had already completed. Worse, once that
+    crash was fixed, settle=0 silently rendered a film with narration offsets
+    collapsed onto shared timestamps (see `Config.hold_frame_settle`). The fix
+    is to reject it at config validation, before any recording happens.
     """
-    import guidebot_recorder.recorder.render as R
-
     path = tmp_path / "zero-settle.scenario.yaml"
     path.write_text(
         textwrap.dedent(
@@ -2080,6 +2088,42 @@ async def test_zero_settle_still_renders(tmp_path, monkeypatch):
               - say: "Trzeci."
               - say: "Czwarty."
               - say: "Piąty."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        load_scenario(path)
+
+
+async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
+    """`Config`'s smallest legal `holdFrameSettle` still renders end-to-end.
+
+    This replaces the old settle=0 render test now that 0 is rejected at
+    config validation (see `test_zero_settle_is_rejected_at_scenario_load`).
+    It proves the render pipeline still holds a still frame and produces a
+    file matching the model at the *smallest value `Config` actually accepts*
+    — the merge/clamp logic in `_build_timeline` itself stays covered
+    independently of this test, by the pure `_build_timeline` unit tests
+    below (they build a `Timeline` directly and need no legal `Config` at
+    all).
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "min-settle.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            config:
+              title: MinSettle
+              viewport: {{width: 640, height: 480}}
+              tts: {{provider: fake, voice: v, lang: pl-PL}}
+              holdFrameForNarration: true
+              holdFrameSettle: {MIN_HOLD_FRAME_SETTLE}
+            steps:
+              - say: "Pierwszy."
+              - say: "Drugi."
             """
         ),
         encoding="utf-8",
@@ -2103,18 +2147,23 @@ async def test_zero_settle_still_renders(tmp_path, monkeypatch):
         await run_render(path, out, LongTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert seen, "no freezes were recorded at settle=0"
+    assert seen, "no freezes were recorded at the minimum legal settle"
     timeline = seen[0]
-    # Five 3.0s narrations, nothing paid in real time: the film owes 5x75 frames
-    # of hold whether or not they collapsed onto shared frames.
-    assert timeline.virtual_frames == timeline.source_frames + 5 * 75
+    # Two 3.0s narrations, almost none of it paid in real time: the finished
+    # film is well past what the browser actually recorded, and the file on
+    # disk is exactly what the model promised — the same shape of assertion
+    # `test_hold_frame_film_matches_the_model_exactly` makes, at the opposite
+    # (minimum legal) end of the settle range.
+    assert timeline.source_frames < timeline.virtual_frames
     assert probe_frame_count(out) == timeline.virtual_frames
 
 
 def test_build_timeline_merges_two_freezes_on_the_same_frame() -> None:
-    # A settle of 0 (a legal config value) makes consecutive fast steps stamp
-    # the same frame index. Both want the picture held there, so the film holds
-    # it for the total of both.
+    # Two edits landing on the same frame index both want the picture held
+    # there, so the film holds it for the total of both. `_build_timeline`
+    # takes raw `TimeEdit`s directly, bypassing `Config` and its
+    # `hold_frame_settle` floor, so this stays exercised regardless of what
+    # settle values `Config` accepts.
     timeline = _build_timeline(
         [
             TimeEdit(at=40, kind="freeze", frames=25),
