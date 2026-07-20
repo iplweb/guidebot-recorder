@@ -493,3 +493,40 @@ async def test_type_url_cancellation_stops_browser_side_schedule(
         }"""
     )
     assert state == {"text": "a", "focused": True, "token": None}
+
+
+async def test_install_bar_mounts_on_a_page_under_bare_popups(page):
+    # The context-wide script bails on `barePopups`; the per-page variant must
+    # still be able to mount the bar on one window.
+    chrome = Chrome(ChromeConfig(), bare_popups=True)
+    await chrome.install_context(page.context)
+    await page.goto("data:text/html,<p>karta</p>")
+
+    assert await page.query_selector("[data-guidebot-chrome]") is None
+
+    await chrome.install_bar(page)
+
+    assert await page.query_selector("[data-guidebot-chrome]") is not None
+
+
+async def test_install_bar_survives_a_navigation_inside_the_window(page):
+    # The bar is mounted per page, so it must be re-registered as a per-page init
+    # script: a `_blank` tab that navigates must not lose its address bar.
+    chrome = Chrome(ChromeConfig(), bare_popups=True)
+    await chrome.install_context(page.context)
+    await page.goto("data:text/html,<p>karta</p>")
+    await chrome.install_bar(page)
+
+    await page.goto("data:text/html,<p>druga</p>")
+
+    assert await page.query_selector("[data-guidebot-chrome]") is not None
+
+
+async def test_install_context_alone_stays_bare(page):
+    # The per-window override must not leak: a popup that never asked for a bar
+    # keeps rendering exactly as it does today.
+    chrome = Chrome(ChromeConfig(), bare_popups=True)
+    await chrome.install_context(page.context)
+    await page.goto("data:text/html,<p>plywajace</p>")
+
+    assert await page.query_selector("[data-guidebot-chrome]") is None

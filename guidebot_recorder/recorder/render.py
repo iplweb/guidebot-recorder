@@ -142,6 +142,16 @@ class _PopupSession:
     :attr:`Overlay.pos` is shared by every page, so centring the cursor in the
     popup overwrites the opener's. Restored on close.
     """
+    wants_bar: bool = False
+    """Whether this window shows the legacy in-DOM address bar.
+
+    True only for a real ``target="_blank"`` tab — a browser tab with no address
+    bar reads as a rendering fault. Every other popup stays bare and is framed by
+    the compositor instead. Decided at open time from
+    :func:`_popup_window_opened`, because the crop chain's verdict does not exist
+    until the recording is over, and the bar is painted DOM that would corrupt
+    crop levels 2 and 3.
+    """
     window_size: tuple[int, int] | None = None
     """The popup's real window size in CSS px, or ``None`` when unknown.
 
@@ -1998,7 +2008,11 @@ async def run_render(
                     active_page,
                     overlay,
                     chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                 )
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
@@ -2030,7 +2044,11 @@ async def run_render(
                     anchor,
                     observed_pages,
                     _ensure_card,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                     resolved=resolved,
                     optional=optional,
                     scenario_hash=scenario_hash,
@@ -2039,11 +2057,13 @@ async def run_render(
                 if opened is not None:
                     popup = opened
                     popup.page.set_default_timeout(timeout * 1000)
+                    popup.wants_bar = chrome is not None and not await _popup_window_opened(page)
                     prepared = await _prepare_popup(
                         popup.page,
                         overlay,
                         chrome,
-                        expect_chrome=_expect_chrome(chrome, bare_popups),
+                        expect_chrome=_expect_chrome(chrome, bare_popups) or popup.wants_bar,
+                        mount_bar=popup.wants_bar,
                     )
                     _sync_popup_close(popup, observed_pages, anchor)
                     if not prepared:
@@ -2458,12 +2478,17 @@ async def _prepare_popup(
     chrome: Chrome | None,
     *,
     expect_chrome: bool | None = None,
+    mount_bar: bool = False,
 ) -> bool:
     """Prepare a new page; translate close races into lifecycle state.
 
     ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
     bare (floating) popup so the chrome bar is not mounted on it (the cursor is
     still ensured).
+
+    ``mount_bar`` forces the legacy bar onto this one page even when the
+    context-wide script is bare — a real ``target="_blank"`` tab is a browser
+    tab and reads as a rendering fault without an address bar.
     """
 
     if expect_chrome is None:
@@ -2474,7 +2499,9 @@ async def _prepare_popup(
         await page.bring_to_front()
         await page.wait_for_load_state()
         await overlay.ensure(page)
-        if chrome is not None and expect_chrome:
+        if chrome is not None and mount_bar:
+            await chrome.install_bar(page)
+        elif chrome is not None and expect_chrome:
             await chrome.ensure(page)
     except PlaywrightError:
         if page.is_closed():

@@ -2513,7 +2513,9 @@ async def test_hand_cursor_to_popup_skips_centring_without_a_viewport():
 # --- closeWindow ---------------------------------------------------------------
 
 
-def _write_close_window_scenario(tmp_path: Path, *, popup_config: bool = True) -> Path:
+def _write_close_window_scenario(
+    tmp_path: Path, *, popup_config: bool = True, chrome: bool = False
+) -> Path:
     # A data: page cannot open a new window onto another data: URL (Chromium
     # blocks it outright), so the popup destination needs a real file:// URL —
     # same convention as test_compile.py's closeWindow test. The page paints its
@@ -2538,6 +2540,10 @@ def _write_close_window_scenario(tmp_path: Path, *, popup_config: bool = True) -
     # overridden to `slide` rather than testing a scenario that already asks
     # for `slide`.
     popup_line = "  popup: {transition: slide, slideMs: 40}" if popup_config else ""
+    # chrome=True turns the whole browser-chrome feature on, which is what makes
+    # the `_blank` tab's address bar observable at all: without it the render
+    # builds no `Chrome` controller and there is no bar to mount anywhere.
+    chrome_line = "  chrome: {enabled: true}" if chrome else ""
     scenario = textwrap.dedent(
         f"""\
         config:
@@ -2545,6 +2551,7 @@ def _write_close_window_scenario(tmp_path: Path, *, popup_config: bool = True) -
           viewport: {{width: 640, height: 480}}
           tts: {{provider: fake, voice: v, lang: pl-PL}}
         {popup_line}
+        {chrome_line}
         steps:
           - navigate: "{main.resolve().as_uri()}"
           - teach: "kliknij otworz"
@@ -2745,3 +2752,98 @@ async def test_popup_window_opened_is_true_from_a_cross_origin_opener_iframe():
         inner_thread.join()
         outer_server.shutdown()
         outer_thread.join()
+
+
+# --- the address bar on a `target="_blank"` tab --------------------------------
+# `bare_popups` (float/slide) is a context-wide init-script flag, so it strips the
+# legacy in-DOM bar from every top-level non-shell document. A genuine `_blank`
+# tab is a real browser tab, though, and reads as a rendering fault without an
+# address bar — so it, and only it, mounts the bar per page.
+
+
+async def test_blank_tab_gets_an_address_bar_while_other_popups_stay_bare(tmp_path, monkeypatch):
+    # `_blank` is the case where `window.open` was never called at all -- that,
+    # not the crop verdict, is what is knowable while the window is still being
+    # recorded (the crop chain only answers once the recording is over, and the
+    # bar is painted DOM that would corrupt crop levels 2 and 3).
+    from guidebot_recorder.chrome import Chrome as ChromeController
+
+    mounted: list[bool] = []
+    original = ChromeController.install_bar
+
+    async def spy(self, page):
+        await original(self, page)
+        mounted.append(await page.query_selector("[data-guidebot-chrome]") is not None)
+
+    monkeypatch.setattr(ChromeController, "install_bar", spy)
+
+    path = _write_close_window_scenario(tmp_path, chrome=True)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert mounted == [True], (
+        "a `_blank` tab must mount the legacy address bar exactly once, and it "
+        f"must actually be in the popup's DOM afterwards (got {mounted!r})"
+    )
+
+
+async def test_sized_window_open_popup_never_mounts_the_address_bar(tmp_path, monkeypatch):
+    # The counterpart: a popup the site really did open with `window.open` stays
+    # bare, exactly as today -- the compositor frames it in post-process. This is
+    # what pins the per-window seam as per-window rather than a global flip.
+    from guidebot_recorder.chrome import Chrome as ChromeController
+
+    calls: list[str] = []
+
+    async def spy(self, page):
+        calls.append(page.url)
+
+    monkeypatch.setattr(ChromeController, "install_bar", spy)
+
+    second = tmp_path / "second.html"
+    second.write_text(
+        "<!doctype html><html><head><style>body{margin:0;background:#2a6ebb}</style>"
+        "</head><body><p>druga</p></body></html>",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.html"
+    main.write_text(
+        "<a href='#' onclick=\"window.open("
+        f"'{second.resolve().as_uri()}','p','width=420,height=300');return false\">otworz</a>",
+        encoding="utf-8",
+    )
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: Popup
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+          popup: {{transition: slide, slideMs: 40}}
+          chrome: {{enabled: true}}
+        steps:
+          - navigate: "{main.resolve().as_uri()}"
+          - teach: "kliknij otworz"
+          - closeWindow: true
+          - say: "Wrocilismy do glownego okna."
+        """
+    )
+    path = tmp_path / "popup.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert calls == [], f"a sized window.open popup must stay bare (install_bar called for {calls})"
