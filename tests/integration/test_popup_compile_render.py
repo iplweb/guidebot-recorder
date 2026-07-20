@@ -516,3 +516,53 @@ async def test_popup_left_open_stays_visible_through_video_end(tmp_path: Path) -
     assert main_indices and popup_indices
     assert min(main_indices) < min(popup_indices)
     assert _is_popup_yellow(samples[-1])
+
+
+SMALL_WINDOW_FIXTURE = Path(__file__).parent / "fixtures" / "popup-main-small-window.html"
+
+
+async def test_floating_popup_frame_is_cropped_to_the_requested_window(tmp_path: Path) -> None:
+    """The framed popup is the size the site asked ``window.open`` for.
+
+    ``record_video_size`` is context-level, so the popup records onto a
+    640x480 canvas even though the site requested a 320x240 window. Without the
+    post-production crop the float mode frames that whole canvas and the window
+    comes out as wide as the main page. Cropped, the 320x240 window scales to
+    ~230x172 and spans x≈205..435; the uncropped one would span x≈90..550.
+    """
+
+    path = tmp_path / "small-window-popup.scenario.yaml"
+    path.write_text(
+        FLOATING_SCENARIO_TEMPLATE.format(url=SMALL_WINDOW_FIXTURE.resolve().as_uri()),
+        encoding="utf-8",
+    )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+
+        compile_page = await browser.new_page()
+        await run_compile(path, compile_page, PopupReasoner())
+        await compile_page.context.close()
+
+        out = tmp_path / "small-window-popup.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    duration = probe_duration(out)
+    assert duration > 0
+
+    # (230, 185) is inside the cropped window (popup yellow); (140, 110) is
+    # outside it but *inside* the frame an uncropped popup would occupy, so it
+    # must stay dimmed main-blue for the whole popup interval.
+    popup_on_screen = False
+    for fraction in range(1, 40):
+        seconds = duration * fraction / 40
+        if not _is_popup_yellow(_rgb_at_pixel(out, seconds, x=230, y=185)):
+            continue  # popup not fully on screen yet (or already closed)
+        popup_on_screen = True
+        outside = _rgb_at_pixel(out, seconds, x=140, y=110)
+        assert _is_main_blue(outside), (
+            f"the popup frame reaches (140, 110) at {seconds:.2f}s ({outside}) — "
+            "it was not cropped to the requested 320x240 window"
+        )
+    assert popup_on_screen, "expected the floating popup to be on screen at some point"
