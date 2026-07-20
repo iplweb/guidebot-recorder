@@ -1,4 +1,5 @@
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
@@ -115,3 +116,36 @@ async def test_enter_text_control_char_falls_back_to_instant(page):
     await rec.enter_text(RoleTarget(role="textbox", name="T"), "a\nb")
     assert await page.locator("#t").input_value() == "a\nb"
     assert events == []  # instant path, no per-char key events
+
+
+_SELECT_HTML = (
+    '<select aria-label="Report">'
+    "<option>lista</option><option>tabela</option><option>BibTeX</option>"
+    "</select>"
+)
+
+
+async def test_select_sets_value_in_compile_mode(page):
+    await page.set_content(_SELECT_HTML)
+    rec = Recorder(page, overlay=None)  # compile mode: set value directly
+    await rec.select(RoleTarget(role="combobox", name="Report"), "tabela")
+    assert await page.locator("select").input_value() == "tabela"
+
+
+async def test_select_steps_visibly_with_overlay_and_lands_on_option(page):
+    overlay = Overlay()
+    await page.set_content(_SELECT_HTML)
+    await overlay.install(page)
+    events = []
+    rec = Recorder(page, overlay, on_sfx=events.append)
+    await rec.select(RoleTarget(role="combobox", name="Report"), "BibTeX")
+    assert await page.locator("select").input_value() == "BibTeX"
+    assert overlay.pos != (0.0, 0.0)  # cursor glided to the control
+    assert events == ["click", "key", "key"]  # ripple + two arrow steps (lista→tabela→BibTeX)
+
+
+async def test_select_unknown_option_raises(page):
+    await page.set_content(_SELECT_HTML)
+    rec = Recorder(page, overlay=None)
+    with pytest.raises(PlaywrightError):
+        await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej")

@@ -7,11 +7,34 @@ from guidebot_recorder.models.scenario import (
     FlatStep,
     NavigateConfig,
     Scenario,
+    Select,
     Slide,
     Step,
     WaitUntil,
     WhenBlock,
 )
+
+
+def test_select_command_kind_and_target():
+    s = Step.model_validate(
+        {"select": {"from": "the report type list", "option": "tabela"}, "say": "wybieram"}
+    )
+    assert s.command_kind() == "select"
+    assert s.requires_target()
+    assert s.select.from_ == "the report type list"
+    assert s.select.option == "tabela"
+
+
+def test_select_from_alias_and_extra_forbidden():
+    sel = Select.model_validate({"from": "list", "option": "tabela"})
+    assert sel.from_ == "list"
+    with pytest.raises(ValidationError):
+        Select.model_validate({"from": "list", "option": "tabela", "extra": 1})
+
+
+def test_select_requires_option():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"select": {"from": "list"}})
 
 
 def test_single_command_ok():

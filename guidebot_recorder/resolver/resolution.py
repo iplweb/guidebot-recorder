@@ -87,6 +87,8 @@ def step_instruction(step: Step) -> str:
         return step.hover
     if kind == "enterText":
         return step.enter_text.into
+    if kind == "select":
+        return step.select.from_
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok bez instrukcji do rozwiązania: {kind}")
@@ -103,6 +105,8 @@ def action_for(kind: str, resolved: ActionKind) -> ActionKind:
         return "hover"
     if kind == "enterText":
         return "type"
+    if kind == "select":
+        return "select"
     if kind == "wait":
         return "waitFor"
     raise ValueError(f"krok bez akcji: {kind}")

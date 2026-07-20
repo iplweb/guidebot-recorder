@@ -20,6 +20,7 @@ PRIMARY_COMMANDS = (
     "click",
     "hover",
     "enter_text",
+    "select",
     "wait",
     "slide",
     "close_window",
@@ -46,6 +47,22 @@ class EnterText(BaseModel):
     model_config = ConfigDict(extra="forbid")
     into: str
     text: str
+
+
+class Select(BaseModel):
+    """Choose an option from a native ``<select>`` dropdown.
+
+    ``from_`` (written ``from`` in YAML) is the semantic target of the dropdown;
+    ``option`` is the visible label of the option to pick. The option list of a
+    native select is drawn by the OS and cannot be shown by any browser-automation
+    tool, so render animates the cursor to the control and steps its value to the
+    chosen option with arrow keys — the value visibly changes even though the list
+    never unfurls. ``option`` is shown, never spoken, and is not env-substituted.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    from_: str = Field(alias="from")
+    option: str
 
 
 class WaitUntil(BaseModel):
@@ -106,6 +123,7 @@ class Step(BaseModel):
     click: str | None = None
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
+    select: Select | None = None
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
     desktop: Desktop | None = None
@@ -158,7 +176,7 @@ class Step(BaseModel):
 
     def requires_target(self) -> bool:
         kind = self.command_kind()
-        if kind in ("teach", "enterText", "click", "hover"):
+        if kind in ("teach", "enterText", "click", "hover", "select"):
             return True
         if kind == "wait" and isinstance(self.wait, WaitUntil):
             return True

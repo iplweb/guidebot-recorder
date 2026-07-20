@@ -302,7 +302,7 @@ nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
+`enterText`, `select`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
 towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
@@ -355,6 +355,30 @@ Rodzaj akcji jest stały, a reasoner rozwiązuje tylko semantyczny target.
 
 Do reasonera trafia `into`, nie `text`. Playwright używa `fill`, czyli zastępuje
 bieżącą wartość. Guidebot nie maskuje pola w filmie ani logach aplikacji.
+
+### `select`
+
+```yaml
+- select:
+    from: "lista rozwijana Rodzaj raportu"
+    option: "tabela"
+  say: "Z listy rodzaj raportu wybieram format tabelaryczny."
+```
+
+Wybór opcji z natywnej listy `<select>`. `from` to semantyczny opis celu wysyłany do
+reasonera i musi wskazać element `<select>` — trafienie w inną kontrolkę (własny
+widżet `role="combobox"`, przycisk) to błąd walidacji `not_select`. `option` to
+widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie** podlega
+podstawianiu zmiennych środowiskowych.
+
+Listę opcji natywnego `<select>` rysuje system operacyjny, więc żadne narzędzie do
+automatyzacji przeglądarki — w tym Playwright — nie rozwinie jej ani nie zrzuci na
+ekran. Dlatego podczas `render` kursor dojeżdża do kontrolki, pokazuje kliknięcie i
+*przełącza* wartość zwiniętej listy do `option` strzałkami, więc wartość widocznie się
+zmienia, choć lista się nie otwiera (skok o więcej niż dwanaście pozycji ustawiany jest
+od razu, by animacja nie trwała zbyt długo). Podczas `compile` wartość ustawiana jest
+wprost. Tak czy inaczej element kończy na `option`, więc kolejne kroki i render są
+zgodne.
 
 ### `navigate`
 
