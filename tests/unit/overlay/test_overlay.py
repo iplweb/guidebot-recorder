@@ -141,6 +141,20 @@ def test_prelude_carries_click_and_start() -> None:
     assert cfg["start"] == [400.0, 300.0]
 
 
+def test_prelude_carries_bow() -> None:
+    """`cursor.bow` (arc depth) must reach cursor.js through the appearance dict."""
+    import json
+    import re
+
+    def _cfg(overlay: Overlay) -> dict:
+        prelude = overlay._script.split("\n", 1)[0]
+        return json.loads(re.search(r"= (\{.*\});", prelude).group(1))
+
+    assert _cfg(Overlay())["bow"] == 0.12  # built-in default
+    assert _cfg(Overlay(CursorConfig(bow=0)))["bow"] == 0
+    assert _cfg(Overlay(CursorConfig(bow=0.3)))["bow"] == 0.3
+
+
 async def test_hide_show_and_ripple_flash(page: Page) -> None:
     overlay = Overlay(CursorConfig(click=CursorClick(flash=True)), Viewport(width=800, height=600))
     await overlay.install(page)

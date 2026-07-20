@@ -101,7 +101,8 @@ osobnego pola konfiguracji.
 |---|---:|---|
 | `width`, `height` | `34`, `46` | Wymiary strzałki kursora w px. |
 | `color`, `outline`, `glow` | czerwony, biały, czerwony halo | Kolory CSS. |
-| `easing` | `cubic-bezier(.45,.05,.25,1)` | Krzywa ruchu. |
+| `easing` | `cubic-bezier(.45,.05,.25,1)` | Krzywa ruchu (`cubic-bezier(...)`, liczona w JS). |
+| `bow` | `0.12` | Głębokość łuku, po którym porusza się kursor, jako ułamek dystansu. `0` = ruch po prostej. |
 | `speed` | `1.15` | Piksele na milisekundę. |
 | `minDuration`, `maxDuration` | `320`, `1400` | Granice czasu ruchu w ms. |
 | `settle` | `280` | Pauza po dotarciu do celu w ms. |

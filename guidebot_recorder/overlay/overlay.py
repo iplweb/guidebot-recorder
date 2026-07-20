@@ -53,6 +53,7 @@ class Overlay:
             "stroke": self.cursor.outline,
             "glow": self.cursor.glow,
             "easing": self.cursor.easing,
+            "bow": self.cursor.bow,
             "click": {
                 "color": self.cursor.click.color,
                 "scale": self.cursor.click.scale,

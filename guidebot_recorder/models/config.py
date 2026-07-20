@@ -41,9 +41,9 @@ class CursorClick(BaseModel):
     """Appearance of the click ripple. Defaults reproduce today's hard-coded ring."""
 
     model_config = ConfigDict(extra="forbid")
-    color: str = "rgba(37,99,235,.9)"          # today's ring colour (cursor.js:227)
-    scale: float = Field(default=3.25, gt=0)   # today's end-scale (cursor.js:234); > 0
-    flash: bool = False                        # opt-in filled disc under the ring
+    color: str = "rgba(37,99,235,.9)"  # today's ring colour (cursor.js:227)
+    scale: float = Field(default=3.25, gt=0)  # today's end-scale (cursor.js:234); > 0
+    flash: bool = False  # opt-in filled disc under the ring
 
 
 class CursorConfig(BaseModel):
@@ -64,6 +64,9 @@ class CursorConfig(BaseModel):
     outline: str = "#ffffff"  # arrow stroke — reads on any background
     glow: str = "rgba(239,68,68,.75)"  # halo, aids tracking while moving
     easing: str = "cubic-bezier(.45,.05,.25,1)"  # glide curve (ease-in-out)
+    # Perpendicular arc depth as a fraction of travel distance: the glide walks
+    # a bowed path instead of a machine-straight line. 0 restores straight moves.
+    bow: float = Field(default=0.12, ge=0)
 
     # --- Motion timing (Python side). Duration scales with travel distance ---
     speed: float = 1.15  # px per ms — higher = faster glide
