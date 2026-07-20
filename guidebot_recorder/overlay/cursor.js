@@ -28,8 +28,19 @@
   const CURSOR_STROKE = CFG.stroke ?? "#ffffff"; // white outline → any background
   const CURSOR_GLOW = CFG.glow ?? "rgba(239,68,68,.75)"; // halo, aids tracking
   // Easing for the glide. An ease-in-out (gentle start, long settle) reads as a
-  // deliberate, hand-like move rather than a snap.
-  const MOVE_EASING = CFG.easing ?? "cubic-bezier(.45,.05,.25,1)";
+  // deliberate, hand-like move rather than a snap. The curve is parsed and
+  // evaluated here (see solveCubicBezier) instead of being handed to the CSS
+  // engine, because the glide is driven frame by frame along a curved path.
+  const DEFAULT_EASING = "cubic-bezier(.45,.05,.25,1)";
+  const MOVE_EASING = CFG.easing ?? DEFAULT_EASING;
+  // Perpendicular arc depth as a fraction of travel distance. 0 = straight.
+  const MOVE_BOW = Math.max(0, Number(CFG.bow ?? 0.12) || 0);
+
+  // --- Arc motion tuning ---------------------------------------------------
+  // Not exposed to YAML: they shape the *feel* of the curve, not its amount.
+  const ARC_MIN_DISTANCE = 40; // px below which an arc reads as a twitch
+  const ARC_RAMP_END = 140; // px at which the bow reaches full strength
+  const ARC_MAX_BOW_PX = 90; // a screen-wide sweep must not draw a half circle
 
   const previous = window[API_KEY];
   if (
@@ -50,6 +61,10 @@
   const state = {
     x: Number.isFinite(initialX) ? initialX : (Number(START[0]) || 0),
     y: Number.isFinite(initialY) ? initialY : (Number(START[1]) || 0),
+    // In-flight glide, if any: the rAF handle plus a way to release the
+    // pending moveTo() promise when a newer move supersedes this one.
+    raf: null,
+    finishMove: null,
   };
   let mountScheduled = false;
   let hidden = false; // persistent suppression flag (survives ensure())
@@ -57,6 +72,127 @@
   function setImportant(element, property, value) {
     element.style.setProperty(property, value, "important");
   }
+
+  // --- Motion maths --------------------------------------------------------
+
+  /** mulberry32: tiny, fast, fully deterministic PRNG. Never Math.random(). */
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function next() {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /**
+   * FNV-1a-ish hash of the rounded endpoints. Seeding from the coordinates (and
+   * nothing else) is what makes a re-render frame-identical: the same move in
+   * the same scenario always bows the same way.
+   */
+  function seedFromEndpoints(x0, y0, x1, y1) {
+    let h = 0x811c9dc5;
+    for (const value of [Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1)]) {
+      h = Math.imul(h ^ (value | 0), 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+  }
+
+  function smoothstep(edge0, edge1, value) {
+    if (value <= edge0) {
+      return 0;
+    }
+    if (value >= edge1) {
+      return 1;
+    }
+    const t = (value - edge0) / (edge1 - edge0);
+    return t * t * (3 - 2 * t);
+  }
+
+  const CUBIC_BEZIER_PATTERN =
+    /^\s*cubic-bezier\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*$/;
+
+  function parseCubicBezier(value) {
+    const match = CUBIC_BEZIER_PATTERN.exec(String(value ?? ""));
+    if (!match) {
+      return null;
+    }
+    const points = match.slice(1, 5).map(Number);
+    if (!points.every(Number.isFinite)) {
+      return null;
+    }
+    // CSS constrains the x components to [0,1]; outside that the curve is not a
+    // function of progress and the solver below has no single root.
+    if (points[0] < 0 || points[0] > 1 || points[2] < 0 || points[2] > 1) {
+      return null;
+    }
+    return points;
+  }
+
+  /** Build progress -> eased progress for `cubic-bezier(x1,y1,x2,y2)`. */
+  function cubicBezierEasing(x1, y1, x2, y2) {
+    const cx = 3 * x1;
+    const bx = 3 * (x2 - x1) - cx;
+    const ax = 1 - cx - bx;
+    const cy = 3 * y1;
+    const by = 3 * (y2 - y1) - cy;
+    const ay = 1 - cy - by;
+    const sampleX = (t) => ((ax * t + bx) * t + cx) * t;
+    const sampleY = (t) => ((ay * t + by) * t + cy) * t;
+    const slopeX = (t) => (3 * ax * t + 2 * bx) * t + cx;
+
+    return function ease(progress) {
+      if (progress <= 0) {
+        return 0;
+      }
+      if (progress >= 1) {
+        return 1;
+      }
+      // Newton-Raphson, with bisection as the fallback for flat segments where
+      // the derivative vanishes and Newton cannot converge.
+      let t = progress;
+      for (let i = 0; i < 8; i += 1) {
+        const error = sampleX(t) - progress;
+        if (Math.abs(error) < 1e-6) {
+          return sampleY(t);
+        }
+        const slope = slopeX(t);
+        if (Math.abs(slope) < 1e-6) {
+          break;
+        }
+        t -= error / slope;
+      }
+      let low = 0;
+      let high = 1;
+      t = progress;
+      for (let i = 0; i < 32 && Math.abs(sampleX(t) - progress) > 1e-6; i += 1) {
+        if (sampleX(t) < progress) {
+          low = t;
+        } else {
+          high = t;
+        }
+        t = (low + high) / 2;
+      }
+      return sampleY(t);
+    };
+  }
+
+  const EASE = (() => {
+    const points = parseCubicBezier(MOVE_EASING);
+    if (points) {
+      return cubicBezierEasing(points[0], points[1], points[2], points[3]);
+    }
+    // A cosmetic misconfiguration must not abort a render — warn once and fall
+    // back to the built-in curve.
+    console.warn(
+      `guidebot cursor: unparsable easing ${JSON.stringify(MOVE_EASING)}, ` +
+        `falling back to ${DEFAULT_EASING}`,
+    );
+    const fallback = parseCubicBezier(DEFAULT_EASING);
+    return cubicBezierEasing(fallback[0], fallback[1], fallback[2], fallback[3]);
+  })();
 
   function mountRoot() {
     return document.documentElement || document.body;
@@ -168,6 +304,60 @@
     return cursor;
   }
 
+  /**
+   * Where the cursor is actually painted right now. During a glide this differs
+   * from state.x/state.y, which already hold the *target*.
+   */
+  function renderedPosition() {
+    const cursor = document.querySelector(CURSOR_SELECTOR);
+    if (cursor) {
+      const computed = window.getComputedStyle(cursor);
+      const left = Number.parseFloat(computed.left);
+      const top = Number.parseFloat(computed.top);
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        return [left, top];
+      }
+    }
+    return [state.x, state.y];
+  }
+
+  /** Stop any in-flight glide and release its pending promise. */
+  function cancelMove() {
+    if (state.raf !== null) {
+      window.cancelAnimationFrame(state.raf);
+      state.raf = null;
+    }
+    const finish = state.finishMove;
+    state.finishMove = null;
+    if (finish) {
+      finish();
+    }
+  }
+
+  /**
+   * Control point of the quadratic Bezier: the A->B midpoint pushed sideways.
+   * Depth grows with distance, ramps in smoothly above ARC_MIN_DISTANCE (a hard
+   * cutoff would pop between two near-identical moves) and stops at
+   * ARC_MAX_BOW_PX.
+   */
+  function arcControlPoint(x0, y0, x1, y1) {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const distance = Math.hypot(dx, dy);
+    const midX = (x0 + x1) / 2;
+    const midY = (y0 + y1) / 2;
+    if (MOVE_BOW === 0 || distance <= ARC_MIN_DISTANCE) {
+      return [midX, midY];
+    }
+    const random = mulberry32(seedFromEndpoints(x0, y0, x1, y1));
+    const side = random() < 0.5 ? -1 : 1;
+    const amplitude = 0.85 + random() * 0.3; // subtle variation between moves
+    const ramp = smoothstep(ARC_MIN_DISTANCE, ARC_RAMP_END, distance);
+    const depth = Math.min(MOVE_BOW * distance * ramp * amplitude, ARC_MAX_BOW_PX) * side;
+    // unit normal of A->B
+    return [midX - (dy / distance) * depth, midY + (dx / distance) * depth];
+  }
+
   function moveTo(x, y, ms = 600) {
     const targetX = Number(x);
     const targetY = Number(y);
@@ -179,7 +369,15 @@
       throw new TypeError("cursor duration must be a non-negative finite number");
     }
 
+    // Read where we are painted *before* ensure() rewrites left/top from state,
+    // so a superseded glide resumes from the pixel on screen rather than from
+    // the target it never reached.
+    const [startX, startY] = renderedPosition();
+    cancelMove();
+
     const cursor = ensure();
+    // The post-swap restore reads state and must get the target, never an
+    // intermediate position.
     state.x = targetX;
     state.y = targetY;
     if (!cursor) {
@@ -187,22 +385,69 @@
     }
 
     const duration = requestedDuration;
+    setImportant(cursor, "transition", "none");
     if (duration === 0) {
-      setImportant(cursor, "transition", "none");
       setImportant(cursor, "left", `${targetX}px`);
       setImportant(cursor, "top", `${targetY}px`);
       return Promise.resolve();
     }
+    setImportant(cursor, "left", `${startX}px`);
+    setImportant(cursor, "top", `${startY}px`);
 
-    cursor.getBoundingClientRect();
-    setImportant(
-      cursor,
-      "transition",
-      `left ${duration}ms ${MOVE_EASING}, top ${duration}ms ${MOVE_EASING}`,
-    );
-    setImportant(cursor, "left", `${targetX}px`);
-    setImportant(cursor, "top", `${targetY}px`);
-    return new Promise((resolve) => window.setTimeout(resolve, duration));
+    const [controlX, controlY] = arcControlPoint(startX, startY, targetX, targetY);
+
+    return new Promise((resolve) => {
+      let start = null;
+      let fallbackTimer = 0;
+
+      const settle = () => {
+        window.clearTimeout(fallbackTimer);
+        state.raf = null;
+        state.finishMove = null;
+        resolve();
+      };
+      const land = () => {
+        setImportant(cursor, "left", `${targetX}px`);
+        setImportant(cursor, "top", `${targetY}px`);
+        settle();
+      };
+      // Superseded by a newer move: leave the cursor where the new move takes
+      // over from and just release the awaiting caller.
+      state.finishMove = settle;
+
+      const step = (timestamp) => {
+        // Progress comes from the clock, not from a frame count: a dropped
+        // frame must not desynchronize us from `duration`, which Python treats
+        // as authoritative.
+        if (start === null) {
+          start = timestamp;
+        }
+        const progress = Math.min(1, (timestamp - start) / duration);
+        if (progress >= 1) {
+          land(); // the final frame writes the target exactly
+          return;
+        }
+        const t = EASE(progress);
+        const inv = 1 - t;
+        const a = inv * inv;
+        const b = 2 * inv * t;
+        const c = t * t;
+        setImportant(cursor, "left", `${a * startX + b * controlX + c * targetX}px`);
+        setImportant(cursor, "top", `${a * startY + b * controlY + c * targetY}px`);
+        state.raf = window.requestAnimationFrame(step);
+      };
+
+      // rAF stops firing in a backgrounded document; without this the promise
+      // would never settle and the recording would hang.
+      fallbackTimer = window.setTimeout(() => {
+        if (state.raf !== null) {
+          window.cancelAnimationFrame(state.raf);
+          state.raf = null;
+        }
+        land();
+      }, duration + 50);
+      state.raf = window.requestAnimationFrame(step);
+    });
   }
 
   function styleTransient(element, zIndex) {
