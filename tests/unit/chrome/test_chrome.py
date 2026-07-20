@@ -424,6 +424,39 @@ async def test_type_url_browser_schedule_preserves_event_order_and_delays(
     assert events[4]["at"] - events[3]["at"] >= 35
 
 
+async def test_type_url_batched_schedule_stays_audible_per_character(
+    page: Page, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The batched browser-side schedule must not silence the sound feature: the
+    # pill click plus one "key" per typed character are emitted by the sibling
+    # asyncio timer that mirrors the schedule, with no per-character page.evaluate.
+    class _SilentOverlay:
+        async def move_to(self, page: Page, x: float, y: float) -> None:
+            return None
+
+        async def ripple(self, page: Page) -> None:
+            return None
+
+    chrome = Chrome(ChromeConfig(enabled=True, pre_navigate_pause_ms=10))
+    await chrome.install_shell(page)
+    monkeypatch.setattr(
+        "guidebot_recorder.chrome.chrome.typing_schedule",
+        lambda *_args, **_kwargs: [10, 10, 10],
+    )
+
+    sfx: list[str] = []
+    await chrome.type_url(
+        page,
+        _SilentOverlay(),
+        "abc",
+        seed="stable",
+        choreograph=True,
+        on_sfx=sfx.append,
+    )
+
+    assert sfx == ["click", "key", "key", "key"]
+
+
 async def test_type_url_cancellation_stops_browser_side_schedule(
     page: Page, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from collections.abc import Callable
 from importlib.resources import files
 from uuid import uuid4
 
@@ -270,6 +272,7 @@ class Chrome:
         *,
         seed: str,
         choreograph: bool,
+        on_sfx: Callable[[str], None] | None = None,
     ) -> None:
         """Drive the address-bar choreography in the shell before navigation.
 
@@ -277,6 +280,8 @@ class Chrome:
         focus); otherwise only the natural typing animation plays. In both cases
         the URL is typed character by character, paced by :func:`typing_schedule`
         so the per-character delay sequence is deterministic across re-renders.
+        ``on_sfx`` (when given) is called ``"click"`` at the pill click and
+        ``"key"`` per typed character, so the address bar is audible like the page.
         """
 
         await self.ensure_shell(page)
@@ -286,6 +291,8 @@ class Chrome:
             cy = rect["y"] + rect["height"] / 2
             await overlay.move_to(page, cx, cy)
             await overlay.ripple(page)
+            if on_sfx is not None:
+                on_sfx("click")
         delays = typing_schedule(
             url,
             char_delay_ms=self.config.char_delay_ms,
@@ -295,16 +302,43 @@ class Chrome:
         )
         token = uuid4().hex
         await page.evaluate(_ARM_TYPE_URL_SCRIPT, token)
+
+        async def _drive_browser_typing() -> None:
+            # One batched browser-side schedule types the whole URL (focus, clear,
+            # per-character append, blur all run in-page), so the render loop pays a
+            # single page.evaluate instead of one round-trip per character.
+            try:
+                await page.evaluate(
+                    _TYPE_URL_SCRIPT,
+                    {
+                        "text": url,
+                        "delays": delays,
+                        "preNavigatePauseMs": self.config.pre_navigate_pause_ms,
+                        "token": token,
+                    },
+                )
+            except asyncio.CancelledError:
+                await _cancel_type_url(page, token)
+                raise
+
+        if on_sfx is None:
+            await _drive_browser_typing()
+            return
+
+        # The address bar stays audible per character without reintroducing the
+        # per-character page.evaluate round-trips the batched schedule removed: a
+        # sibling asyncio timer replays the same delay schedule and clicks as each
+        # character lands in-page. asyncio.sleep (not page.wait_for_timeout) keeps
+        # the browser-side schedule the single source of DOM truth.
+        async def _emit_key_sfx() -> None:
+            for delay in delays:
+                await asyncio.sleep(delay / 1000)
+                on_sfx("key")
+
+        sfx_task = asyncio.create_task(_emit_key_sfx())
         try:
-            await page.evaluate(
-                _TYPE_URL_SCRIPT,
-                {
-                    "text": url,
-                    "delays": delays,
-                    "preNavigatePauseMs": self.config.pre_navigate_pause_ms,
-                    "token": token,
-                },
-            )
-        except asyncio.CancelledError:
-            await _cancel_type_url(page, token)
-            raise
+            await _drive_browser_typing()
+        finally:
+            sfx_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sfx_task

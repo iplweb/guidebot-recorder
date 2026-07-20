@@ -138,7 +138,7 @@ włączonym chrome viewport układu strony to `width × (height − chrome.heigh
 | `showLock` | `true` | Pokazuje dekoracyjną kłódkę dla HTTPS. |
 | `closeColor`, `minimizeColor`, `maximizeColor` | kolory macOS | Kolory dekoracyjnych kropek. |
 | `interactOnNavigate` | `true` | W kroku nawigacji kursor podjeżdża do pola adresu, klika, pole dostaje wygląd „w fokusie", a potem URL jest wpisywany. |
-| `charDelayMs` | `110` | Bazowe opóźnienie na znak przy wpisywaniu (ms). |
+| `charDelayMs` | `60` | Bazowe opóźnienie na znak przy wpisywaniu (ms). |
 | `charJitterMs` | `55` | Losowy jitter dodawany do opóźnienia każdego znaku (ms). |
 | `segmentPauseMs` | `180` | Pauza między segmentami URL-a (ms). |
 | `preNavigatePauseMs` | `400` | Pauza po zakończeniu wpisywania, przed załadowaniem (ms). |
@@ -206,27 +206,32 @@ pop-upu nie ma paska adresu — rysowana jest tylko ramka kompozytora.
 
 ### `typing`
 
-Render-only animacja wpisywania znak po znaku. Compile zawsze wypełnia pole
-natychmiast; animuje wyłącznie `render`.
+Render-only animacja wpisywania znak po znaku, **domyślnie włączona**. Pola
+formularza wpisują się z tym samym naturalnym odczuciem co pasek adresu — bazowe
+opóźnienie na znak plus jitter. Compile zawsze wypełnia pole natychmiast; animuje
+wyłącznie `render`.
 
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
-| `animate` | `false` | Gdy `true`, wpisuje tekst znak po znaku zamiast wklejać go od razu. |
-| `speed` | `60` | Milisekundy **na znak** — opóźnienie; im więcej, tym wolniej. Nie mylić z `cursor.speed`, które jest tempem (px/ms) — to dwa różne pojęcia. |
+| `animate` | `true` | Wpisuje tekst znak po znaku zamiast wklejać od razu. Ustaw `false` per scenariusz, by wrócić do natychmiastowego wypełnienia. |
+| `speed` | `60` | Bazowe milisekundy **na znak** — opóźnienie; im więcej, tym wolniej. Nie mylić z `cursor.speed`, które jest tempem (px/ms) — to dwa różne pojęcia. |
+| `jitterMs` | `40` | ± losowy jitter (ms) wokół `speed`, żeby wpisywanie było naturalne, nie metronomiczne. |
 
-Zostaw `animate: false` dla pól maskowanych, formatowanych lub z autouzupełnianiem,
-gdzie animacja znak po znaku mogłaby zniekształcić finalną wartość.
+Ustaw `animate: false` dla pól maskowanych, formatowanych lub z autouzupełnianiem,
+gdzie animacja znak po znaku mogłaby zniekształcić finalną wartość (finalna wartość
+i tak jest korygowana).
 
 ### `sound`
 
-Render-only, opcjonalne, wbudowane efekty dźwiękowe wmiksowane pod narrację na każdej
-ścieżce językowej. Dźwięki są wbudowane w Guidebota — nie podajesz własnych plików.
+Render-only, wbudowane efekty dźwiękowe wmiksowane pod narrację na każdej ścieżce
+językowej, **domyślnie włączone**. Dźwięki są wbudowane w Guidebota — nie podajesz
+własnych plików.
 
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
-| `enabled` | `false` | Włącza podkład dźwiękowy. |
-| `click` | `true` | Odtwarza cichy dźwięk kliknięcia przy każdym kliknięciu. |
-| `keys` | `true` | Odtwarza cichy dźwięk klawisza przy każdym wpisywanym znaku. Słyszalny tylko, gdy `typing.animate` jest też `true`. |
+| `enabled` | `true` | Podkład dźwiękowy. Ustaw `false` dla cichego filmu (sama narracja). |
+| `click` | `true` | Cichy dźwięk kliknięcia przy każdym kliknięciu (oraz kliknięciu pigułki paska adresu). |
+| `keys` | `true` | Cichy dźwięk klawisza na każdy wpisywany znak — zarówno w polach formularza (gdy `typing.animate`), jak i podczas wpisywania w **pasek adresu**. |
 | `volume` | `-12.0` | Tłumienie w dB podkładu dźwiękowego; musi być `0` lub mniej. |
 
 ### `intro`

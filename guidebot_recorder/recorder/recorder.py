@@ -14,6 +14,7 @@ from collections.abc import Callable
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Frame, Locator, Page
 
+from guidebot_recorder.chrome.typing import typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
@@ -32,6 +33,7 @@ class Recorder:
         frame: Page | Frame | None = None,
         *,
         type_delay_ms: float | None = None,
+        type_jitter_ms: int = 0,
         on_sfx: Callable[[str], None] | None = None,
     ) -> None:
         self.page = page
@@ -47,8 +49,16 @@ class Recorder:
         # Per-character pause (ms) for the animated `enter_text` path; None keeps
         # the instant `locator.fill()` behavior (compile-mode / no polish).
         self._type_delay_ms = type_delay_ms
+        # ± jitter (ms) around the per-character delay so form typing reads as
+        # natural as the address bar, not metronomic.
+        self._type_jitter_ms = type_jitter_ms
         # Sound-effect hook, called with "click" or "key"; None means silent.
         self._on_sfx = on_sfx
+
+    @property
+    def on_sfx(self) -> Callable[[str], None] | None:
+        """The SFX hook (or ``None`` when muted) — reused for the address bar."""
+        return self._on_sfx
 
     async def _point_and_prepare(self, target: Target, *, click_sound: bool = False) -> Locator:
         locator = await build_locator(self.frame, target)
@@ -98,12 +108,24 @@ class Recorder:
             await locator.fill(text)
             return
         await locator.fill("")
+        # Same natural feel as the address bar: a jittered per-character schedule
+        # (no segment pauses — those are for URLs). ``delays[j]`` is the pre-delay
+        # for char j; the first char types immediately (delays[0] unused), then each
+        # subsequent char waits its own jittered pause. Seeded by the text so a
+        # re-render types identically.
+        delays = typing_schedule(
+            text,
+            char_delay_ms=int(self._type_delay_ms),
+            char_jitter_ms=self._type_jitter_ms,
+            segment_pause_ms=0,
+            seed=text,
+        )
         for i, ch in enumerate(text):
             await locator.press_sequentially(ch)
             if self._on_sfx is not None:
                 self._on_sfx("key")
             if i < len(text) - 1:
-                await self.page.wait_for_timeout(self._type_delay_ms)
+                await self.page.wait_for_timeout(delays[i + 1])
         try:
             needs_fix = await locator.input_value() != text
         except PlaywrightError:

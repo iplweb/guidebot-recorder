@@ -1075,11 +1075,18 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     assert any(k.get("type_delay_ms") == 55 for k in recorder_kwargs)
 
 
-async def test_render_leaves_typing_animation_off_by_default(tmp_path, monkeypatch):
+async def test_render_respects_typing_animate_false(tmp_path, monkeypatch):
+    # Typing now animates by default (see test_config defaults); this guards the
+    # explicit opt-out: `typing.animate: false` must leave the Recorder without a
+    # per-character delay so fields fill instantly.
     import guidebot_recorder.recorder.render as R
 
+    scenario = SCENARIO.replace(
+        "  tts: {provider: fake, voice: v, lang: pl-PL}\n",
+        "  tts: {provider: fake, voice: v, lang: pl-PL}\n  typing: {animate: false}\n",
+    )
     path = tmp_path / "no-typing.scenario.yaml"
-    path.write_text(SCENARIO, encoding="utf-8")
+    path.write_text(scenario, encoding="utf-8")
 
     recorder_kwargs: list = []
 
@@ -1182,10 +1189,12 @@ async def test_render_with_sound_collects_and_mixes_sfx(tmp_path, monkeypatch):
 
 
 async def test_render_sound_off_builds_no_sfx_bed(tmp_path, monkeypatch):
+    # Sound is on by default now; this guards the explicit opt-out: with
+    # `sound.enabled: false` no SFX are collected and no bed is ever built.
     import guidebot_recorder.recorder.render as R
 
     path = tmp_path / "sound-off.scenario.yaml"
-    await _compile_sound_scenario(path, "")
+    await _compile_sound_scenario(path, "  sound: {enabled: false}\n")
 
     calls: list = []
     original_build_sfx_bed = R.build_sfx_bed

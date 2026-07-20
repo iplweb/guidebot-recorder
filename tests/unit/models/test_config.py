@@ -288,7 +288,7 @@ def test_new_chrome_typing_fields_defaults():
     chrome = ChromeConfig()
 
     assert chrome.interact_on_navigate is True
-    assert chrome.char_delay_ms == 110
+    assert chrome.char_delay_ms == 60
     assert chrome.char_jitter_ms == 55
     assert chrome.segment_pause_ms == 180
     assert chrome.pre_navigate_pause_ms == 400
@@ -401,9 +401,12 @@ def test_typing_config_defaults_and_bounds():
     from guidebot_recorder.models.config import TypingConfig
 
     t = TypingConfig()
-    assert t.animate is False and t.speed == 60
+    assert t.animate is True and t.speed == 60 and t.jitter_ms == 40
+    assert TypingConfig(jitterMs=25).jitter_ms == 25  # camelCase alias
     with pytest.raises(ValidationError):
         TypingConfig(speed=0)
+    with pytest.raises(ValidationError):
+        TypingConfig(jitter_ms=-1)  # ge=0
     with pytest.raises(ValidationError):
         TypingConfig(bogus=1)
 
@@ -413,7 +416,7 @@ def test_sound_config_defaults_and_bounds():
     from guidebot_recorder.models.config import SoundConfig
 
     s = SoundConfig()
-    assert (s.enabled, s.click, s.keys, s.volume) == (False, True, True, -12.0)
+    assert (s.enabled, s.click, s.keys, s.volume) == (True, True, True, -12.0)
     with pytest.raises(ValidationError):
         SoundConfig(volume=3.0)   # positive gain rejected (le=0)
     with pytest.raises(ValidationError):

@@ -90,7 +90,7 @@ class FakeShellChrome:
     async def ensure_shell(self, page) -> None:
         self.events.append(("ensure_shell", page.url))
 
-    async def type_url(self, page, overlay, url, *, seed, choreograph) -> None:
+    async def type_url(self, page, overlay, url, *, seed, choreograph, on_sfx=None) -> None:
         self.events.append(("type_url", url, seed, choreograph))
 
     async def set_url_shell(self, page, url) -> None:
@@ -106,6 +106,7 @@ class FakeShellRecorder:
     frame: FakeSiteFrame
     events: list[tuple]
     final_url: str
+    on_sfx = None
 
     async def navigate(self, url: str) -> None:
         self.events.append(("navigate", url))

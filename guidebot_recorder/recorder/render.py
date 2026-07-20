@@ -1009,6 +1009,7 @@ async def run_render(
                 settle_ms=cfg.cursor.settle,
                 frame=site_frame if on_shell else None,
                 type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
+                type_jitter_ms=cfg.typing.jitter_ms,
                 on_sfx=(sfx_sink if cfg.sound.enabled else None),
             )
             try:
@@ -1238,6 +1239,7 @@ async def _render_step(
                     url,
                     seed=f"{url}:{index}",
                     choreograph=(mode == "choreograph"),
+                    on_sfx=recorder.on_sfx,
                 )
             await recorder.navigate(url)
             if show_url:

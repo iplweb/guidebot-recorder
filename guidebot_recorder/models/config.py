@@ -101,7 +101,7 @@ class ChromeConfig(BaseModel):
 
     # --- Typing / interaction in the address bar (render-only, off the hash) ---
     interact_on_navigate: bool = Field(default=True, alias="interactOnNavigate")
-    char_delay_ms: int = Field(default=110, alias="charDelayMs")
+    char_delay_ms: int = Field(default=60, alias="charDelayMs")
     char_jitter_ms: int = Field(default=55, alias="charJitterMs")
     segment_pause_ms: int = Field(default=180, alias="segmentPauseMs")
     pre_navigate_pause_ms: int = Field(default=400, alias="preNavigatePauseMs")
@@ -119,10 +119,10 @@ class IntroConfig(BaseModel):
 
 
 class SoundConfig(BaseModel):
-    """Render-only, opt-in built-in SFX mixed under the narration."""
+    """Render-only built-in SFX mixed under the narration (on by default)."""
 
     model_config = ConfigDict(extra="forbid")
-    enabled: bool = False
+    enabled: bool = True
     click: bool = True
     keys: bool = True
     # dB attenuation on the SFX bed; <= 0 only. A positive gain would erode the
@@ -131,13 +131,22 @@ class SoundConfig(BaseModel):
 
 
 class TypingConfig(BaseModel):
-    """Render-only character-by-character input animation."""
+    """Render-only character-by-character input animation (on by default).
+
+    Form fields are typed with the same natural feel as the address bar: a base
+    per-character delay plus jitter. Set ``animate: false`` per scenario for
+    masked/formatted/autocomplete fields where per-character replay could
+    misrepresent the value (the final value is corrected regardless).
+    """
 
     model_config = ConfigDict(extra="forbid")
-    animate: bool = False                  # opt-in; keeps existing renders inert
+    animate: bool = True
     # ms PER CHARACTER — a *delay* (higher = slower). NOT CursorConfig.speed, which is
     # a px/ms *rate* (higher = faster). Same word, inverted meaning; do not confuse.
     speed: int = Field(default=60, gt=0)
+    # ± jitter (ms) around ``speed`` so form typing is natural, not metronomic —
+    # matching the address-bar feel (ChromeConfig.char_jitter_ms).
+    jitter_ms: int = Field(default=40, alias="jitterMs", ge=0)
 
 
 class PopupConfig(BaseModel):
