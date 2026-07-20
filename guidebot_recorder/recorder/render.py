@@ -899,6 +899,7 @@ async def run_render(
     verbose: bool = False,
     hold_frame: bool | None = None,
     hold_frame_settle: float | None = None,
+    dump_timeline: bool = False,
 ) -> None:
     path = Path(path)
     out_mp4 = Path(out_mp4)
@@ -1396,6 +1397,8 @@ async def run_render(
     # there. Only what is consumed downstream — narration and SFX — moves onto
     # the virtual axis.
     timeline = _build_timeline(time_edits, source_frames=probe_frame_count(source_video))
+    if dump_timeline:
+        out_mp4.with_suffix(".timeline.json").write_text(timeline.to_json(), encoding="utf-8")
     if not timeline.is_empty:
         assert_recording_fps(source_video)
         edited = work / f"{out_mp4.stem}.timeline.mp4"

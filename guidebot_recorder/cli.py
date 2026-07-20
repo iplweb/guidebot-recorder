@@ -170,8 +170,6 @@ def render_cmd(
     # `run_render` reloads the scenario from `path` itself, so the hold-frame
     # flags are passed to it as explicit overrides rather than mutated onto this
     # Config (which the renderer never sees). `None` keeps the scenario's value.
-    # NOTE: `dump_timeline` is collected here but not threaded through
-    # `run_render` yet: that parameter is added in Task 5.
     providers = {track.provider for track in [cfg.tts, *cfg.audio_tracks]}
     if providers != {"edge"}:
         configured = ", ".join(sorted(providers))
@@ -197,6 +195,7 @@ def render_cmd(
                     verbose=verbose,
                     hold_frame=hold_frame,
                     hold_frame_settle=hold_frame_settle,
+                    dump_timeline=dump_timeline,
                 )
             finally:
                 await browser.close()

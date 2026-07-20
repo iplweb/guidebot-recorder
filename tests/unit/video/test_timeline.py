@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from guidebot_recorder.video.timeline import (
@@ -255,3 +257,13 @@ def test_filtergraph_allows_a_lone_kept_frame_as_the_final_segment() -> None:
         "[s1]trim=start_frame=147,setpts=PTS-STARTPTS[v1];"
         "[v0][v1]concat=n=2:v=1:a=0[v]"
     )
+
+
+def test_to_json_describes_both_axes() -> None:
+    tl = Timeline.build([TimeEdit(at=75, kind="freeze", frames=59)], source_frames=148)
+    payload = json.loads(tl.to_json())
+    assert payload["fps"] == 25
+    assert payload["source_frames"] == 148
+    assert payload["virtual_frames"] == 207
+    assert payload["virtual_duration"] == pytest.approx(8.28)
+    assert payload["edits"] == [{"at": 75, "kind": "freeze", "frames": 59}]

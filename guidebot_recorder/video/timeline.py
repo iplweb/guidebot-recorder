@@ -18,6 +18,7 @@ Two axes exist:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,6 +150,19 @@ class Timeline:
     def virtual_duration(self) -> float:
         """Length of the finished film, in seconds."""
         return frames_to_seconds(self.virtual_frames)
+
+    def to_json(self) -> str:
+        """Serialise both axes for diagnostics."""
+        return json.dumps(
+            {
+                "fps": FPS,
+                "source_frames": self.source_frames,
+                "virtual_frames": self.virtual_frames,
+                "virtual_duration": self.virtual_duration,
+                "edits": [{"at": e.at, "kind": e.kind, "frames": e.frames} for e in self.edits],
+            },
+            indent=2,
+        )
 
 
 def _segments(timeline: Timeline) -> list[tuple[int, int, int]]:
