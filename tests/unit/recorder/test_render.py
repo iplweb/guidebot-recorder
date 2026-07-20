@@ -68,6 +68,14 @@ class MockReasoner:
         )
 
 
+class LinkReasoner:
+    async def resolve(self, instruction, candidates):
+        return ReasonerResult(
+            action="click",
+            target=RoleTarget(role="link", name="otworz", exact=True),
+        )
+
+
 class TypeReasoner:
     async def resolve(self, instruction, candidates):
         return ReasonerResult(
@@ -2444,3 +2452,82 @@ async def test_hand_cursor_to_popup_skips_centring_without_a_viewport():
     await render_module._hand_cursor_to_popup(main, popup, overlay)
 
     assert overlay.calls == [("hide", main)]
+
+
+# --- closeWindow ---------------------------------------------------------------
+
+
+def _write_close_window_scenario(tmp_path: Path) -> Path:
+    # A data: page cannot open a new window onto another data: URL (Chromium
+    # blocks it outright), so the popup destination needs a real file:// URL —
+    # same convention as test_compile.py's closeWindow test.
+    second = tmp_path / "second.html"
+    second.write_text("<p>druga</p>", encoding="utf-8")
+    main = tmp_path / "main.html"
+    main.write_text(
+        f"<a href='{second.resolve().as_uri()}' target='_blank'>otworz</a>",
+        encoding="utf-8",
+    )
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: Karta
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+          popup: {{transition: slide, slideMs: 40}}
+        steps:
+          - navigate: "{main.resolve().as_uri()}"
+          - teach: "kliknij otworz"
+          - closeWindow: true
+          - say: "Wrocilismy do glownego okna."
+        """
+    )
+    path = tmp_path / "tab.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+    return path
+
+
+async def test_close_window_returns_to_main_and_restores_the_cursor(tmp_path):
+    path = _write_close_window_scenario(tmp_path)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert out.exists()
+    assert probe_duration(out) > 0
+
+
+async def test_close_window_hands_the_cursor_back_to_its_pre_popup_position(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    restored: list[tuple[float, float] | None] = []
+    original = R._prepare_main_after_popup_close
+
+    async def spy(page, overlay, chrome, settle_ms, restore_cursor_to=None):
+        restored.append(restore_cursor_to)
+        await original(page, overlay, chrome, settle_ms, restore_cursor_to=restore_cursor_to)
+
+    monkeypatch.setattr(R, "_prepare_main_after_popup_close", spy)
+
+    path = _write_close_window_scenario(tmp_path)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert restored, "closeWindow never routed through the popup-close handler"
+    assert restored[0] is not None, (
+        "the cursor was handed back without its pre-popup position -- the main "
+        "window's cursor will be parked at the popup's centre"
+    )

@@ -1854,6 +1854,8 @@ async def run_render(
                 )
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
+            if kind == "closeWindow" and popup is None:
+                raise RenderError(f"krok {index}: closeWindow bez otwartego okna")
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
             recorder = Recorder(
@@ -2117,6 +2119,13 @@ async def _render_step(
             if remaining <= 0:
                 return None
             await asyncio.sleep(min(0.1, remaining))
+    if kind == "closeWindow":
+        # The loop's popup-lifecycle check sees the closed page next and runs
+        # `_prepare_main_after_popup_close` with the saved cursor position. Do not
+        # duplicate that here: calling the funnel without `restore_cursor_to`
+        # leaves the main window's cursor at the popup's centre.
+        await page.close()
+        return None
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()
