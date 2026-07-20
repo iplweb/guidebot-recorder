@@ -26,20 +26,21 @@ from playwright.async_api import (
 from playwright.async_api import (
     Error as PlaywrightError,
 )
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 from tqdm import tqdm
 
 from guidebot_recorder.models.action import (
     COMPILER_VERSION,
-    ActionKind,
     CachedAction,
-    Expect,
     Fingerprint,
-    validate_teach_input_text,
+    PendingAction,
     validate_teach_instruction,
 )
-from guidebot_recorder.models.compiled import CompiledScenario
+from guidebot_recorder.models.compiled import CompiledAction, CompiledScenario
 from guidebot_recorder.models.config import config_hash, site_viewport
-from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
+from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil
 from guidebot_recorder.models.target import (
     LabelTarget,
     RoleTarget,
@@ -54,54 +55,25 @@ from guidebot_recorder.recorder._debug import (
     scenario_sensitive_values,
 )
 from guidebot_recorder.recorder.recorder import Recorder
-from guidebot_recorder.resolver.identity_capture import capture_identity
-from guidebot_recorder.resolver.page_context import collect_candidates
-from guidebot_recorder.resolver.reasoner import Reasoner, ReasonerError, ReasonerResult
-from guidebot_recorder.resolver.validate import (
-    ValidationOk,
-    is_sensitive_type_target,
-    reuse_is_valid,
-    validate_compile_time,
+from guidebot_recorder.resolver.reasoner import Reasoner
+from guidebot_recorder.resolver.resolution import (
+    ResolvedTarget,
+    TargetAbsent,
+    heuristic_expect,
+    resolve_step_target,
+    step_state,
 )
+from guidebot_recorder.resolver.resolution import (
+    step_instruction as _instruction,
+)
+from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
-_MAX_REPROMPT = 2
+__all__ = ["compile_up_to_date", "heuristic_expect", "run_compile", "run_compile_in_browser"]
+
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
-
-
-def _instruction(step: Step) -> str:
-    kind = step.command_kind()
-    if kind == "teach":
-        return step.teach
-    if kind == "click":
-        return step.click
-    if kind == "hover":
-        return step.hover
-    if kind == "enterText":
-        return step.enter_text.into
-    if kind == "wait":
-        return step.wait.until
-    raise ValueError(f"krok bez instrukcji do rozwiązania: {kind}")
-
-
-def _action_for(kind: str, resolved: ActionKind) -> ActionKind:
-    if kind == "teach":
-        return resolved  # click / hover / type — inferred by the LLM
-    if kind == "click":
-        return "click"
-    if kind == "hover":
-        return "hover"
-    if kind == "enterText":
-        return "type"
-    if kind == "wait":
-        return "waitFor"
-    raise ValueError(f"krok bez akcji: {kind}")
-
-
-def heuristic_expect(url_before: str, url_after: str) -> Expect:
-    return "navigation" if url_before != url_after else "none"
 
 
 def _resolve_url(scenario: Scenario, url: str) -> str:
@@ -139,7 +111,7 @@ def _target_desc(target: Target) -> str:
     return str(target)
 
 
-def _load_prior_actions(cpath: Path, n_steps: int) -> list[CachedAction | None]:
+def _load_prior_actions(cpath: Path, n_steps: int) -> list[CompiledAction | None]:
     """Load existing compiled actions for reuse, aligned by index to the current steps.
 
     Steps appended at the end stay ``None`` (to be resolved). If a step is inserted
@@ -147,7 +119,7 @@ def _load_prior_actions(cpath: Path, n_steps: int) -> list[CachedAction | None]:
     (:func:`_can_reuse`) will simply re-resolve the affected steps — correctness is
     never traded for the incremental speed-up.
     """
-    result: list[CachedAction | None] = [None] * n_steps
+    result: list[CompiledAction | None] = [None] * n_steps
     if not cpath.exists():
         return result
     try:
@@ -162,13 +134,13 @@ def _load_prior_actions(cpath: Path, n_steps: int) -> list[CachedAction | None]:
 
 
 def _steps_needing_resolution(
-    scenario: Scenario, actions: list[CachedAction | None], chash: str, force: bool
+    flat: list[FlatStep], actions: list[CompiledAction | None], chash: str, force: bool
 ) -> list[int]:
-    """Indices of target steps whose frozen action is missing or stale."""
+    """Flat indices of target steps whose frozen action is missing or stale."""
     return [
         i
-        for i, step in enumerate(scenario.steps)
-        if step.requires_target() and not _can_reuse(actions[i], step, chash, force)
+        for i, entry in enumerate(flat)
+        if entry.step.requires_target() and not _can_reuse(actions[i], entry.step, chash, force)
     ]
 
 
@@ -186,15 +158,16 @@ def compile_up_to_date(
     scenario = load_scenario(path, env)
     chash = config_hash(scenario.config)
     cpath = compiled_path(path)
-    if not _compiled_artifact_is_current(cpath, path.name, len(scenario.steps)):
+    flat = scenario.flat_steps()
+    if not _compiled_artifact_is_current(cpath, path.name, len(flat)):
         return False
-    actions = _load_prior_actions(cpath, len(scenario.steps))
+    actions = _load_prior_actions(cpath, len(flat))
     if any(
-        not step.requires_target() and actions[index] is not None
-        for index, step in enumerate(scenario.steps)
+        not entry.step.requires_target() and actions[index] is not None
+        for index, entry in enumerate(flat)
     ):
         return False
-    return not _steps_needing_resolution(scenario, actions, chash, force)
+    return not _steps_needing_resolution(flat, actions, chash, force)
 
 
 def _compiled_artifact_is_current(cpath: Path, source_name: str, n_steps: int) -> bool:
@@ -295,10 +268,14 @@ async def run_compile(
 
     context.on("page", observe_page)
 
-    steps = scenario.steps
+    # Flat indexing: a `when:` block contributes its synthetic gate step followed by
+    # its children, so `actions` stays positionally 1:1 with what actually executes.
+    flat = scenario.flat_steps()
     cpath = compiled_path(path)
-    actions = _load_prior_actions(cpath, len(steps))
-    artifact_dirty = not _compiled_artifact_is_current(cpath, path.name, len(steps))
+    actions = _load_prior_actions(cpath, len(flat))
+    artifact_dirty = not _compiled_artifact_is_current(cpath, path.name, len(flat))
+    #: branch whose gate turned out to be absent — its children are recorded pending
+    skipped_branch: int | None = None
 
     def checkpoint() -> None:
         """Persist only semantic progress, while keeping fresh resolves crash-safe."""
@@ -307,10 +284,21 @@ async def run_compile(
         write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
         artifact_dirty = False
 
-    bar = tqdm(total=len(steps), desc="compile", unit="krok", disable=not verbose)
+    bar = tqdm(total=len(flat), desc="compile", unit="krok", disable=not verbose)
     try:
-        for index, step in enumerate(steps):
+        for index, entry in enumerate(flat):
+            step = entry.step
             action_before = actions[index]
+            if skipped_branch is not None and entry.branch == skipped_branch:
+                # The gate never showed up: freeze the child as pending so a later
+                # render can resolve it in place, and do not execute it now.
+                actions[index] = _pending_for(step, chash) if step.requires_target() else None
+                if actions[index] != action_before:
+                    artifact_dirty = True
+                    checkpoint()
+                bar.update(1)
+                continue
+            skipped_branch = None
             if main_page.is_closed():
                 raise RuntimeError("główne okno zostało zamknięte podczas compile")
             if active_page.is_closed():
@@ -328,7 +316,7 @@ async def run_compile(
                     raise RuntimeError(str(exc)) from exc
             if verbose:
                 description = redact_text(_short(step), sensitive_values)
-                tqdm.write(f"[{index + 1}/{len(steps)}] {kind}: {description}")
+                tqdm.write(f"[{index + 1}/{len(flat)}] {kind}: {description}")
             try:
                 pages_before = tuple(context.pages)
                 observed_start = len(observed_pages)
@@ -363,11 +351,12 @@ async def run_compile(
                     before_click=arm_click_observation,
                     force=force,
                     verbose=verbose,
+                    optional=entry.is_gate or step.optional,
                 )
                 action_page_closed_in_window = action_page.is_closed()
 
                 new_pages: list[Page] = []
-                if compiled_action is not None and compiled_action.action == "click":
+                if isinstance(compiled_action, CachedAction) and compiled_action.action == "click":
                     if (
                         click_observed_start is None or click_started_at is None
                     ):  # pragma: no cover - dispatch invariant
@@ -402,7 +391,7 @@ async def run_compile(
                     if not prepared:
                         raise RuntimeError("popup zamknął się podczas otwierania")
                     active_page = popup
-                elif compiled_action is not None and compiled_action.opens_popup:
+                elif isinstance(compiled_action, CachedAction) and compiled_action.opens_popup:
                     # Refresh observed lifecycle metadata even when the target/action
                     # itself was safely reused.
                     compiled_action = compiled_action.model_copy(update={"opens_popup": False})
@@ -412,7 +401,7 @@ async def run_compile(
                     close_was_action_driven = (
                         active_page is action_page
                         and action_page_closed_in_window
-                        and compiled_action is not None
+                        and isinstance(compiled_action, CachedAction)
                         and compiled_action.action in {"click", "hover", "type"}
                     )
                     if not close_was_action_driven:
@@ -426,6 +415,10 @@ async def run_compile(
                 if _unexpected_pages(observed_pages, main_page, popup_page):
                     raise RuntimeError(f"krok {index}: nieoczekiwany dodatkowy popup")
                 actions[index] = compiled_action
+                if isinstance(compiled_action, PendingAction):
+                    _warn_absent(index, step, gate=entry.is_gate)
+                    if entry.is_gate:
+                        skipped_branch = entry.branch
             except Exception as exc:
                 safe_message = redact_exception(exc, sensitive_values)
                 if verbose:
@@ -448,7 +441,7 @@ async def run_compile(
                 artifact_dirty = True
                 checkpoint()
             bar.update(1)
-        if steps and artifact_dirty:
+        if flat and artifact_dirty:
             # Targetless scenarios and artifact-only repairs still need one final,
             # aligned sidecar even though no per-step action changed.
             checkpoint()
@@ -457,19 +450,59 @@ async def run_compile(
         bar.close()
 
 
-def _can_reuse(cached_in: CachedAction | None, step: Step, chash: str, force: bool) -> bool:
-    """Reuse only if the frozen fingerprint still matches the source and config."""
-    if force or cached_in is None:
-        return False
-    fp = cached_in.fingerprint
-    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
+def _pending_for(step: Step, chash: str) -> PendingAction:
+    """Placeholder for a target that was optional and absent at compile time.
+
+    ``expect`` is only settled by actually performing the action, so the
+    fingerprint carries the neutral ``"none"``; the entry exists to keep the
+    usual version/config invalidation working until render resolves it.
+    """
+
+    return PendingAction(
+        fingerprint=Fingerprint(
+            command_kind=step.command_kind(),
+            compiled_from=_instruction(step),
+            expect="none",
+            config_hash=chash,
+            state=step_state(step),
+        )
+    )
+
+
+def _warn_absent(index: int, step: Step, *, gate: bool) -> None:
+    what = "element bramkujący" if gate else "element opcjonalny"
+    tqdm.write(
+        f"⚠ krok {index}: {what} {_instruction(step)!r} nie pojawił się — "
+        "zapisano wpis oczekujący (pending); render rozwiąże go na miejscu"
+    )
+
+
+def _fingerprint_matches(fp: Fingerprint, step: Step, chash: str) -> bool:
     return (
         fp.compiler_version == COMPILER_VERSION
         and fp.command_kind == step.command_kind()
         and fp.compiled_from == _instruction(step)
         and fp.config_hash == chash
-        and fp.state == expected_state
-        and fp.expect == cached_in.expect
+        and fp.state == step_state(step)
+    )
+
+
+def _can_reuse(cached_in: CompiledAction | None, step: Step, chash: str, force: bool) -> bool:
+    """Reuse only if the frozen fingerprint still matches the source and config.
+
+    A :class:`PendingAction` counts as reusable on purpose: the element it stands
+    for is optional, so retrying it would launch a browser and burn the full gate
+    timeout on every compile for something that may never be there. ``--force``
+    re-attempts. It has no ``expect`` to cross-check — that is only settled once
+    the action actually runs.
+    """
+    if force or cached_in is None:
+        return False
+    if isinstance(cached_in, PendingAction):
+        return _fingerprint_matches(cached_in.fingerprint, step, chash)
+    return (
+        _fingerprint_matches(cached_in.fingerprint, step, chash)
+        and cached_in.fingerprint.expect == cached_in.expect
     )
 
 
@@ -554,12 +587,13 @@ async def _compile_step(
     step: Step,
     kind: str,
     reasoner: Reasoner,
-    cached_in: CachedAction | None,
+    cached_in: CompiledAction | None,
     *,
     before_click: Callable[[], None],
     force: bool,
     verbose: bool,
-) -> CachedAction | None:
+    optional: bool = False,
+) -> CompiledAction | None:
     if kind == "say":
         return None
     if kind == "slide":
@@ -574,6 +608,15 @@ async def _compile_step(
         return None
 
     # step that needs a target
+    if isinstance(cached_in, PendingAction):
+        if _can_reuse(cached_in, step, chash, force):
+            # An optional element that was absent last time stays pending: retrying
+            # would burn the full gate timeout on every compile. `--force` retries.
+            if verbose:
+                tqdm.write("   ↳ pending (nadal opcjonalny, nierozwiązany)")
+            return cached_in
+        cached_in = None
+
     if _can_reuse(cached_in, step, chash, force) and await reuse_is_valid(page, cached_in):
         action, target, state, expect = (
             cached_in.action,
@@ -588,53 +631,14 @@ async def _compile_step(
         if verbose:
             tqdm.write("   ↳ reuse (cache)")
     else:
-        instruction = _instruction(step)
-        candidates = await collect_candidates(page)
-        resolved = None
-        resolution_error: str | None = None
-        for _ in range(_MAX_REPROMPT):
-            result = await reasoner.resolve(instruction, candidates)
-            if isinstance(result, ReasonerError):
-                raise RuntimeError(f"reasoner: {result.reason}: {result.message}")
-            assert isinstance(result, ReasonerResult)
-            action = _action_for(kind, result.action)
-            input_text = result.input_text if action == "type" and kind == "teach" else None
-            if action == "type" and kind == "teach":
-                if not isinstance(input_text, str):
-                    resolution_error = (
-                        "reasoner nie zwrócił niepustego inputText dla akcji teach → type"
-                    )
-                    continue
-                try:
-                    validate_teach_input_text(instruction, input_text)
-                except ValueError as exc:
-                    resolution_error = str(exc)
-                    continue
-            resolution_error = None
-            validation = await validate_compile_time(page, result.target, action)
-            if isinstance(validation, ValidationOk):
-                if (
-                    action == "type"
-                    and kind == "teach"
-                    and await is_sensitive_type_target(validation.locator)
-                ):
-                    resolution_error = (
-                        "pole wygląda na przeznaczone dla wartości wrażliwej; użyj enterText z ENV"
-                    )
-                    continue
-                resolved = (action, result.target, validation.locator, input_text)
-                break
-        if resolved is None:
-            if resolution_error is not None:
-                raise RuntimeError(f"{resolution_error} po {_MAX_REPROMPT} próbach")
-            raise RuntimeError(f"nie udało się zwalidować namiaru dla: {instruction!r}")
-        action, target, locator, input_text = resolved
-        state = step.wait.state if isinstance(step.wait, WaitUntil) else None
-        # freeze identity BEFORE the action (the DOM may change); waitFor:hidden has none
-        if action == "waitFor" and state == "hidden":
-            identity = None
-        else:
-            identity = await capture_identity(locator)
+        resolved = await resolve_step_target(page, step, kind, reasoner)
+        if isinstance(resolved, TargetAbsent):
+            if not optional:
+                raise RuntimeError(resolved.error_message)
+            return _pending_for(step, chash)
+        assert isinstance(resolved, ResolvedTarget)
+        action, target, input_text = resolved.action, resolved.target, resolved.input_text
+        state, identity = resolved.state, resolved.identity
         fresh = True
         expect = None
         cached_out = None  # built after the action, once we know `expect`
@@ -663,7 +667,14 @@ async def _compile_step(
         await recorder.enter_text(target, text)
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
-        await recorder.wait_for(target, state or "visible", timeout)
+        try:
+            await recorder.wait_for(target, state or "visible", timeout)
+        except PlaywrightTimeoutError:
+            # The other half of the error boundary: an elapsed wait window on an
+            # optional step means "absent", anything else still fails the compile.
+            if not optional:
+                raise
+            return _pending_for(step, chash)
     url_after = page.url if not page.is_closed() else url_before
 
     if fresh:
