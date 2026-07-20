@@ -141,8 +141,8 @@ def render_cmd(
     timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
-    hold_frame: bool = typer.Option(
-        True,
+    hold_frame: bool | None = typer.Option(
+        None,
         "--hold-frame/--no-hold-frame",
         help="Zamroź klatkę na czas narracji zamiast czekać w czasie rzeczywistym.",
     ),
@@ -164,14 +164,10 @@ def render_cmd(
 
     scenario = load_scenario(path)
     cfg = scenario.config
-    if not hold_frame:
-        cfg.hold_frame_for_narration = False
-    if hold_frame_settle is not None:
-        cfg.hold_frame_settle = hold_frame_settle
-    # NOTE: `run_render` (Task 4) currently reloads the scenario from `path`
-    # itself rather than accepting this already-loaded/overridden `scenario`,
-    # so the two mutations above are not yet consumed by the renderer — Task 4
-    # wires that up. `dump_timeline` is collected here but not threaded through
+    # `run_render` reloads the scenario from `path` itself, so the hold-frame
+    # flags are passed to it as explicit overrides rather than mutated onto this
+    # Config (which the renderer never sees). `None` keeps the scenario's value.
+    # NOTE: `dump_timeline` is collected here but not threaded through
     # `run_render` yet: that parameter is added in Task 5.
     providers = {track.provider for track in [cfg.tts, *cfg.audio_tracks]}
     if providers != {"edge"}:
@@ -196,6 +192,8 @@ def render_cmd(
                     timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
+                    hold_frame=hold_frame,
+                    hold_frame_settle=hold_frame_settle,
                 )
             finally:
                 await browser.close()
