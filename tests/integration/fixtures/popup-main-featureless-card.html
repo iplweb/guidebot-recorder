@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Główne okno</title>
+    <style>
+      html, body { min-height: 100%; margin: 0; background: rgb(20, 40, 220); }
+      body { color: white; font: 24px sans-serif; padding: 48px; box-sizing: border-box; }
+      button { font-size: 22px; margin: 12px; padding: 12px 18px; }
+    </style>
+  </head>
+  <body>
+    <h1>Główne okno</h1>
+    <!-- No size features at all: the gap the crop fallback chain closes. -->
+    <button onclick="window.open('popup-card.html', 'guidebot-login')">
+      Otwórz logowanie
+    </button>
+    <button onclick="this.textContent = 'Gotowe'">Zakończ na stronie głównej</button>
+    <script>
+      addEventListener('message', event => {
+        if (event.data === 'guidebot-popup-closed') {
+          location.assign('popup-main-featureless-card.html?returned=1');
+        }
+      });
+    </script>
+  </body>
+</html>

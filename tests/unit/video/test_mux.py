@@ -18,6 +18,7 @@ import pytest
 from guidebot_recorder.video.mux import (
     MuxAudioTrack,
     compose_popup_video,
+    detect_content_crop,
     mux,
     mux_audio_tracks,
     mux_preencoded,
@@ -798,10 +799,10 @@ def test_slide_composition_probes_each_artifact_once(
     probed_paths: list[Path] = []
     original_run = mux_module._run
 
-    def recording_run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    def recording_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         if Path(cmd[0]).name == "ffprobe":
             probed_paths.append(Path(cmd[-1]))
-        return original_run(cmd)
+        return original_run(cmd, **kwargs)
 
     monkeypatch.setattr(mux_module, "_run", recording_run)
 
@@ -1166,6 +1167,194 @@ def test_compose_popup_video_rejects_out_of_frame_crop(tmp_path: Path) -> None:
         compose_popup_video(
             main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(0, 120, 0, 0)
         )
+
+
+# --- popup crop, level 3: the pixel heuristic --------------------------------
+# When neither the window.open features nor the popup's own content bounding box
+# state a geometry, the recording itself is the last witness: the real window is
+# the region that is *not* the flat filler Playwright pads the canvas with.
+
+
+def _make_popup_with_shifting_filler(path: Path, seconds: float) -> None:
+    """Write a 320x240 popup whose content region changes size over time.
+
+    No rect is stable across frames, so the consensus must be refused rather than
+    letting one frame's answer decide the whole composite.
+    """
+    third = seconds / 3
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x808080:duration={seconds}:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=yellow:duration={seconds}:size=300x220:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=yellow:duration={seconds}:size=200x150:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=yellow:duration={seconds}:size=100x70:rate=25",
+            "-filter_complex",
+            (
+                f"[0:v][1:v]overlay=x=0:y=0:enable='lt(t,{third:.3f})'[a];"
+                f"[a][2:v]overlay=x=0:y=0:"
+                f"enable='between(t,{third:.3f},{2 * third:.3f})'[b];"
+                f"[b][3:v]overlay=x=0:y=0:enable='gt(t,{2 * third:.3f})',"
+                "format=yuv420p[outv]"
+            ),
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_detect_content_crop_finds_the_window_inside_flat_filler(tmp_path: Path) -> None:
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_filler(popup, 1.2)
+
+    # The filler is mid-grey, not black, so a plain cropdetect would see nothing:
+    # the detection keys on "differs from the padding colour", not on darkness.
+    assert detect_content_crop(popup) == (160, 120, 0, 0)
+
+
+def test_detect_content_crop_declines_on_a_full_frame_recording(tmp_path: Path) -> None:
+    popup = tmp_path / "popup.mp4"
+    _make_color_video(popup, "yellow", 1.2)
+
+    # Nothing to trim: no crop at all rather than a bogus one.
+    assert detect_content_crop(popup) is None
+
+
+def test_detect_content_crop_declines_without_a_stable_rect(tmp_path: Path) -> None:
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_shifting_filler(popup, 1.5)
+
+    # Taking the first frame's answer here would make the framed window jump.
+    assert detect_content_crop(popup) is None
+
+
+def _make_full_bleed_popup_with_ink(path: Path, seconds: float) -> None:
+    """Write a 320x240 popup that fills its canvas, with darker ink inside it.
+
+    The real shape of a featureless ``window.open``: no padding anywhere, the
+    page's own background in every corner, and content painted on top.
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=yellow:duration={seconds}:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:duration={seconds}:size=120x60:rate=25",
+            "-filter_complex",
+            "[0:v][1:v]overlay=x=40:y=50,format=yuv420p[outv]",
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_detect_content_crop_declines_on_ink_inside_a_full_bleed_page(tmp_path: Path) -> None:
+    """Ink floating inside a full-bleed page is not a window inside padding.
+
+    Regression from a real recording: a featureless ``window.open`` filled the
+    whole canvas, so the corner pixel sampled the *page's* background and the
+    detection happily "trimmed" everything except the text. Playwright always
+    anchors the popup at the top-left, so a rect that does not start at the
+    origin is proof the reading is bogus.
+    """
+    popup = tmp_path / "popup.mp4"
+    _make_full_bleed_popup_with_ink(popup, 1.2)
+
+    assert detect_content_crop(popup) is None
+
+
+def test_detect_content_crop_declines_on_a_missing_file(tmp_path: Path) -> None:
+    # A last-resort heuristic must never abort a render that would otherwise
+    # simply not crop.
+    assert detect_content_crop(tmp_path / "absent.mp4") is None
+
+
+def test_detect_content_crop_declines_when_ffmpeg_overruns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_filler(popup, 1.0)
+
+    def timing_out(cmd, **kwargs):
+        assert kwargs.get("timeout") == mux_module.CROPDETECT_TIMEOUT, (
+            "every detection pass must carry the timeout"
+        )
+        raise subprocess.TimeoutExpired(cmd, mux_module.CROPDETECT_TIMEOUT)
+
+    monkeypatch.setattr(mux_module, "_run", timing_out)
+
+    # A wedged ffmpeg costs the crop, never the render.
+    assert detect_content_crop(popup) is None
+
+
+def test_detect_content_crop_passes_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_filler(popup, 1.0)
+    timeouts: list[float | None] = []
+    real_run = mux_module._run
+
+    def spy_run(cmd, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(mux_module, "_run", spy_run)
+
+    assert detect_content_crop(popup) == (160, 120, 0, 0)
+    # Both the padding sample and the cropdetect pass, not just one of them.
+    assert timeouts and all(value == mux_module.CROPDETECT_TIMEOUT for value in timeouts), timeouts
+
+
+def test_detect_content_crop_result_feeds_compose_popup_video(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+
+    crop = detect_content_crop(popup)
+    assert crop is not None
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=crop
+    )
+
+    # Same framing as the deterministic level-1 crop: filler gone, backdrop kept.
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CROPPED_RIGHT))
+    _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
 
 
 def test_compose_popup_video_explicit_transition_overrides_floating(tmp_path: Path) -> None:
