@@ -234,6 +234,7 @@ def render_set_cmd(
                     timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
+                    reasoner=_render_reasoner(),
                 )
             finally:
                 await browser.close()

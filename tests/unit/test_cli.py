@@ -1,3 +1,4 @@
+import shutil
 import textwrap
 from pathlib import Path
 
@@ -350,6 +351,10 @@ def test_render_set_success_wires_dependencies_and_closes_browser(tmp_path, monk
     assert received_provider is provider
     assert cache_dir == Path(".guidebot/audio")
     assert received_browser is browser
+    reasoner = kwargs.pop("reasoner")
     assert kwargs == {"timeout": 9.5, "pause_on_error": True, "verbose": True}
+    # Render sets heal pending optional branches too, so they get a reasoner on
+    # the same terms as a plain render: only when the Codex CLI is installed.
+    assert (reasoner is not None) == (shutil.which("codex") is not None)
     assert browser.closed is True
     assert f"zrenderowano: {out_dir / 'en.mp4'}" in result.output
