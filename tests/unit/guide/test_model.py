@@ -18,8 +18,12 @@ def test_page_text_empty_when_no_text():
 def test_annotation_and_page_construct():
     a = Annotation(kind="click", cx=1.0, cy=2.0, r=18.0)
     page = GuidePage(
-        kind="step", screenshot=None, text="t", heading=None,
-        annotations=[a], screenshot_size=(800, 600),
+        kind="step",
+        screenshot=None,
+        text="t",
+        heading=None,
+        annotations=[a],
+        screenshot_size=(800, 600),
     )
     assert page.annotations[0].kind == "click"
     assert page.screenshot_size == (800, 600)

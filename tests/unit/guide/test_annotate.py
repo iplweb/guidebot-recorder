@@ -1,6 +1,5 @@
 from guidebot_recorder.guide.annotate import CLICK_RADIUS, annotations_for
 
-
 BOX = {"x": 10.0, "y": 20.0, "width": 100.0, "height": 40.0}
 CENTER = (60.0, 40.0)
 

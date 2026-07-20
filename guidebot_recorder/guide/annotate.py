@@ -22,12 +22,18 @@ def annotations_for(
     anns: list[Annotation] = []
     if prev_cursor is not None and center is not None:
         anns.append(
-            Annotation(kind="arrow", x1=prev_cursor[0], y1=prev_cursor[1], x2=center[0], y2=center[1])
+            Annotation(
+                kind="arrow", x1=prev_cursor[0], y1=prev_cursor[1], x2=center[0], y2=center[1]
+            )
         )
     if action == "click" and center is not None:
         anns.append(Annotation(kind="click", cx=center[0], cy=center[1], r=CLICK_RADIUS))
     elif action == "hover" and box is not None:
-        anns.append(Annotation(kind="hover", x=box["x"], y=box["y"], w=box["width"], h=box["height"]))
+        anns.append(
+            Annotation(kind="hover", x=box["x"], y=box["y"], w=box["width"], h=box["height"])
+        )
     elif action == "type" and box is not None:
-        anns.append(Annotation(kind="typed", x=box["x"], y=box["y"], w=box["width"], h=box["height"]))
+        anns.append(
+            Annotation(kind="typed", x=box["x"], y=box["y"], w=box["width"], h=box["height"])
+        )
     return anns
