@@ -21,6 +21,7 @@ PRIMARY_COMMANDS = (
     "hover",
     "enter_text",
     "select",
+    "scroll",
     "wait",
     "slide",
     "close_window",
@@ -63,6 +64,22 @@ class Select(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     from_: str = Field(alias="from")
     option: str
+
+
+class Scroll(BaseModel):
+    """Scroll the page — a render-only visual with no agent target.
+
+    ``to`` picks the direction/destination; ``amount`` (pixels) tunes an up/down
+    scroll and is ignored for ``top``/``bottom``. Use it to bring below-the-fold
+    content into view — for example a live-preview ``<iframe>`` whose contents the
+    resolver cannot target — so the recording still shows it. ``down`` without an
+    ``amount`` scrolls by most of a viewport; the shorthand ``scroll: down`` is
+    accepted for any of the four destinations.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    to: Literal["up", "down", "top", "bottom"] = "down"
+    amount: float | None = None
 
 
 class WaitUntil(BaseModel):
@@ -124,6 +141,7 @@ class Step(BaseModel):
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     select: Select | None = None
+    scroll: Literal["up", "down", "top", "bottom"] | Scroll | None = None
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
     desktop: Desktop | None = None
@@ -181,6 +199,10 @@ class Step(BaseModel):
         if kind == "wait" and isinstance(self.wait, WaitUntil):
             return True
         return False
+
+    def scroll_config(self) -> Scroll:
+        """Normalize the string shorthand and object form to a :class:`Scroll`."""
+        return self.scroll if isinstance(self.scroll, Scroll) else Scroll(to=self.scroll)
 
     def navigate_url(self) -> str | None:
         """Return the URL from either the legacy string or object form."""

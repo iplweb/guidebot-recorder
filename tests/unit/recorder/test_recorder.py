@@ -2,6 +2,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import Recorder
@@ -149,3 +150,31 @@ async def test_select_unknown_option_raises(page):
     rec = Recorder(page, overlay=None)
     with pytest.raises(PlaywrightError):
         await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej")
+
+
+_TALL_PAGE = "<div style='height:3000px'>tall</div>"
+
+
+async def test_scroll_down_moves_viewport_with_overlay(page):
+    overlay = Overlay()
+    await page.set_content(_TALL_PAGE)
+    await overlay.install(page)
+    rec = Recorder(page, overlay)
+    await rec.scroll(Scroll(to="down"))
+    assert await page.evaluate("() => window.scrollY") > 0
+
+
+async def test_scroll_bottom_then_top_compile_mode(page):
+    await page.set_content(_TALL_PAGE)
+    rec = Recorder(page, overlay=None)  # compile mode: jump directly
+    await rec.scroll(Scroll(to="bottom"))
+    assert await page.evaluate("() => window.scrollY") > 100
+    await rec.scroll(Scroll(to="top"))
+    assert await page.evaluate("() => window.scrollY") == 0
+
+
+async def test_scroll_amount_is_honoured(page):
+    await page.set_content(_TALL_PAGE)
+    rec = Recorder(page, overlay=None)
+    await rec.scroll(Scroll(to="down", amount=200))
+    assert await page.evaluate("() => window.scrollY") == 200

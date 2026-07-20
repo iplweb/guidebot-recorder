@@ -359,7 +359,7 @@ has no address bar — only the compositor frame is drawn.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `select`, `wait`, `slide`, and `closeWindow`;
+  `enterText`, `select`, `scroll`, `wait`, `slide`, and `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -380,6 +380,7 @@ page state and align one generated action slot with each source step.
 | `hover` | Yes | No |
 | `enterText` | Yes, `into` only | Only accompanying `say` |
 | `select` | Yes, `from` only | Only accompanying `say` |
+| `scroll` | No | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
 | `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
@@ -506,6 +507,26 @@ visibly changes even though the list never opens (a jump of more than twelve opt
 is set directly to keep the animation short). During `compile` the value is set
 directly. Either way the element ends on `option`, so later steps and the render
 agree. Pair it with a `say` such as "from this list I choose …" to narrate the intent.
+
+### `scroll`
+
+```yaml
+- scroll: down                    # up | down | top | bottom
+- scroll: { to: down, amount: 300 }   # object form; amount in pixels
+  say: "I scroll down to reveal the results preview."
+```
+
+Scroll the page — a render-only visual with no agent target, like a numeric `wait`.
+`to` is `up`, `down`, `top`, or `bottom`; the string shorthand `scroll: down` is
+accepted for all four. `amount` (pixels) tunes an `up`/`down` scroll and is ignored
+for `top`/`bottom`; without it, `down`/`up` moves by most of a viewport.
+
+Its purpose is to bring below-the-fold content into view so the recording shows it —
+in particular content the resolver **cannot** target, such as a live-preview
+`<iframe>` or a native select's option list. The cursor still cannot enter an iframe,
+but the scroll brings the iframe into frame. With an overlay (render) the scroll is
+an animated glide; during `compile` it jumps directly. Because it resolves no
+element, `scroll` needs no `compile` for its own sake and takes no `optional`.
 
 ### Numeric `wait`
 

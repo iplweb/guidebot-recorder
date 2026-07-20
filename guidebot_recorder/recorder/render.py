@@ -2701,6 +2701,9 @@ async def _render_step(
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
         return None
+    if kind == "scroll":
+        await recorder.scroll(step.scroll_config())
+        return None
 
     url_before = action_frame.url
     if resolved is not None:

@@ -302,7 +302,7 @@ nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `select`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
+`enterText`, `select`, `scroll`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
 towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
@@ -379,6 +379,26 @@ zmienia, choć lista się nie otwiera (skok o więcej niż dwanaście pozycji us
 od razu, by animacja nie trwała zbyt długo). Podczas `compile` wartość ustawiana jest
 wprost. Tak czy inaczej element kończy na `option`, więc kolejne kroki i render są
 zgodne.
+
+### `scroll`
+
+```yaml
+- scroll: down                    # up | down | top | bottom
+- scroll: { to: down, amount: 300 }   # forma obiektowa; amount w pikselach
+  say: "Przewijam w dół, aby pokazać podgląd wyników."
+```
+
+Przewinięcie strony — wizualny krok tylko na etapie `render`, bez celu dla agenta,
+podobnie jak liczbowy `wait`. `to` przyjmuje `up`, `down`, `top` lub `bottom`; skrót
+`scroll: down` działa dla wszystkich czterech. `amount` (piksele) reguluje przewinięcie
+`up`/`down` i jest ignorowane dla `top`/`bottom`; bez niego `down`/`up` przewija o
+większość wysokości okna.
+
+Służy do wprowadzenia w kadr treści spod „linii zgięcia" — zwłaszcza treści, których
+resolver **nie** potrafi wskazać, jak podgląd w `<iframe>` czy lista opcji natywnego
+selecta. Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
+nakładką (render) przewijanie jest animowane; podczas `compile` skacze wprost. Ponieważ
+nie rozwiązuje żadnego elementu, `scroll` nie wymaga `compile` i nie przyjmuje `optional`.
 
 ### `navigate`
 
