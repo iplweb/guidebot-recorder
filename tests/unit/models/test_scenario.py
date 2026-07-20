@@ -361,3 +361,20 @@ def test_flat_steps_branch_index_is_the_top_level_block_index():
 def test_flat_step_is_a_named_tuple():
     flat = FlatStep(step=Step(say="x"), branch=None, is_gate=False)
     assert tuple(flat) == (flat.step, None, False)
+
+
+# --- caption (PDF guide) -----
+
+
+def test_step_accepts_optional_caption():
+    step = Step(click="the login button", caption='Kliknij duży niebieski przycisk "Zaloguj".')
+    assert step.caption == 'Kliknij duży niebieski przycisk "Zaloguj".'
+
+
+def test_step_caption_defaults_to_none():
+    assert Step(say="hello").caption is None
+
+
+def test_step_with_only_caption_is_still_empty_step():
+    with pytest.raises(ValidationError):
+        Step(caption="tekst bez komendy i bez say")
