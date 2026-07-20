@@ -57,9 +57,7 @@ def test_navigate_string_keeps_backwards_compatible_value_and_helpers():
 
 @pytest.mark.parametrize("animate", [True, False])
 def test_navigate_object_exposes_url_and_type_override(animate):
-    s = Step.model_validate(
-        {"navigate": {"url": "https://example.com", "type": animate}}
-    )
+    s = Step.model_validate({"navigate": {"url": "https://example.com", "type": animate}})
 
     assert s.navigate == NavigateConfig(url="https://example.com", type=animate)
     assert s.navigate_url() == "https://example.com"
@@ -361,3 +359,35 @@ def test_flat_steps_branch_index_is_the_top_level_block_index():
 def test_flat_step_is_a_named_tuple():
     flat = FlatStep(step=Step(say="x"), branch=None, is_gate=False)
     assert tuple(flat) == (flat.step, None, False)
+
+
+def test_close_window_command_kind_and_no_target():
+    step = Step.model_validate({"closeWindow": True})
+    assert step.command_kind() == "closeWindow"
+    assert step.requires_target() is False
+    assert step.narration() is None
+
+
+def test_close_window_accepts_narration():
+    step = Step.model_validate({"closeWindow": True, "say": "Wracamy."})
+    assert step.command_kind() == "closeWindow"
+    assert step.narration() == "Wracamy."
+
+
+def test_close_window_false_is_rejected():
+    # `_exactly_one_command` tests `is not None`, so a plain `bool` field would let
+    # `closeWindow: false` count as a present command that does nothing. Literal[True]
+    # turns that into a validation error instead of a silent no-op.
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": False})
+
+
+def test_close_window_is_mutually_exclusive_with_other_primaries():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": True, "click": "ok"})
+
+
+def test_close_window_rejects_optional():
+    # No target, not a numeric wait -> `_optional_only_where_it_can_be_honoured` rejects it.
+    with pytest.raises(ValidationError):
+        Step.model_validate({"closeWindow": True, "optional": True})
