@@ -1,4 +1,12 @@
-from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction, Fingerprint
+import pytest
+from pydantic import ValidationError
+
+from guidebot_recorder.models.action import (
+    COMPILER_VERSION,
+    CachedAction,
+    Fingerprint,
+    PendingAction,
+)
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.target import RoleTarget
@@ -73,3 +81,58 @@ def test_load_missing_versions_marks_sidecar_as_legacy(tmp_path):
 
     assert loaded.compiler_version == 1 < COMPILER_VERSION
     assert loaded.actions[0].fingerprint.compiler_version == 1
+
+
+def _fingerprint() -> Fingerprint:
+    return Fingerprint(
+        command_kind="wait",
+        compiled_from="baner cookies",
+        expect="none",
+        config_hash="c",
+        state="visible",
+    )
+
+
+def test_pending_action_defaults_and_forbids_extras():
+    pending = PendingAction(fingerprint=_fingerprint())
+    assert pending.pending is True
+
+    with pytest.raises(ValidationError):
+        PendingAction(fingerprint=_fingerprint(), bogus=1)
+
+
+def test_pending_action_roundtrips_through_yaml(tmp_path):
+    path = tmp_path / "opt.compiled.yaml"
+    compiled = CompiledScenario(
+        source="opt.scenario.yaml",
+        actions=[None, PendingAction(fingerprint=_fingerprint()), _action()],
+    )
+
+    write_compiled(path, compiled)
+    loaded = load_compiled(path)
+
+    assert loaded.actions[0] is None
+    assert isinstance(loaded.actions[1], PendingAction)
+    assert loaded.actions[1].pending is True
+    assert loaded.actions[1].fingerprint.compiled_from == "baner cookies"
+    assert isinstance(loaded.actions[2], CachedAction)
+    assert loaded.actions[2].target.name == "Zaloguj"
+
+
+def test_pending_entry_is_not_confused_with_a_cached_action(tmp_path):
+    path = tmp_path / "opt.compiled.yaml"
+    write_compiled(
+        path,
+        CompiledScenario(source="s.yaml", actions=[PendingAction(fingerprint=_fingerprint())]),
+    )
+    assert "pending: true" in path.read_text(encoding="utf-8")
+
+
+def test_legacy_sidecar_without_pending_entries_still_loads(tmp_path):
+    path = tmp_path / "legacy.compiled.yaml"
+    write_compiled(path, CompiledScenario(source="legacy.yaml", actions=[None, _action()]))
+
+    loaded = load_compiled(path)
+
+    assert loaded.actions[0] is None
+    assert isinstance(loaded.actions[1], CachedAction)
