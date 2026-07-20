@@ -28,12 +28,14 @@ def scenario_sensitive_values(
     unrelated words — e.g. an env value ``cli`` blanking part of ``click``.
     """
 
+    # Flat: children of a `when:` block carry secrets just like top-level steps.
+    steps = [entry.step for entry in scenario.flat_steps()]
     values = {
         step.enter_text.text
-        for step in scenario.steps
+        for step in steps
         if step.enter_text is not None and step.enter_text.text
     }
-    navigation_urls = [url for step in scenario.steps if (url := step.navigate_url())]
+    navigation_urls = [url for step in steps if (url := step.navigate_url())]
     for value in (referenced_env or {}).values():
         if value and any(value in url for url in navigation_urls):
             values.add(value)

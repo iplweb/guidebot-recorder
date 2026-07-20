@@ -63,6 +63,22 @@ class Fingerprint(BaseModel):
     state: WaitState | None = None
 
 
+class PendingAction(BaseModel):
+    """A target that still needs resolving — recorded when an optional element was absent.
+
+    Written by ``compile`` for the gate and children of a branch whose gating
+    element never appeared, and replaced by a :class:`CachedAction` the first
+    time ``render`` does see it.  The fingerprint is kept so the usual
+    invalidation checks (``compiler_version``, ``config_hash``, ``compiled_from``)
+    keep working on a pending entry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pending: Literal[True] = True
+    fingerprint: Fingerprint
+
+
 class CachedAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

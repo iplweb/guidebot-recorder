@@ -1,5 +1,5 @@
 # Onet.pl — how to reach the login.
-# Flow: home page → accept the cookie banner → click "Log in" (opens a pop-up).
+# Flow: home page → accept the cookie banner if it shows → click "Log in" (pop-up).
 #
 # Run:
 #   uv run guidebot validate examples/onet-login.scenario.yaml
@@ -7,8 +7,13 @@
 #   uv run guidebot render   examples/onet-login.scenario.yaml --out out/onet-login.mp4
 #
 # Notes:
+# - The consent banner is genuinely conditional (stored consent, A/B, geography), so it
+#   lives in an optional `when` branch: absent banner => the branch is skipped, not an
+#   error. See docs/en/scenario-reference.md#optional-branches.
 # - The cookie banner may live in a cross-origin iframe (iframe support is deferred).
 # - "Log in" opens a real pop-up window. Guidebot follows it automatically.
+#   Keep pop-up-opening clicks OUTSIDE the optional branch — pop-ups inside a branch
+#   are unsupported.
 # - Literal values may be typed by `teach`; use `enterText` + ${ENV_VAR} for secrets.
 config:
   title: "Onet.pl — how to reach the login"
@@ -27,13 +32,13 @@ steps:
   # String form inherits config.chrome.typeOnNavigate.
   - navigate: "https://www.onet.pl"
 
-  # The consent banner appears after a short delay — wait until it is visible.
-  - wait:
-      until: "the cookie consent banner to appear"
-      state: visible
-      timeout: 20
-
-  - teach: "First we accept the cookie consent by clicking the button that continues to the site"
+  # The consent banner appears after a short delay, and only on some runs.
+  # `when` polls for it and skips the whole branch (steps + narration) if it never shows.
+  - when: "the cookie consent banner"
+    state: visible
+    timeout: 20
+    steps:
+      - teach: "First we accept the cookie consent by clicking the button that continues to the site"
 
   - teach: "To log in, we click the account icon in the top-right corner of the page"
 

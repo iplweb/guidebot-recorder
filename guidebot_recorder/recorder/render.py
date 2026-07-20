@@ -10,8 +10,10 @@ Resolved actions are read from the separate ``*.compiled.yaml`` sidecar.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -29,11 +31,20 @@ from playwright.async_api import (
 from playwright.async_api import (
     Error as PlaywrightError,
 )
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 from tqdm import tqdm
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
-from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
+from guidebot_recorder.models.action import (
+    COMPILER_VERSION,
+    CachedAction,
+    Fingerprint,
+    PendingAction,
+)
+from guidebot_recorder.models.compiled import CompiledAction
 from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
@@ -43,8 +54,16 @@ from guidebot_recorder.recorder._debug import (
     scenario_sensitive_values,
 )
 from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.resolver.reasoner import Reasoner
+from guidebot_recorder.resolver.resolution import (
+    ResolvedTarget,
+    TargetAbsent,
+    heuristic_expect,
+    resolve_step_target,
+    step_instruction,
+)
 from guidebot_recorder.resolver.validate import reuse_is_valid
-from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import (
@@ -58,6 +77,7 @@ from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
     MuxAudioTrack,
     compose_popup_video,
+    detect_content_crop,
     mux_audio_tracks,
     probe_duration,
 )
@@ -76,6 +96,8 @@ _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
 _VIDEO_POSTROLL_SECONDS = 0.1
 _TTS_CONCURRENCY = 8
+#: how often a pending gate is re-resolved while its wait window is still open
+_PENDING_POLL_SECONDS = 0.25
 # Each worker can own a full ffmpeg process. Keep the pool below both the host's
 # CPU count and a conservative process ceiling instead of scaling with languages.
 _AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
@@ -83,6 +105,18 @@ _AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
 
 class RenderError(RuntimeError):
     """A step needs (re-)compile: missing action or mismatched identity."""
+
+
+class _OptionalAbsent(Exception):
+    """The element an *optional* step or branch gate stands for is simply not there.
+
+    Deliberately narrow, and deliberately not a :class:`RenderError`: it is raised
+    only from the four signals the design admits as "absent" (a timed-out cached
+    ``waitFor``, a ``no_action``/``no_handle`` verdict, an elapsed poll window, a
+    failed ``reuse_is_valid``). Everything else — an ambiguous description, a click
+    that fails on a resolved target, a navigation error — keeps propagating and
+    fails the render, so ``optional`` cannot decay into ``except Exception: pass``.
+    """
 
 
 #: A slide card's on-screen content, as consumed by ``SlideOverlay.show``/``.ensure``.
@@ -105,6 +139,12 @@ class _PopupSession:
     visual_ready_delay: float = 0.0
     closed_at: float | None = None
     close_handled: bool = False
+    main_cursor_pos: tuple[float, float] | None = None
+    """Where the main window's cursor stood before the popup took it over.
+
+    :attr:`Overlay.pos` is shared by every page, so centring the cursor in the
+    popup overwrites the opener's. Restored on close.
+    """
     window_size: tuple[int, int] | None = None
     """The popup's real window size in CSS px, or ``None`` when unknown.
 
@@ -113,14 +153,54 @@ class _PopupSession:
     matter how small a window the site asked for. This is the geometry the
     compositor crops that canvas back down to.
     """
+    viewport: tuple[int, int] | None = None
+    """The popup page's own layout viewport in CSS px, or ``None`` if unknown.
+
+    Not the same thing as :attr:`window_size` (which the site *asked* for) nor as
+    the recording canvas: it is what the popup actually got, and it is the unit
+    levels 1 and 2 measure in. Paired with the canvas it lets
+    :func:`_recording_scale` convert those measurements into recording pixels.
+    """
+    content_box: tuple[int, int, int, int] | None = None
+    """The popup's painted content as ``(width, height, x, y)``, or ``None``.
+
+    Level 2 of the crop chain — what a featureless ``window.open(url, name)``
+    leaves us with. Measured while the popup page is alive: the recording
+    outlives the page, its DOM does not.
+    """
+    content_box_probe: asyncio.Task[tuple[int, int, int, int] | None] | None = None
+    """The in-flight measurement, until :func:`_settle_popup_content_box` reaps it.
+
+    Kept pending on purpose: starting it when the popup opens and collecting it
+    at the end of the run keeps its cost out of the recorded timeline.
+    """
 
 
 # The site's own ``window.open(url, name, "width=...,height=...")`` request is
-# the only deterministic statement of how big the popup window really is: the
-# page itself cannot tell us, because its layout viewport is the context's
-# (shared with the main window). Record the request on the *opener* frame; the
-# popup is matched to it right after it opens.
+# the most deterministic statement of how big the popup window really is, and
+# Chromium honours it: a popup opened with size features gets exactly that
+# viewport, *not* the context's (verified — ``new_context(viewport=...)`` does
+# not override the request; only a featureless ``window.open`` inherits the
+# context viewport, which is what levels 2 and 3 exist for). It is read here
+# rather than from the popup because it is available the moment the popup
+# opens, before its document has committed. Record the request on the *opener*
+# frame; the popup is matched to it right after it opens.
+#
+# Note the unit: this is the popup's viewport in **CSS px**, which is only the
+# same as its size in the *recording* when the compositor draws at scale 1. See
+# :func:`_recording_scale` for the conversion and for why headed renders differ.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
+
+# How long the opener's frames get to answer the geometry probe. They read a
+# value the page already wrote synchronously, so a healthy frame answers in
+# milliseconds; the budget exists purely to survive frames that can never
+# answer at all (see ``_scan_frames_for_window_request``).
+_POPUP_REQUEST_LOOKUP_TIMEOUT = 2.0
+
+# Absolute ceiling on the lookup, cleanup included. The scan bounds itself, so
+# reaching this means the bounding itself misbehaved; it exists so that no page
+# can ever hang a render here.
+_POPUP_REQUEST_HARD_TIMEOUT = 5.0
 
 _POPUP_REQUEST_SCRIPT = f"""
 (() => {{
@@ -129,6 +209,11 @@ _POPUP_REQUEST_SCRIPT = f"""
   const native = window.open;
   if (typeof native !== "function") return;
   window[KEY] = null;
+  // Captured before chrome.js shadows ``top`` (frame-bust neutralization), so
+  // this is the *real* top document even from inside the shell's site iframe.
+  // Publishing the record there lets the Python side read one frame instead of
+  // interrogating every ad iframe on the page.
+  const realTop = window.top;
   const parse = (features) => {{
     if (typeof features !== "string") return null;
     const sizes = {{}};
@@ -145,7 +230,15 @@ _POPUP_REQUEST_SCRIPT = f"""
   }};
   window.open = function (...args) {{
     const requested = parse(args[2]);
-    if (requested) window[KEY] = requested;
+    if (requested) {{
+      window[KEY] = requested;
+      // Best effort: a genuinely cross-origin opener frame cannot write to the
+      // top document, and that is fine — the Python side falls back to a
+      // bounded per-frame scan.
+      try {{
+        if (realTop && realTop !== window) realTop[KEY] = requested;
+      }} catch (e) {{}}
+    }}
     return native.apply(this, args);
   }};
 }})();
@@ -164,24 +257,479 @@ def _parse_window_request(requested: object) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
+def _discard_pending(task: asyncio.Future) -> None:
+    """Cancel a lookup we no longer need, and never orphan its exception.
+
+    A cancelled ``Frame.evaluate`` can still settle later — typically with
+    ``Frame was detached`` — and an unread exception on an abandoned future is
+    what produces asyncio's "Future exception was never retrieved" noise.
+    Retrieving it in a done-callback keeps that silent.
+    """
+
+    if task.done():
+        return
+    task.cancel()
+    task.add_done_callback(lambda done: done.cancelled() or done.exception())
+
+
+async def _frame_window_request(frame: Frame) -> tuple[int, int] | None:
+    """Read one frame's ``window.open`` record, or ``None`` if it cannot answer."""
+
+    try:
+        requested = await frame.evaluate(f"() => window.{_POPUP_REQUEST_KEY} || null")
+    except PlaywrightError:
+        # The frame navigated away, detached, or never ran the init script.
+        return None
+    return _parse_window_request(requested)
+
+
+async def _scan_frames_for_window_request(opener: Page) -> tuple[int, int] | None:
+    """Ask every frame for its record *concurrently*, then take the best answer.
+
+    Concurrency is the point, not an optimisation. ``Frame.evaluate`` accepts no
+    timeout, and an ad-heavy page routinely carries iframes whose document never
+    commits an execution context — evaluating on one of those never returns.
+    Asking the frames one after another therefore lets a single dead ad iframe
+    block the render forever (and it did). Asking them all at once means a dead
+    frame costs only the frames that answer nothing, and the opener still gets
+    to report its geometry within the budget.
+
+    Frames are preferred newest-first, with the top document first of all: the
+    init script republishes each record on the real top document, so the top
+    frame holds the answer whenever it is same-origin with the opener frame.
+    """
+
+    top = opener.main_frame
+    frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
+    tasks = [asyncio.ensure_future(_frame_window_request(frame)) for frame in frames]
+    try:
+        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                if (size := task.result()) is not None:
+                    return size
+        return None
+    finally:
+        for task in tasks:
+            _discard_pending(task)
+
+
 async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
     """Return the window size the *opener* asked ``window.open`` for, if any.
 
-    Scans every frame because the click that opens the popup usually happens
-    inside the shell's site iframe, not the top document. Frames that have
-    navigated away (or that never ran the init script) are skipped rather than
-    failing the render: an unknown size simply means no crop, i.e. the previous
-    full-canvas behaviour.
+    Bounded twice over, because this runs at the worst possible moment — right
+    after a popup opens, while the opener is at its busiest — and a render that
+    hangs here is unrecoverable. An unknown size is by contrast harmless: it
+    means no crop, i.e. the full-canvas behaviour that predates popup cropping.
+    So the lookup always terminates, and says so when it gives up.
     """
-    for frame in reversed(opener.frames):
-        try:
-            requested = await frame.evaluate(f"() => window.{_POPUP_REQUEST_KEY} || null")
-        except PlaywrightError:
-            continue
-        size = _parse_window_request(requested)
-        if size is not None:
-            return size
-    return None
+
+    lookup = asyncio.ensure_future(_scan_frames_for_window_request(opener))
+    try:
+        size = await asyncio.wait_for(asyncio.shield(lookup), _POPUP_REQUEST_HARD_TIMEOUT)
+    except TimeoutError:
+        # ``shield`` means the timeout does not itself cancel the lookup, so it
+        # is still ours to dispose of cleanly.
+        _discard_pending(lookup)
+        tqdm.write(
+            "OSTRZEŻENIE: odczyt rozmiaru okna popupu nie zakończył się w "
+            f"{_POPUP_REQUEST_HARD_TIMEOUT:g}s — popup bez przycięcia",
+            file=sys.stderr,
+        )
+        return None
+    if size is None:
+        tqdm.write(
+            "OSTRZEŻENIE: żadna ramka nie podała rozmiaru okna z window.open() "
+            "— popup bez przycięcia",
+            file=sys.stderr,
+        )
+    return size
+
+
+#: A content bounding box at least this fraction of the viewport in *both*
+#: dimensions is refused as degenerate. ``body``'s children can trivially fill
+#: the frame (a ``100vw/100vh`` wrapper, a full-bleed background), in which case
+#: the box merely restates the context viewport this whole mechanism exists to
+#: correct, and level 3 has to decide instead.
+POPUP_BBOX_DEGENERATE_RATIO = 0.98
+
+#: How long the popup's content measurement gets to come back. The walk is
+#: bounded in the page (see ``_POPUP_CONTENT_BOX_SCRIPT``), so a healthy popup
+#: answers in single-digit milliseconds; the budget exists for the same reason
+#: the ``window.open`` lookup has one — ``Page.evaluate`` accepts no timeout, and
+#: a document that never commits an execution context never answers at all.
+_POPUP_CONTENT_BOX_TIMEOUT = 2.0
+
+#: Level 2: measure the popup's painted content from inside the popup document.
+#: Deliberately skips ``documentElement`` and ``body`` — both are laid out
+#: against the *context* viewport, so both report the very number being
+#: corrected. Only ``body``'s children are measured, and a child that paints
+#: nothing itself (a transparent layout wrapper) is descended into rather than
+#: counted, so a full-width wrapper around a small dialog does not inflate the
+#: result. Guidebot's own injected overlays (``data-guidebot-*``) are skipped:
+#: the cursor lives in the popup too and would stretch the box to wherever it
+#: happens to sit. A document that paints its own page background declines
+#: outright — see ``paintsPage`` below.
+_POPUP_CONTENT_BOX_SCRIPT = """
+() => {
+  const body = document.body;
+  if (!body) return null;
+  const vw = Math.round(window.innerWidth);
+  const vh = Math.round(window.innerHeight);
+  if (!(vw > 0) || !(vh > 0)) return null;
+  // A popup that paints its own page background is full-bleed by construction:
+  // the background covers the whole window, so the union of body's children is
+  // only the *ink* on top of it and cropping to that would cut the popup's
+  // background away. ``body``/``documentElement`` are skipped everywhere else in
+  // this walk precisely because their box is the context viewport — but whether
+  // they PAINT is a different question, and the honest answer here is "decline".
+  // An unstyled document leaves both transparent (the white is the canvas, not a
+  // background), so ordinary dialogs are unaffected.
+  const paintsPage = (el) => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    const bg = style.backgroundColor;
+    if (bg && bg !== "transparent" && !/^rgba\\(0,\\s*0,\\s*0,\\s*0\\)$/.test(bg)) return true;
+    return Boolean(style.backgroundImage) && style.backgroundImage !== "none";
+  };
+  if (paintsPage(document.documentElement) || paintsPage(body)) return null;
+  const MAX_DEPTH = 12;
+  const MAX_NODES = 1200;
+  // The walk runs on the popup's main thread while the popup is on camera, so
+  // it is bounded by wall clock as well as by node count: whatever the DOM
+  // looks like, it cannot cost the recording more than this. Overrunning
+  // abandons the measurement (partial unions are worse than none — they would
+  // crop away real content), and level 3 decides instead.
+  const BUDGET_MS = 20;
+  const deadline = performance.now() + BUDGET_MS;
+  let overran = false;
+  const REPLACED = new Set([
+    "IMG", "SVG", "CANVAS", "VIDEO", "IFRAME", "INPUT", "TEXTAREA",
+    "SELECT", "BUTTON", "OBJECT", "EMBED", "HR",
+  ]);
+  let visited = 0;
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  const add = (rect) => {
+    if (!rect) return;
+    const l = Math.max(0, rect.left);
+    const t = Math.max(0, rect.top);
+    const r = Math.min(vw, rect.right);
+    const b = Math.min(vh, rect.bottom);
+    if (!(r > l) || !(b > t)) return;
+    if (l < left) left = l;
+    if (t < top) top = t;
+    if (r > right) right = r;
+    if (b > bottom) bottom = b;
+  };
+  const isOverlay = (el) => {
+    for (const attr of el.attributes || []) {
+      if (attr.name.startsWith("data-guidebot")) return true;
+    }
+    return false;
+  };
+  const paints = (el, style) => {
+    if (REPLACED.has(el.tagName)) return true;
+    const bg = style.backgroundColor;
+    if (bg && bg !== "transparent" && !/^rgba\\(0,\\s*0,\\s*0,\\s*0\\)$/.test(bg)) return true;
+    if (style.backgroundImage && style.backgroundImage !== "none") return true;
+    if (style.boxShadow && style.boxShadow !== "none") return true;
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      if (parseFloat(style["border" + side + "Width"]) > 0) return true;
+    }
+    return false;
+  };
+  const walk = (el, depth) => {
+    if (overran) return;
+    if (visited++ > MAX_NODES || performance.now() > deadline) {
+      overran = true;
+      return;
+    }
+    if (isOverlay(el)) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return;
+    if (Number(style.opacity) === 0) return;
+    if (paints(el, style) || depth >= MAX_DEPTH) {
+      add(el.getBoundingClientRect());
+      return;
+    }
+    let descended = false;
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        walk(node, depth + 1);
+        descended = true;
+      } else if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) {
+        // Measure the glyphs, not the block box the text sits in: a <p> is as
+        // wide as its container, its text usually is not.
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        add(range.getBoundingClientRect());
+        descended = true;
+      }
+    }
+    if (!descended) add(el.getBoundingClientRect());
+  };
+  for (const child of body.children) walk(child, 1);
+  if (overran) return null;
+  if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+  if (!(right > left) || !(bottom > top)) return null;
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    viewportWidth: vw,
+    viewportHeight: vh,
+  };
+}
+"""
+
+
+def _parse_content_box(measured: object) -> tuple[int, int, int, int] | None:
+    """Validate and gate one content bounding box read back from a popup.
+
+    Returns ``(width, height, x, y)`` in recording pixels, or ``None`` when the
+    measurement is unusable — non-finite, empty, or *degenerate*: at least
+    :data:`POPUP_BBOX_DEGENERATE_RATIO` of the viewport in **both** dimensions,
+    which means the content genuinely is full-bleed and the box says nothing the
+    uncropped canvas did not already say. The origin rounds down and the far
+    edges round up, so rounding never shaves a painted pixel.
+    """
+    if not isinstance(measured, dict):
+        return None
+    values: list[float] = []
+    for key in ("x", "y", "width", "height", "viewportWidth", "viewportHeight"):
+        value = measured.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if not math.isfinite(float(value)):
+            return None
+        values.append(float(value))
+    x, y, width, height, viewport_width, viewport_height = values
+    if width <= 0 or height <= 0 or viewport_width <= 0 or viewport_height <= 0:
+        return None
+    if (
+        width >= viewport_width * POPUP_BBOX_DEGENERATE_RATIO
+        and height >= viewport_height * POPUP_BBOX_DEGENERATE_RATIO
+    ):
+        return None
+    left, top = math.floor(x), math.floor(y)
+    return (
+        math.ceil(x + width) - left,
+        math.ceil(y + height) - top,
+        max(0, left),
+        max(0, top),
+    )
+
+
+async def _popup_content_box(popup: Page) -> tuple[int, int, int, int] | None:
+    """Measure the popup's painted content while the page is still alive.
+
+    Level 2 of the crop chain, used when the site opened the popup without size
+    features. A closed page, a navigation race or a hostile document degrades to
+    ``None`` (fall through to level 3) rather than failing the render.
+    """
+    try:
+        measured = await popup.evaluate(_POPUP_CONTENT_BOX_SCRIPT)
+    except PlaywrightError:
+        return None
+    return _parse_content_box(measured)
+
+
+def _start_popup_content_box(popup: Page) -> asyncio.Task[tuple[int, int, int, int] | None]:
+    """Begin measuring the popup off the render's critical path.
+
+    The measurement has to happen while the popup's DOM exists, and the DOM dies
+    long before composition — but awaiting it where it starts would put its
+    latency *inside the recorded timeline*, right at the moment the popup appears
+    on camera. So it is started here and collected later
+    (:func:`_settle_popup_content_box`), by which time it has long since
+    finished: the render does not block on it at all.
+    """
+
+    return asyncio.ensure_future(_popup_content_box(popup))
+
+
+async def _settle_popup_content_box(popup: _PopupSession) -> None:
+    """Collect the pending measurement, bounded, before the context goes away.
+
+    Must run while the browser context is still open — a closed context can only
+    answer with "target closed". Bounded for the same reason the ``window.open``
+    lookup is: ``Page.evaluate`` never times out on its own, and no popup may
+    hang a render. Giving up costs the crop, not the video.
+    """
+
+    probe = popup.content_box_probe
+    if probe is None:
+        return
+    popup.content_box_probe = None
+    try:
+        popup.content_box = await asyncio.wait_for(
+            asyncio.shield(probe), _POPUP_CONTENT_BOX_TIMEOUT
+        )
+    except TimeoutError:
+        # ``shield`` keeps the timeout from cancelling the probe itself, so it is
+        # still ours to dispose of without orphaning its exception.
+        _discard_pending(probe)
+        tqdm.write(
+            "OSTRZEŻENIE: pomiar zawartości popupu nie zakończył się w "
+            f"{_POPUP_CONTENT_BOX_TIMEOUT:g}s — przycięcie z heurystyki obrazu",
+            file=sys.stderr,
+        )
+    except PlaywrightError:
+        # The popup closed under the probe: level 3 decides instead.
+        popup.content_box = None
+
+
+def _page_viewport(page: Page) -> tuple[int, int] | None:
+    """*page*'s layout viewport as a plain pair, or ``None`` when unset."""
+    viewport = page.viewport_size
+    if viewport is None:
+        return None
+    return viewport["width"], viewport["height"]
+
+
+def _log_popup_crop(level: str, crop: tuple[int, int, int, int] | None, verbose: bool) -> None:
+    """Say which fallback level framed the popup — silent degradation is a bug."""
+    if not verbose:
+        return
+    if crop is None:
+        tqdm.write(f"   ⤷ kadr popupu: {level} nic nie wykrył — pełne płótno nagrania")
+        return
+    width, height, x, y = crop
+    tqdm.write(f"   ⤷ kadr popupu: {level} → {width}x{height}+{x}+{y}")
+
+
+#: Backing scales a compositor plausibly renders a window at. Headless Chromium
+#: draws at 1; a headed window inherits its screen's scale factor, which is 2 on
+#: every shipping HiDPI display and 3 only on the densest mobile-class panels.
+#: Used to sanity-check a *measured* recording scale, never to pick one.
+_PLAUSIBLE_BACKING_SCALES = (1, 2, 3)
+
+#: How far a measured recording scale may sit from the nearest scale the fit
+#: rule can produce. Wide enough for the recorder's even-pixel snapping (a 597px
+#: window records as 596), far too narrow to admit an unrelated rect.
+_RECORDING_SCALE_TOLERANCE = 0.02
+
+
+def _recording_scale(
+    measured: tuple[int, int, int, int] | None,
+    viewport: tuple[int, int] | None,
+    canvas: tuple[int, int] | None,
+) -> float | None:
+    """How many recording pixels the popup got per CSS pixel, or ``None``.
+
+    Playwright records every page in a context onto one canvas of
+    ``record_video_size``, and fits each page's *compositor* frame into it
+    preserving aspect ratio, anchored top-left, padding the rest. That frame is
+    in **device** pixels: a headed browser on a HiDPI screen composites at the
+    screen's backing scale, so a 500x670 popup arrives as 1000x1340 and is fitted
+    into a 1376x800 canvas at 0.597 — leaving the window occupying 597x800
+    *recording* pixels, not 500x670. Headless composites at 1 and the same popup
+    records 1:1, which is why this only ever bit headed renders.
+
+    The backing scale is not observable from the page (``devicePixelRatio``
+    reports the emulated 1) nor from ``screenshot(scale="device")``, so it is
+    read back off the recording: *measured* is the popup's rendered rect as
+    trimmed out of the padding, and the scale is its width over the viewport's.
+
+    The measurement is a pixel heuristic, so it is only believed when it looks
+    like a fitted window: anchored at the origin, aspect preserved, and within
+    :data:`_RECORDING_SCALE_TOLERANCE` of a scale the fit rule can actually
+    produce for some plausible backing scale. Anything else — a page whose own
+    background matched the padding colour, ink mistaken for a window — returns
+    ``None``, i.e. "assume 1:1", which is the behaviour that predates this.
+    """
+    if measured is None or viewport is None or canvas is None:
+        return None
+    width, height, x, y = measured
+    viewport_width, viewport_height = viewport
+    if (x, y) != (0, 0) or viewport_width <= 0 or viewport_height <= 0:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    scale = width / viewport_width
+    if abs(height / viewport_height - scale) > _RECORDING_SCALE_TOLERANCE * scale:
+        return None  # not a uniformly scaled window
+    fitted = [
+        min(backing, canvas[0] / viewport_width, canvas[1] / viewport_height)
+        for backing in _PLAUSIBLE_BACKING_SCALES
+    ]
+    if not any(
+        abs(scale - candidate) <= _RECORDING_SCALE_TOLERANCE * candidate for candidate in fitted
+    ):
+        return None
+    return scale
+
+
+def _scale_rect(rect: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
+    """Map a CSS-pixel ``(width, height, x, y)`` into recording pixels.
+
+    The origin floors and the far edges ceil, so the rounding can only ever add
+    a fringe pixel of padding — never shave one off the popup's own ink.
+    """
+    width, height, x, y = rect
+    left, top = math.floor(x * scale), math.floor(y * scale)
+    return (
+        math.ceil((x + width) * scale) - left,
+        math.ceil((y + height) * scale) - top,
+        left,
+        top,
+    )
+
+
+def _resolve_popup_crop(
+    *,
+    window_size: tuple[int, int] | None,
+    content_box: tuple[int, int, int, int] | None,
+    popup_video: Path,
+    verbose: bool,
+    viewport: tuple[int, int] | None = None,
+    canvas: tuple[int, int] | None = None,
+) -> tuple[tuple[int, int, int, int] | None, str]:
+    """Pick the popup crop rect from the best available witness.
+
+    Three levels, most deterministic first, returned with the name of the one
+    that answered so the log can say which framed the video:
+
+    1. ``window.open`` size features — what the site literally asked for.
+    2. the popup's content bounding box — measured in the page, gated by
+       :data:`POPUP_BBOX_DEGENERATE_RATIO`.
+    3. ``cropdetect`` over the recording — a pixel heuristic, last resort.
+
+    Levels 1 and 2 speak **CSS pixels** and the crop is applied to the
+    *recording*, which are not the same unit — see :func:`_recording_scale`. The
+    same padding-trimming pass that backs level 3 supplies the conversion factor
+    whenever there is a *viewport* and a *canvas* to correct between; without
+    them, or when the measurement does not look like a fitted window, the rects
+    pass through as-is (1:1, which is what headless produces).
+
+    All three declining yields ``(None, "none")``: the pre-crop full-canvas
+    filtergraph, byte for byte.
+    """
+    css_evidence = window_size is not None or content_box is not None
+    measured = (
+        detect_content_crop(popup_video)
+        if not css_evidence or (viewport is not None and canvas is not None)
+        else None
+    )
+    if window_size is not None or content_box is not None:
+        scale = _recording_scale(measured, viewport, canvas)
+        if verbose and scale is not None and abs(scale - 1.0) > _RECORDING_SCALE_TOLERANCE:
+            tqdm.write(f"   ⤷ nagranie popupu w skali {scale:.3f}× — kadr przeliczony")
+        if window_size is not None:
+            # The measured rect *is* the whole window in recording pixels, so
+            # prefer it over rescaling the request: it needs no rounding and
+            # cannot leave a seam of padding along the right or bottom edge.
+            crop = measured if scale is not None else (window_size[0], window_size[1], 0, 0)
+            assert crop is not None
+            _log_popup_crop("window.open", crop, verbose)
+            return crop, "window.open"
+        assert content_box is not None
+        crop = content_box if scale is None else _scale_rect(content_box, scale)
+        _log_popup_crop("bbox", crop, verbose)
+        return crop, "bbox"
+    _log_popup_crop("cropdetect", measured, verbose)
+    return (measured, "cropdetect") if measured is not None else (None, "none")
 
 
 @dataclass(slots=True)
@@ -455,14 +1003,22 @@ async def _prepare_main_after_popup_close(
     overlay: Overlay,
     chrome: Chrome | None,
     settle_ms: float,
+    restore_cursor_to: tuple[float, float] | None = None,
 ) -> None:
     """Let opener navigation settle before touching its execution context again.
 
     This is the single funnel for "the popup is gone, the main window is active
     again", so it is also where the cursor handed over to the popup by
     :func:`_hand_cursor_to_popup` is handed back.
+
+    ``restore_cursor_to`` undoes that hand-over's side effect: centring the
+    cursor in the popup moved the *shared* :attr:`Overlay.pos`, so without this
+    the reappearing main-window cursor would jump to wherever the popup's centre
+    happened to be rather than the control it last used.
     """
 
+    if restore_cursor_to is not None:
+        overlay.pos = restore_cursor_to
     await page.bring_to_front()
     await Recorder(page, None, settle_ms=settle_ms).apply_readiness("none")
     try:
@@ -478,8 +1034,8 @@ async def _prepare_main_after_popup_close(
     await overlay.show(page)
 
 
-async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
-    """Suppress the main window's cursor for as long as the popup is on screen.
+async def _hand_cursor_to_popup(main_page: Page, popup: _PopupSession, overlay: Overlay) -> None:
+    """Move the cursor into the popup, centred, for as long as it is on screen.
 
     The cursor is a DOM element injected into every top-level document, so a
     popup mounts its *own* instance — leaving two cursors alive at once. The
@@ -490,6 +1046,13 @@ async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
 
     ``hide`` is a per-page call on purpose — a context-wide init-script flag
     (like ``barePopups``) cannot target one window.
+
+    The popup's own cursor is then parked at the centre of its viewport and
+    revealed. Without this it would inherit :attr:`Overlay.pos` — coordinates
+    from the *main* window, typically the opener control in a corner — and stay
+    invisible there until the first action moved it. ``ms=0`` because a glide
+    would be a slide in from wherever the other window's cursor happened to be,
+    which reads as motion that never occurred.
     """
 
     if main_page.is_closed():
@@ -500,6 +1063,20 @@ async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
         # The opener can navigate/close under us while the popup is opening;
         # the loop's own lifecycle checks report that authoritatively.
         if not main_page.is_closed():
+            raise
+    # Remembered so closing the popup does not leave the main window's cursor
+    # parked at the popup's centre: ``Overlay.pos`` is shared across pages.
+    popup.main_cursor_pos = overlay.pos
+    viewport = popup.page.viewport_size
+    if viewport is None or popup.page.is_closed():
+        return
+    try:
+        await overlay.move_to(popup.page, viewport["width"] / 2, viewport["height"] / 2, ms=0)
+        await overlay.show(popup.page)
+    except PlaywrightError:
+        # A popup that dies while being furnished is the loop's business, not
+        # the cursor's; losing the centring costs a cosmetic, never the render.
+        if not popup.page.is_closed():
             raise
 
 
@@ -884,7 +1461,7 @@ def _compiled_from(step: Step) -> str:
 
 
 def _compiled_action_is_current(
-    step: Step, action: CachedAction | None, scenario_hash: str
+    step: Step, action: CompiledAction | None, scenario_hash: str
 ) -> bool:
     """Check source/config fingerprints before replaying frozen behavior."""
 
@@ -893,6 +1470,18 @@ def _compiled_action_is_current(
     if action is None:
         return False
     kind = step.command_kind()
+    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
+    if isinstance(action, PendingAction):
+        # Nothing was frozen yet, so there is no action/expect to cross-check —
+        # only that the placeholder still stands for *this* step and config.
+        fingerprint = action.fingerprint
+        return (
+            fingerprint.compiler_version == COMPILER_VERSION
+            and fingerprint.command_kind == kind
+            and fingerprint.compiled_from == _compiled_from(step)
+            and fingerprint.config_hash == scenario_hash
+            and fingerprint.state == expected_state
+        )
     expected_action = {
         "click": "click",
         "hover": "hover",
@@ -901,7 +1490,6 @@ def _compiled_action_is_current(
     }.get(kind)
     if expected_action is not None and action.action != expected_action:
         return False
-    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
     fingerprint = action.fingerprint
     if not (
         fingerprint.compiler_version == COMPILER_VERSION
@@ -919,6 +1507,68 @@ def _compiled_action_is_current(
     )
 
 
+async def _resolve_pending_target(
+    root: Page | Frame,
+    step: Step,
+    kind: str,
+    reasoner: Reasoner,
+) -> ResolvedTarget:
+    """Resolve a :class:`PendingAction` against the live page, polling while it may still appear.
+
+    A gate (`wait: {until: ...}`) gets the whole configured wait window, retried on
+    an interval: the canonical gating element — a cookie banner — is injected after
+    a delay, and a single snapshot would report a spurious absence and silently
+    delete the branch from the video. Any other optional step has no wait window,
+    so it is resolved exactly once.
+
+    Raises :class:`_OptionalAbsent` when the window closes on an "absent" verdict;
+    every other resolver failure propagates out of ``resolve_step_target``.
+    """
+
+    window = step.wait.timeout if isinstance(step.wait, WaitUntil) else 0.0
+    deadline = time.monotonic() + window
+    while True:
+        result = await resolve_step_target(root, step, kind, reasoner)
+        if isinstance(result, ResolvedTarget):
+            return result
+        assert isinstance(result, TargetAbsent)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _OptionalAbsent(f"{step_instruction(step)!r}: {result.reason} ({result.message})")
+        await asyncio.sleep(min(_PENDING_POLL_SECONDS, remaining))
+
+
+def _freeze_resolved(
+    step: Step,
+    kind: str,
+    resolved: ResolvedTarget,
+    expect: str,
+    scenario_hash: str,
+) -> CachedAction:
+    """Build the ``CachedAction`` that replaces a pending entry in the sidecar.
+
+    ``opens_popup`` stays false by construction: a click resolved at render time
+    carries no popup observation from compile, and the render popup contract is
+    what fails loudly if one opens anyway (a documented limitation of branches).
+    """
+
+    return CachedAction(
+        action=resolved.action,
+        target=resolved.target,
+        identity=resolved.identity,
+        expect=expect,
+        state=resolved.state,
+        input_text=resolved.input_text,
+        fingerprint=Fingerprint(
+            command_kind=kind,
+            compiled_from=step_instruction(step),
+            expect=expect,
+            config_hash=scenario_hash,
+            state=resolved.state,
+        ),
+    )
+
+
 async def run_render(
     path: Path | str,
     out_mp4: Path | str,
@@ -933,6 +1583,7 @@ async def run_render(
     hold_frame: bool | None = None,
     hold_frame_settle: float | None = None,
     dump_timeline: bool = False,
+    reasoner: Reasoner | None = None,
 ) -> None:
     path = Path(path)
     out_mp4 = Path(out_mp4)
@@ -965,7 +1616,12 @@ async def run_render(
         raise RenderError(
             f"compiled pochodzi z innego scenariusza ({compiled.source}) — uruchom `compile`"
         )
-    if len(compiled.actions) != len(scenario.steps):
+    # Flat indexing: a `when:` block contributes its synthetic gate step followed by
+    # its children, so `actions`, narration segments and every `krok {index}` message
+    # index the same linear execution order.
+    flat = scenario.flat_steps()
+    flat_steps = [entry.step for entry in flat]
+    if len(compiled.actions) != len(flat):
         raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
     if compiled.compiler_version != COMPILER_VERSION or any(
         action is not None and action.fingerprint.compiler_version != COMPILER_VERSION
@@ -973,13 +1629,19 @@ async def run_render(
     ):
         raise RenderError("compiled ma starszą wersję — uruchom `compile`")
     scenario_hash = config_hash(cfg)
-    for index, (step, action) in enumerate(zip(scenario.steps, compiled.actions, strict=True)):
-        if not _compiled_action_is_current(step, action, scenario_hash):
+    for index, (entry, action) in enumerate(zip(flat, compiled.actions, strict=True)):
+        if not _compiled_action_is_current(entry.step, action, scenario_hash):
             raise RenderError(f"krok {index}: compiled jest nieaktualny — uruchom `compile`")
+        if isinstance(action, PendingAction) and entry.branch is None and not entry.step.optional:
+            # A pending entry is only ever written for a branch (gate + children)
+            # or an `optional: true` step; anywhere else the sidecar is corrupt.
+            raise RenderError(
+                f"krok {index}: wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
+            )
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
-    narration_count = sum(_narration(step) is not None for step in scenario.steps)
+    narration_count = sum(_narration(step) is not None for step in flat_steps)
     presynth = tqdm(
         total=narration_count * len(audio_configs),
         desc="tts",
@@ -988,7 +1650,7 @@ async def run_render(
     )
     try:
         segments = await _presynthesize_narration(
-            scenario.steps,
+            flat_steps,
             audio_configs,
             cache,
             tts_provider,
@@ -1164,9 +1826,30 @@ async def run_render(
     popup: _PopupSession | None = None
     popup_open_at_end = False
 
-    bar = tqdm(total=len(scenario.steps), desc="render", unit="krok", disable=not verbose)
+    #: branch whose gate turned out to be absent — every step of it is skipped
+    skipped_branch: int | None = None
+
+    def note_skip(entry_index: int, entry_step: Step, reason: str, *, gate: bool) -> None:
+        what = "bramka" if gate else "krok opcjonalny"
+        tqdm.write(f"⚠ krok {entry_index}: {what} pominięty — {reason}")
+
+    def persist_resolved(entry_index: int, resolved_action: CachedAction) -> None:
+        """Fold a render-time resolution back into the sidecar (full atomic rewrite)."""
+
+        compiled.actions[entry_index] = resolved_action
+        write_compiled(cpath, compiled)
+
+    bar = tqdm(total=len(flat), desc="render", unit="krok", disable=not verbose)
     try:
-        for index, step in enumerate(scenario.steps):
+        for index, entry in enumerate(flat):
+            step = entry.step
+            if skipped_branch is not None and entry.branch == skipped_branch:
+                # The gate never showed: the branch's children never run, and their
+                # narration is removed from the timeline rather than left as silence
+                # (segments are placed per index, so never placing them removes them).
+                bar.update(1)
+                continue
+            skipped_branch = None
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
                 raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
@@ -1174,7 +1857,7 @@ async def run_render(
                 raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
             kind = step.command_kind()
             if verbose:
-                tqdm.write(f"[{index + 1}/{len(scenario.steps)}] {kind}")
+                tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
 
             active_page = _active_page(page, popup)
             await active_page.bring_to_front()
@@ -1227,6 +1910,62 @@ async def run_render(
                     expect_chrome=_expect_chrome(chrome, bare_popups),
                 )
 
+            # --- absence probe / in-place resolution, ahead of the narration ----
+            # An optional step that turns out to be absent must not narrate first
+            # and only then do nothing, so everything decidable before the action —
+            # a stale frozen target, an unresolvable pending entry — is decided
+            # here. A cached gate is the exception: its `waitFor` IS the action, so
+            # it stays in `_render_step` (a synthetic gate step never narrates).
+            #
+            # `optional` marks the only two places absence is tolerated: a branch
+            # gate and an `optional: true` step. A *child* of an entered branch is
+            # not optional — the branch demonstrably happened, so anything failing
+            # inside it is a real regression (§5 of the design). Its pending entry
+            # is still resolved here; only the verdict on absence differs.
+            optional = entry.is_gate or step.optional
+            resolved: ResolvedTarget | None = None
+            cached = compiled.actions[index]
+            if step.requires_target() and (optional or isinstance(cached, PendingAction)):
+                probe_root: Page | Frame = (
+                    site_frame if active_page is page and site_frame is not None else active_page
+                )
+                try:
+                    if isinstance(cached, PendingAction):
+                        if reasoner is None:
+                            raise _OptionalAbsent(
+                                "brak dostępnego reasonera, a krok nie został skompilowany "
+                                "(pending) — zainstaluj `codex`, aby rozwiązać go na miejscu"
+                            )
+                        resolved = await _resolve_pending_target(probe_root, step, kind, reasoner)
+                    elif isinstance(cached, CachedAction) and cached.action != "waitFor":
+                        if not await reuse_is_valid(probe_root, cached):
+                            raise _OptionalAbsent("zamrożony namiar nie pasuje do strony")
+                except _OptionalAbsent as absent:
+                    if not optional:
+                        raise RenderError(f"krok {index}: {absent}") from None
+                    note_skip(index, step, str(absent), gate=entry.is_gate)
+                    if entry.is_gate:
+                        skipped_branch = entry.branch
+                    bar.update(1)
+                    continue
+                except Exception as exc:
+                    # Everything the resolver rejects for a reason other than
+                    # absence — `multiple_actions` above all — is an authoring bug
+                    # and fails the render, exactly as in the action loop below.
+                    safe_message = redact_exception(exc, sensitive_values)
+                    if verbose:
+                        tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
+                    if pause_on_error:
+                        await pause_for_inspection(
+                            _active_page(page, popup),
+                            "render",
+                            index,
+                            kind,
+                            exc,
+                            sensitive_values,
+                        )
+                    raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
+
             step_segments: list[Segment] = []
             # Recording-axis frame: the mapping onto the finished film needs the
             # complete edit list, which does not exist until the loop ends.
@@ -1272,8 +2011,7 @@ async def run_render(
                     chrome,
                     expect_chrome=_expect_chrome(chrome, bare_popups),
                 )
-            cached = compiled.actions[index]
-            if cached is not None and cached.opens_popup and popup is not None:
+            if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
@@ -1302,6 +2040,10 @@ async def run_render(
                     observed_pages,
                     _ensure_card,
                     expect_chrome=_expect_chrome(chrome, bare_popups),
+                    resolved=resolved,
+                    optional=optional,
+                    scenario_hash=scenario_hash,
+                    on_resolved=persist_resolved,
                 )
                 if opened is not None:
                     popup = opened
@@ -1317,7 +2059,7 @@ async def run_render(
                         raise RenderError("popup zamknął się podczas otwierania")
                     # The popup now owns the cursor (it mounted its own); stop
                     # painting a second one in the main window behind it.
-                    await _hand_cursor_to_popup(page, overlay)
+                    await _hand_cursor_to_popup(page, popup, overlay)
                 if page.is_closed():
                     raise RenderError("główne okno zostało zamknięte podczas render")
                 _sync_popup_close(popup, observed_pages, anchor)
@@ -1333,11 +2075,18 @@ async def run_render(
                             overlay,
                             chrome,
                             cfg.cursor.settle,
+                            restore_cursor_to=popup.main_cursor_pos,
                         )
                 if _unexpected_pages(observed_pages, page, popup):
                     raise RenderError(
                         f"krok {index}: nieoczekiwany popup — uruchom `compile --force`"
                     )
+            except _OptionalAbsent as absent:
+                # Only a cached gate reaches here (its `waitFor` timed out); every
+                # other absence signal was already settled by the probe above.
+                note_skip(index, step, str(absent), gate=entry.is_gate)
+                if entry.is_gate:
+                    skipped_branch = entry.branch
             except Exception as exc:
                 safe_message = redact_exception(exc, sensitive_values)
                 if verbose:
@@ -1373,6 +2122,11 @@ async def run_render(
         if popup is not None and popup.closed_at is None:
             popup_open_at_end = True
             popup.closed_at = max(popup.opened_at, time.monotonic() - anchor)
+        if popup is not None:
+            # Last moment the popup's DOM can still answer: the context (and with
+            # it every page) is closed a few lines below. The probe was started
+            # when the popup opened, so this normally settles instantly.
+            await _settle_popup_content_box(popup)
         prime_tasks = [
             observation.visual_prime
             for observation in observed_pages.values()
@@ -1401,6 +2155,18 @@ async def run_render(
         preencoded = False
     else:
         popup_webm = Path(await popup.video.path())
+        # The popup recorded onto the main window's canvas; crop it back to its
+        # real window so float frames that and not a viewport-sized rectangle of
+        # filler. Three levels, best evidence first; all declining -> today's
+        # full canvas.
+        popup_crop, _crop_level = _resolve_popup_crop(
+            window_size=popup.window_size,
+            content_box=popup.content_box,
+            popup_video=popup_webm,
+            verbose=verbose,
+            viewport=popup.viewport,
+            canvas=(cfg.viewport.width, cfg.viewport.height),
+        )
         closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
         assert closed_at is not None
         composite = work / f"{out_mp4.stem}.composite.mp4"
@@ -1421,15 +2187,7 @@ async def run_render(
             open_ms=cfg.popup.open_ms,
             close_ms=cfg.popup.close_ms,
             hold_open_at_end=popup_open_at_end,
-            # The popup recorded onto the main window's canvas; crop it back to
-            # the window the site actually asked for so the float mode frames
-            # that and not a viewport-sized rectangle of filler. Unknown size ->
-            # no crop.
-            popup_crop=(
-                (popup.window_size[0], popup.window_size[1], 0, 0)
-                if popup.window_size is not None
-                else None
-            ),
+            popup_crop=popup_crop,
         )
         source_video = composite
         preencoded = True
@@ -1485,13 +2243,25 @@ async def _render_step(
     step: Step,
     kind: str,
     index: int,
-    cached: CachedAction | None,
+    cached: CompiledAction | None,
     anchor: float,
     observed_pages: dict[Page, _PageObservation],
     ensure_card: Callable[[Page], Awaitable[None]],
     *,
     expect_chrome: bool | None = None,
+    resolved: ResolvedTarget | None = None,
+    optional: bool = False,
+    scenario_hash: str = "",
+    on_resolved: Callable[[int, CachedAction], None] | None = None,
 ) -> _PopupSession | None:
+    """Replay one flat step.
+
+    ``resolved`` carries a target the caller resolved in place for a
+    :class:`PendingAction`; this call performs it, derives its ``expect`` the way
+    ``compile`` does (URL before vs after) and hands the frozen action back through
+    ``on_resolved`` so the sidecar stops being pending.
+    """
+
     if expect_chrome is None:
         expect_chrome = chrome is not None
     pages_before_prepare = set(observed_pages)
@@ -1569,10 +2339,18 @@ async def _render_step(
         await recorder.wait_seconds(float(step.wait))
         return None
 
-    if cached is None:
+    url_before = action_frame.url
+    if resolved is not None:
+        # Resolved in place a moment ago against this very frame: it is live by
+        # construction, and `expect` is only knowable after the action has run.
+        cached = _freeze_resolved(step, kind, resolved, "none", scenario_hash)
+    elif cached is None:
         raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
-    if cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
+    elif isinstance(cached, PendingAction):  # pragma: no cover - prologue rejects these
+        raise RenderError(f"krok {index}: nierozwiązany wpis oczekujący — uruchom `compile`")
+    elif cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
         raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
+    assert isinstance(cached, CachedAction)
     if cached.opens_popup and cached.action != "click":
         raise RenderError(f"krok {index}: tylko click może otworzyć popup")
 
@@ -1635,9 +2413,21 @@ async def _render_step(
                     else 0.0
                 ),
                 closed_at=closed_at,
-                # Read from the opener while it is still alive; the popup's own
-                # viewport is the context's and so cannot report this.
+                # Read from the opener while it is still alive.
                 window_size=await _popup_window_request(page),
+                # Available the instant the popup opens, and authoritative: a
+                # popup opened with size features reports that size, a featureless
+                # one reports the context viewport it inherited (which is exactly
+                # the case levels 2 and 3 exist for).
+                viewport=_page_viewport(popup_page),
+                # Level 2, started (not awaited) now because by composition time
+                # the popup page is closed. Only the *painted* content can be
+                # measured: a featureless popup's layout viewport is the
+                # context's, so innerWidth/outerWidth/clientWidth all restate the
+                # oversized number instead of the real window. Awaiting it here
+                # would spend its latency on camera; it is reaped before the
+                # context closes instead.
+                content_box_probe=_start_popup_content_box(popup_page),
             )
     elif cached.action == "hover":
         await recorder.hover(cached.target)
@@ -1648,10 +2438,28 @@ async def _render_step(
         await recorder.enter_text(cached.target, input_text)
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
-        await recorder.wait_for(cached.target, cached.state or "visible", timeout)
+        try:
+            await recorder.wait_for(cached.target, cached.state or "visible", timeout)
+        except PlaywrightTimeoutError as exc:
+            # The one absence signal a frozen gate can give: its wait window
+            # elapsed. On a required step the timeout still fails the render.
+            if not optional:
+                raise
+            raise _OptionalAbsent(f"upłynął czas oczekiwania ({timeout}s)") from exc
+
+    expect = cached.expect
+    if resolved is not None:
+        # Mirror compile: the action reveals whether it navigated, and only then
+        # is the entry complete enough to replace the pending one on disk.
+        url_after = action_frame.url if not page.is_closed() else url_before
+        expect = heuristic_expect(url_before, url_after)
+        cached = _freeze_resolved(step, kind, resolved, expect, scenario_hash)
+        if on_resolved is not None:
+            on_resolved(index, cached)
+
     if not page.is_closed():
         try:
-            await recorder.apply_readiness(cached.expect)
+            await recorder.apply_readiness(expect)
         except PlaywrightError:
             if not page.is_closed():
                 raise

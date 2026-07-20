@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Popup logowania</title>
+    <style>
+      /* Deliberately no page background: the popup window fills the recording
+         canvas, and the only honest "window" is the card itself. */
+      html, body { margin: 0; }
+      .card {
+        width: 300px; margin: 0; padding: 24px; box-sizing: border-box;
+        background: rgb(230, 210, 20); color: black; font: 20px sans-serif;
+      }
+      input, button { display: block; font-size: 18px; margin: 12px 0; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Logowanie</h1>
+      <label for="email">E-mail</label>
+      <input id="email" type="email">
+      <button onclick="window.opener.postMessage('guidebot-popup-closed', '*'); setTimeout(() => window.close(), 20)">
+        Zamknij logowanie
+      </button>
+    </div>
+  </body>
+</html>

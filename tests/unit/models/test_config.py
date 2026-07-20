@@ -466,7 +466,7 @@ def test_popup_defaults():
     popup = PopupConfig()
 
     assert popup.floating is True
-    assert popup.scale == 0.72
+    assert popup.scale == 0.85
     assert popup.corner_radius == 14
     assert popup.shadow is True
     assert popup.backdrop_dim == 0.45
