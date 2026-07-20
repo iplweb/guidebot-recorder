@@ -16,6 +16,7 @@ from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.config import ChromeConfig, CursorConfig, TtsConfig
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.overlay.overlay import Overlay
+from guidebot_recorder.recorder import render as render_module
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import (
     _POPUP_REQUEST_SCRIPT,
@@ -1837,3 +1838,96 @@ async def test_popup_window_request_finds_the_opener_iframe(tmp_path):
         assert await _popup_window_request(page) == (500, 360)
         await context.close()
         await browser.close()
+
+
+# --- popup window geometry: the lookup must never hang the render ------------
+# An ad-heavy page carries iframes whose document never commits an execution
+# context. ``Frame.evaluate`` has no timeout, so evaluating on one blocks
+# forever — which is exactly how a real render deadlocked right after a popup
+# opened. The lookup is therefore concurrent and bounded: one dead frame can no
+# longer hide another frame's answer, and can never stall the render.
+
+
+class _StubFrame:
+    """A frame that answers the window.open probe immediately."""
+
+    url = "https://example.test/"
+
+    def __init__(self, requested):
+        self._requested = requested
+
+    async def evaluate(self, expression, *args):
+        return self._requested
+
+
+class _HangingFrame:
+    """A frame whose execution context never materialises."""
+
+    url = ""
+
+    def __init__(self):
+        self.entered = asyncio.Event()
+
+    async def evaluate(self, expression, *args):
+        self.entered.set()
+        await asyncio.Event().wait()  # never resolves, exactly like the real one
+
+
+class _StubOpener:
+    def __init__(self, frames, main_frame=None):
+        self.main_frame = main_frame if main_frame is not None else _StubFrame(None)
+        self.frames = [self.main_frame, *frames]
+
+
+async def test_popup_window_request_answers_despite_a_frame_that_never_answers(monkeypatch):
+    """A dead ad iframe must neither hang the lookup nor hide the real answer."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    hanging = _HangingFrame()
+    # Reverse order puts the hanging frame ahead of the one holding the answer,
+    # so a sequential scan would never reach the answer at all.
+    opener = _StubOpener([_StubFrame({"width": 420, "height": 300}), hanging])
+
+    started = time.monotonic()
+    assert await _popup_window_request(opener) == (420, 300)
+    elapsed = time.monotonic() - started
+
+    assert hanging.entered.is_set(), "test did not exercise the hanging frame"
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+
+
+async def test_popup_window_request_gives_up_when_only_dead_frames_remain(monkeypatch, capsys):
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    started = time.monotonic()
+    assert await _popup_window_request(opener) is None
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+    assert "OSTRZEŻENIE" in capsys.readouterr().err
+
+
+async def test_popup_window_request_abandons_no_orphan_task(monkeypatch):
+    """An abandoned probe must not leave an un-awaited exception behind."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    assert await _popup_window_request(opener) is None
+
+    pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert all(task.done() for task in pending)
+
+
+async def test_popup_window_request_prefers_the_top_documents_record():
+    """The init script republishes on the top document; it wins over stale frames."""
+    opener = _StubOpener(
+        [_StubFrame({"width": 800, "height": 600})],
+        main_frame=_StubFrame({"width": 420, "height": 300}),
+    )
+    assert await _popup_window_request(opener) == (420, 300)
+
+
+async def test_popup_window_request_warns_when_nothing_recorded(capsys):
+    assert await _popup_window_request(_StubOpener([_StubFrame(None)])) is None
+    assert "OSTRZEŻENIE" in capsys.readouterr().err
