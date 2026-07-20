@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
+from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import NavigateConfig, Scenario, Slide, Step
-from guidebot_recorder.models.config import Config, Viewport, TtsConfig
 
 
 def test_single_command_ok():

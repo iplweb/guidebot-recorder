@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import fields, is_dataclass
+from hashlib import sha256
 
 import pytest
 from playwright.async_api import Page, async_playwright
@@ -212,3 +213,22 @@ async def test_limit_is_hard_and_candidate_ids_are_stable(page: Page) -> None:
     assert [candidate.id for candidate in first_collection] == [
         candidate.id for candidate in second_collection
     ]
+
+
+async def test_candidate_ids_keep_exact_nth_of_type_path_semantics(page: Page) -> None:
+    await page.set_content(
+        """
+        <button>Pierwszy</button>
+        <span>Rozdzielacz</span>
+        <button>Drugi</button>
+        """
+    )
+
+    candidates = await collect_candidates(page)
+    by_name = {candidate.name: candidate for candidate in candidates}
+
+    def candidate_id(path: str) -> str:
+        return "candidate-" + sha256(path.encode("utf-8")).hexdigest()[:16]
+
+    assert by_name["Pierwszy"].id == candidate_id("html>body:nth-of-type(1)>button:nth-of-type(1)")
+    assert by_name["Drugi"].id == candidate_id("html>body:nth-of-type(1)>button:nth-of-type(2)")

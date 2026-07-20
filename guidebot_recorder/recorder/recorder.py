@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
-from playwright.async_api import Error as PlaywrightError, Frame, Locator, Page
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Frame, Locator, Page
 
 from guidebot_recorder.chrome.typing import typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState

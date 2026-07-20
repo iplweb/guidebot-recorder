@@ -45,7 +45,7 @@ class Slide(BaseModel):
     hold: float = 2.5
 
     @model_validator(mode="after")
-    def _at_least_one_text(self) -> "Slide":
+    def _at_least_one_text(self) -> Slide:
         if not any((self.title, self.subtitle, self.notes)):
             raise ValueError("slide wymaga co najmniej jednego z: title/subtitle/notes")
         return self

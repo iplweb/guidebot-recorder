@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from guidebot_recorder.models.config import ChromeConfig, Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Step
-from guidebot_recorder.recorder.render import _expect_chrome, _render_step
+from guidebot_recorder.recorder.render import _ensure_visuals, _expect_chrome, _render_step
 
 
 def test_expect_chrome_tracks_the_legacy_bar() -> None:
@@ -25,11 +25,21 @@ def test_expect_chrome_tracks_the_legacy_bar() -> None:
 @dataclass
 class FakePage:
     url: str = "about:blank"
+    cursor_ready: bool = False
+    chrome_ready: bool = False
+    evaluate_calls: int = 0
+    evaluate_args: list[list] = field(default_factory=list)
 
     async def evaluate(self, script, arg=None):
-        if isinstance(arg, bool):
-            return {"cursor": False, "chrome": False}
-        return None
+        self.evaluate_calls += 1
+        self.evaluate_args.append(list(arg))
+        expect_chrome = bool(arg[2])
+        mounted = self.cursor_ready and (self.chrome_ready or not expect_chrome)
+        return {
+            "cursor": self.cursor_ready,
+            "chrome": self.chrome_ready or not expect_chrome,
+            "mounted": mounted,
+        }
 
 
 class FakeOverlay:
@@ -39,6 +49,7 @@ class FakeOverlay:
 
     async def ensure(self, page: FakePage) -> None:
         self.events.append(("overlay.ensure", page.url))
+        page.cursor_ready = True
 
 
 class FakeChrome:
@@ -47,6 +58,7 @@ class FakeChrome:
 
     async def ensure(self, page: FakePage) -> None:
         self.events.append(("chrome.ensure", page.url))
+        page.chrome_ready = True
 
     async def set_url(self, page: FakePage, url: str, *, animate: bool = True) -> None:
         self.events.append(("chrome.set_url", url, animate))
@@ -61,6 +73,9 @@ class FakeRecorder:
     async def navigate(self, url: str) -> None:
         self.events.append(("recorder.navigate", url))
         self.page.url = self.final_url
+        # Model a real navigation replacing the document and both controller APIs.
+        self.page.cursor_ready = False
+        self.page.chrome_ready = False
 
 
 def _scenario(step: Step, *, type_on_navigate: bool = True, show_url: bool = True) -> Scenario:
@@ -86,7 +101,12 @@ async def _noop_ensure_card(page: FakePage) -> None:
     `_ensure_card` closure `run_render` builds."""
 
 
-async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = True):
+async def _run(
+    step: Step,
+    *,
+    type_on_navigate: bool = True,
+    show_url: bool = True,
+):
     events: list[tuple] = []
     page = FakePage()
     overlay = FakeOverlay(events)
@@ -113,6 +133,35 @@ async def _run(step: Step, *, type_on_navigate: bool = True, show_url: bool = Tr
         _noop_ensure_card,
     )
     return events
+
+
+async def test_ready_visuals_mount_in_one_browser_round_trip() -> None:
+    events: list[tuple] = []
+    page = FakePage(cursor_ready=True, chrome_ready=True)
+
+    await _ensure_visuals(page, FakeOverlay(events), FakeChrome(events))
+
+    assert page.evaluate_calls == 1
+    assert events == []
+
+
+async def test_visual_repair_refreshes_url_before_strict_mount() -> None:
+    events: list[tuple] = []
+    page = FakePage(
+        url="https://old.example/",
+        cursor_ready=True,
+        chrome_ready=False,
+    )
+
+    class ReplacingChrome(FakeChrome):
+        async def ensure(self, current: FakePage) -> None:
+            await super().ensure(current)
+            current.url = "https://new.example/"
+
+    await _ensure_visuals(page, FakeOverlay(events), ReplacingChrome(events))
+
+    assert page.evaluate_args[0][3] == "https://old.example/"
+    assert page.evaluate_args[-1][3] == "https://new.example/"
 
 
 async def test_navigate_types_resolved_url_before_goto_and_reensures_afterward() -> None:

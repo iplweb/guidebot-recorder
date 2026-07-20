@@ -434,8 +434,14 @@ def test_intro_config_defaults():
 # Task 0.5: config_hash() regression test
 def test_new_render_only_blocks_do_not_change_config_hash():
     from guidebot_recorder.models.config import (
-        Config, Viewport, TtsConfig, CursorConfig, CursorClick,
-        TypingConfig, SoundConfig, IntroConfig,
+        Config,
+        CursorClick,
+        CursorConfig,
+        IntroConfig,
+        SoundConfig,
+        TtsConfig,
+        TypingConfig,
+        Viewport,
     )
     base = Config(
         title="t", viewport=Viewport(width=800, height=600),

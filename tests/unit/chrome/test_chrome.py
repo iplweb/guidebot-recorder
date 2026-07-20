@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from playwright.async_api import Page, async_playwright
@@ -10,6 +12,25 @@ from guidebot_recorder.chrome import Chrome
 from guidebot_recorder.models.config import ChromeConfig
 
 HOST_SELECTOR = "[data-guidebot-chrome]"
+
+
+class _RecordingPage:
+    def __init__(self) -> None:
+        self.evaluations: list[tuple[str, Any]] = []
+        self.waits: list[float] = []
+
+    async def evaluate(self, expression: str, arg: Any = None) -> bool | None:
+        self.evaluations.append((expression, arg))
+        if "const ready = !!api" in expression:
+            return True
+        return None
+
+    async def wait_for_timeout(self, timeout: float) -> None:
+        self.waits.append(timeout)
+
+
+class _UnusedOverlay:
+    pass
 
 
 @pytest.fixture
@@ -210,7 +231,9 @@ async def test_bare_popups_suppress_legacy_bar_on_popup_documents(page: Page) ->
         await popup.wait_for_load_state()
         assert await popup.evaluate("() => window.__guidebot_chrome === undefined") is True
         assert await popup.locator(HOST_SELECTOR).count() == 0
-        padding = await popup.evaluate("() => getComputedStyle(document.documentElement).paddingTop")
+        padding = await popup.evaluate(
+            "() => getComputedStyle(document.documentElement).paddingTop"
+        )
         assert padding in ("0px", "")
     finally:
         await popup.close()
@@ -314,9 +337,7 @@ async def test_shell_hidden_flag_survives_reinjection(page: Page) -> None:
     # _SHELL_IS_READY == false and re-evaluates shell.js. window.__guidebot_shell
     # still exists, so the reentry guard must preserve the closure (and `hidden`)
     # rather than re-running the whole IIFE and resetting the flag to false.
-    await page.evaluate(
-        "() => document.querySelector('[data-guidebot-shell-bar]').remove()"
-    )
+    await page.evaluate("() => document.querySelector('[data-guidebot-shell-bar]').remove()")
     await chrome.ensure_shell(page)
 
     assert await page.locator("[data-guidebot-shell-bar]").count() == 1
@@ -333,3 +354,142 @@ async def test_hide_show_are_no_op_when_neither_api_is_present(page: Page) -> No
     # must not raise even though neither __guidebot_chrome nor __guidebot_shell exist
     await chrome.hide(page)
     await chrome.show(page)
+
+
+async def test_type_url_sends_one_browser_side_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = _RecordingPage()
+    chrome = Chrome(ChromeConfig(enabled=True, pre_navigate_pause_ms=40))
+    monkeypatch.setattr(
+        "guidebot_recorder.chrome.chrome.typing_schedule",
+        lambda *_args, **_kwargs: [10, 20, 30],
+    )
+
+    await chrome.type_url(
+        page,  # type: ignore[arg-type]
+        _UnusedOverlay(),
+        "abc",
+        seed="stable",
+        choreograph=False,
+    )
+
+    # ensure_shell performs two invariant checks; arming cancellation plus the
+    # whole animation are two more calls, independent of URL length.
+    assert len(page.evaluations) == 4
+    assert page.waits == []
+    _, token = page.evaluations[-2]
+    _, payload = page.evaluations[-1]
+    assert payload == {
+        "text": "abc",
+        "delays": [10, 20, 30],
+        "preNavigatePauseMs": 40,
+        "token": token,
+    }
+
+
+async def test_type_url_browser_schedule_preserves_event_order_and_delays(
+    page: Page, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True, pre_navigate_pause_ms=40))
+    await chrome.install_shell(page)
+    monkeypatch.setattr(
+        "guidebot_recorder.chrome.chrome.typing_schedule",
+        lambda *_args, **_kwargs: [20, 30],
+    )
+    await page.evaluate(
+        """() => {
+            window.__guidebot_type_events = [];
+            const api = window.__guidebot_shell;
+            for (const method of ["focusPill", "clearUrl", "appendChar", "blurPill"]) {
+                const original = api[method].bind(api);
+                api[method] = (...args) => {
+                    window.__guidebot_type_events.push({method, args, at: performance.now()});
+                    return original(...args);
+                };
+            }
+        }"""
+    )
+
+    await chrome.type_url(page, _UnusedOverlay(), "a😀", seed="stable", choreograph=False)
+
+    events = await page.evaluate("window.__guidebot_type_events")
+    assert [(event["method"], event["args"]) for event in events] == [
+        ("focusPill", []),
+        ("clearUrl", []),
+        ("appendChar", ["a"]),
+        ("appendChar", ["😀"]),
+        ("blurPill", []),
+    ]
+    assert events[2]["at"] - events[1]["at"] >= 15
+    assert events[3]["at"] - events[2]["at"] >= 25
+    assert events[4]["at"] - events[3]["at"] >= 35
+
+
+async def test_type_url_batched_schedule_stays_audible_per_character(
+    page: Page, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The batched browser-side schedule must not silence the sound feature: the
+    # pill click plus one "key" per typed character are emitted by the sibling
+    # asyncio timer that mirrors the schedule, with no per-character page.evaluate.
+    class _SilentOverlay:
+        async def move_to(self, page: Page, x: float, y: float) -> None:
+            return None
+
+        async def ripple(self, page: Page) -> None:
+            return None
+
+    chrome = Chrome(ChromeConfig(enabled=True, pre_navigate_pause_ms=10))
+    await chrome.install_shell(page)
+    monkeypatch.setattr(
+        "guidebot_recorder.chrome.chrome.typing_schedule",
+        lambda *_args, **_kwargs: [10, 10, 10],
+    )
+
+    sfx: list[str] = []
+    await chrome.type_url(
+        page,
+        _SilentOverlay(),
+        "abc",
+        seed="stable",
+        choreograph=True,
+        on_sfx=sfx.append,
+    )
+
+    assert sfx == ["click", "key", "key", "key"]
+
+
+async def test_type_url_cancellation_stops_browser_side_schedule(
+    page: Page, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chrome = Chrome(ChromeConfig(enabled=True, pre_navigate_pause_ms=20))
+    await chrome.install_shell(page)
+    monkeypatch.setattr(
+        "guidebot_recorder.chrome.chrome.typing_schedule",
+        lambda *_args, **_kwargs: [10, 1000, 10],
+    )
+
+    task = asyncio.create_task(
+        chrome.type_url(page, _UnusedOverlay(), "abc", seed="stable", choreograph=False)
+    )
+    await page.wait_for_function(
+        """() => document.querySelector('[data-guidebot-shell-bar]')
+            ?.shadowRoot.querySelector('[data-url]')?.textContent === 'a'"""
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Wait beyond the second character's schedule: browser-side work must have
+    # stopped instead of outliving the cancelled Python task.
+    await page.wait_for_timeout(1100)
+    state = await page.evaluate(
+        """() => {
+            const bar = document.querySelector('[data-guidebot-shell-bar]');
+            const pill = bar.shadowRoot.querySelector('[data-pill]');
+            return {
+                text: bar.shadowRoot.querySelector('[data-url]').textContent,
+                focused: pill.hasAttribute('data-focused'),
+                token: window.__guidebot_shell.__guidebotTypeToken ?? null,
+            };
+        }"""
+    )
+    assert state == {"text": "a", "focused": True, "token": None}

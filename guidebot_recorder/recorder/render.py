@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -47,7 +47,13 @@ from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.slide import SlideOverlay
-from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
+from guidebot_recorder.tts.base import (
+    CACHE_SCHEMA_VERSION,
+    Segment,
+    TtsCache,
+    TtsProvider,
+    cache_key,
+)
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
     MuxAudioTrack,
@@ -60,6 +66,10 @@ from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
 _VIDEO_POSTROLL_SECONDS = 0.1
+_TTS_CONCURRENCY = 8
+# Each worker can own a full ffmpeg process. Keep the pool below both the host's
+# CPU count and a conservative process ceiling instead of scaling with languages.
+_AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
 
 
 class RenderError(RuntimeError):
@@ -86,6 +96,13 @@ class _PopupSession:
     visual_ready_delay: float = 0.0
     closed_at: float | None = None
     close_handled: bool = False
+
+
+@dataclass(slots=True)
+class _TtsWork:
+    text: str
+    config: TtsConfig
+    destinations: list[tuple[str, int]]
 
 
 def _active_page(main_page: Page, popup: _PopupSession | None) -> Page:
@@ -217,47 +234,56 @@ async def _ensure_visuals(
         await overlay.ensure(page)
         return
 
-    readiness = await page.evaluate(
-        """expectChrome => {
+    # The common path checks controller readiness and mounts both layers in one
+    # browser task. A missing controller returns without painting; after Python
+    # reinjects it, the same task is rerun in strict mode against the current
+    # document. This retains page-replacement safety without paying two evaluate
+    # round-trips when the init scripts are already alive.
+    ensure_script = """async ([x, y, expectChrome, url, strict]) => {
             const cursor = window.__guidebot_cursor;
             const chrome = window.__guidebot_chrome;
-            return {
-                cursor: !!cursor && ["ensure", "moveTo"].every(
-                    name => typeof cursor[name] === "function"
-                ),
-                chrome: !expectChrome || (!!chrome && ["ensure", "setUrl"].every(
+            const cursorReady = !!cursor && ["ensure", "moveTo"].every(
+                name => typeof cursor[name] === "function"
+            );
+            const chromeReady = !expectChrome || (
+                !!chrome && ["ensure", "setUrl"].every(
                     name => typeof chrome[name] === "function"
-                )),
-            };
-        }""",
-        expect_chrome,
+                )
+            );
+            if (!cursorReady || !chromeReady) {
+                if (strict) {
+                    if (!cursorReady) {
+                        throw new Error("guidebot cursor API is unavailable after injection");
+                    }
+                    throw new Error("guidebot chrome API is unavailable after injection");
+                }
+                return {cursor: cursorReady, chrome: chromeReady, mounted: false};
+            }
+            if (expectChrome) {
+                chrome.ensure(url);
+            }
+            cursor.ensure();
+            await cursor.moveTo(x, y, 0);
+            return {cursor: true, chrome: true, mounted: true};
+        }"""
+    args = [overlay.pos[0], overlay.pos[1], expect_chrome, page.url, False]
+    readiness = await page.evaluate(
+        ensure_script,
+        args,
     )
+    if readiness.get("mounted"):
+        return
     # Context init scripts normally make both APIs available. Repair a missing
-    # controller first; the final mount still happens atomically below.
+    # controller first; the retry still mounts both layers atomically.
     if chrome is not None and expect_chrome and not readiness.get("chrome"):
         await chrome.ensure(page)
     if not readiness.get("cursor"):
         await overlay.ensure(page)
-
-    await page.evaluate(
-        """([x, y, expectChrome, url]) => {
-            const cursor = window.__guidebot_cursor;
-            const chrome = window.__guidebot_chrome;
-            if (!cursor || typeof cursor.ensure !== "function" ||
-                typeof cursor.moveTo !== "function") {
-                throw new Error("guidebot cursor API is unavailable after injection");
-            }
-            if (expectChrome) {
-                if (!chrome || typeof chrome.ensure !== "function") {
-                    throw new Error("guidebot chrome API is unavailable after injection");
-                }
-                chrome.ensure(url);
-            }
-            cursor.ensure();
-            return cursor.moveTo(x, y, 0);
-        }""",
-        [overlay.pos[0], overlay.pos[1], expect_chrome, page.url],
-    )
+    # A repair can race a navigation/document replacement. Read the URL again
+    # for the strict mount instead of reusing the pre-repair snapshot.
+    args[3] = page.url
+    args[-1] = True
+    await page.evaluate(ensure_script, args)
 
 
 async def _prime_visuals(
@@ -371,7 +397,64 @@ async def _wait_for_step_narration(segments: list[Segment]) -> None:
         await asyncio.sleep(max(segment.duration for segment in segments))
 
 
-def _mux_tracks_for_timeline(
+async def _presynthesize_narration(
+    steps: Sequence[Step],
+    configs: list[TtsConfig],
+    cache: TtsCache,
+    provider: TtsProvider,
+    *,
+    on_progress: Callable[[int], None] | None = None,
+) -> dict[str, dict[int, Segment]]:
+    """Synthesize unique cache entries concurrently and map them to every step.
+
+    Repeated narration can resolve to the same on-disk cache path. Deduplicating
+    by the canonical cache key before scheduling prevents concurrent writers to
+    that path and avoids duplicate provider calls on a cold cache.
+    """
+
+    segments: dict[str, dict[int, Segment]] = {tts.lang: {} for tts in configs}
+    by_key: dict[str, _TtsWork] = {}
+    for index, step in enumerate(steps):
+        canonical_text = _narration(step)
+        if canonical_text is None:
+            continue
+        for track_index, tts in enumerate(configs):
+            text = canonical_text if track_index == 0 else step.translations[tts.lang]
+            key = cache_key(
+                text,
+                tts,
+                provider.adapter_version,
+                CACHE_SCHEMA_VERSION,
+            )
+            work = by_key.get(key)
+            if work is None:
+                work = _TtsWork(text=text, config=tts, destinations=[])
+                by_key[key] = work
+            work.destinations.append((tts.lang, index))
+
+    semaphore = asyncio.Semaphore(_TTS_CONCURRENCY)
+
+    async def synthesize(work: _TtsWork) -> None:
+        async with semaphore:
+            segment = await cache.get_or_synth(work.text, work.config, provider)
+        for language, index in work.destinations:
+            segments[language][index] = segment
+        if on_progress is not None:
+            on_progress(len(work.destinations))
+
+    results = await asyncio.gather(
+        *(synthesize(work) for work in by_key.values()),
+        return_exceptions=True,
+    )
+    # Wait for every started cache writer before propagating an error; otherwise
+    # a sibling task could keep writing after Phase 0 has already returned.
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return segments
+
+
+async def _mux_tracks_for_timeline(
     configs: list[TtsConfig],
     placed_by_language: dict[str, list[Placed]],
     total: float,
@@ -386,13 +469,16 @@ def _mux_tracks_for_timeline(
     naming ``_publish_render_artifacts`` relies on.
     """
 
-    tracks: list[MuxAudioTrack] = []
-    for index, tts in enumerate(configs):
+    for tts in configs:
         for placement in placed_by_language[tts.lang]:
             if placement.offset + placement.segment.duration > total:
                 raise RenderError(
                     f"narracja {tts.lang} wykracza poza nagranie wideo — render przerwany"
                 )
+
+    semaphore = asyncio.Semaphore(_AUDIO_BED_CONCURRENCY)
+
+    def build_track(index: int, tts: TtsConfig) -> MuxAudioTrack:
         bed = work / f"bed-{tts.mp4_language()}.wav"
         if sfx_bed is not None:
             narr = work / f"narr-{tts.mp4_language()}.wav"
@@ -400,14 +486,58 @@ def _mux_tracks_for_timeline(
             mix_sfx_into_bed(narr, sfx_bed, bed, total)  # bed = narration + SFX
         else:
             build_audio_bed(placed_by_language[tts.lang], total, bed)
-        tracks.append(
-            MuxAudioTrack(
-                path=bed,
-                language=tts.mp4_language(),
-                title=tts.title or tts.lang,
-                default=index == 0,
-            )
+        return MuxAudioTrack(
+            path=bed,
+            language=tts.mp4_language(),
+            title=tts.title or tts.lang,
+            default=index == 0,
         )
+
+    async def build_bounded(index: int, tts: TtsConfig) -> MuxAudioTrack:
+        async with semaphore:
+            worker = asyncio.create_task(asyncio.to_thread(build_track, index, tts))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancelling an asyncio wrapper cannot stop a running thread (or
+                # its ffmpeg child). Keep the staging directory alive until that
+                # worker has actually returned, with caller cancellation primary.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                if not worker.cancelled():
+                    try:
+                        worker.result()
+                    except BaseException:
+                        pass
+                raise
+
+    tasks = [asyncio.create_task(build_bounded(index, tts)) for index, tts in enumerate(configs)]
+    gathered = asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        results = await asyncio.shield(gathered)
+    except asyncio.CancelledError:
+        # Do not start queued ffmpeg work after cancellation, but let workers
+        # already inside to_thread finish before TemporaryDirectory can unwind.
+        for task in tasks:
+            task.cancel()
+        while not gathered.done():
+            try:
+                await asyncio.shield(gathered)
+            except asyncio.CancelledError:
+                continue
+        if not gathered.cancelled():
+            gathered.result()
+        raise
+    tracks: list[MuxAudioTrack] = []
+    # gather preserves config order. It also waits for all ffmpeg workers before
+    # an error leaves the staging directory, avoiding writes into deleted paths.
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        tracks.append(result)
     return tracks
 
 
@@ -441,7 +571,7 @@ def _publish_render_artifacts(
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def _assemble_audio_tracks(
+async def _assemble_audio_tracks(
     video: Path,
     configs: list[TtsConfig],
     placed_by_language: dict[str, list[Placed]],
@@ -478,14 +608,20 @@ def _assemble_audio_tracks(
                     key_path=Path(kp),
                     gain_db=sound.volume,
                 )
-        tracks = _mux_tracks_for_timeline(
+        tracks = await _mux_tracks_for_timeline(
             configs,
             placed_by_language,
             total,
             Path(staging),
             sfx_bed=sfx_bed,
         )
-        mux_audio_tracks(video, tracks, staged_mp4, preencoded=preencoded)
+        mux_audio_tracks(
+            video,
+            tracks,
+            staged_mp4,
+            preencoded=preencoded,
+            video_duration=total,
+        )
         _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
 
 
@@ -597,7 +733,6 @@ async def run_render(
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
-    segments: dict[str, dict[int, Segment]] = {tts.lang: {} for tts in audio_configs}
     narration_count = sum(_narration(step) is not None for step in scenario.steps)
     presynth = tqdm(
         total=narration_count * len(audio_configs),
@@ -605,15 +740,16 @@ async def run_render(
         unit="segment",
         disable=not verbose,
     )
-    for index, step in enumerate(scenario.steps):
-        canonical_text = _narration(step)
-        if canonical_text is None:
-            continue
-        for track_index, tts in enumerate(audio_configs):
-            text = canonical_text if track_index == 0 else step.translations[tts.lang]
-            segments[tts.lang][index] = await cache.get_or_synth(text, tts, tts_provider)
-            presynth.update(1)
-    presynth.close()
+    try:
+        segments = await _presynthesize_narration(
+            scenario.steps,
+            audio_configs,
+            cache,
+            tts_provider,
+            on_progress=presynth.update,
+        )
+    finally:
+        presynth.close()
 
     # --- Render z nagrywaniem wideo (viewport z config — patrz compile) ---
     work = out_mp4.parent / ".guidebot_video" / out_mp4.stem
@@ -985,7 +1121,7 @@ async def run_render(
     main_webm = Path(await video.path())
     if popup is None:
         total = probe_duration(main_webm)
-        _assemble_audio_tracks(
+        await _assemble_audio_tracks(
             main_webm,
             audio_configs,
             placed_by_language,
@@ -1020,7 +1156,7 @@ async def run_render(
         hold_open_at_end=popup_open_at_end,
     )
     total = probe_duration(composite)
-    _assemble_audio_tracks(
+    await _assemble_audio_tracks(
         composite,
         audio_configs,
         placed_by_language,

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from collections.abc import Callable
 from importlib.resources import files
+from uuid import uuid4
 
 from playwright.async_api import BrowserContext, Frame, Page
 
@@ -49,6 +52,62 @@ _ROLE_PROBE = """() => {
 }"""
 
 
+_ARM_TYPE_URL_SCRIPT = """token => {
+    window.__guidebot_shell.__guidebotTypeToken = token;
+}"""
+
+
+_CANCEL_TYPE_URL_SCRIPT = """token => {
+    const api = window.__guidebot_shell;
+    if (api && api.__guidebotTypeToken === token) {
+        api.__guidebotTypeToken = null;
+    }
+}"""
+
+
+_TYPE_URL_SCRIPT = """async ({text, delays, preNavigatePauseMs, token}) => {
+    const api = window.__guidebot_shell;
+    const characters = Array.from(text);
+    if (characters.length !== delays.length) {
+        throw new Error("URL typing schedule length does not match the text");
+    }
+    const wait = (delay) => new Promise((resolve) => setTimeout(resolve, delay));
+    const active = () => api.__guidebotTypeToken === token;
+
+    if (!active()) return;
+    api.focusPill();
+    api.clearUrl();
+    for (let index = 0; index < characters.length; index += 1) {
+        await wait(delays[index]);
+        if (!active()) return;
+        api.appendChar(characters[index]);
+    }
+    await wait(preNavigatePauseMs);
+    if (!active()) return;
+    api.blurPill();
+    delete api.__guidebotTypeToken;
+}"""
+
+
+async def _cancel_type_url(page: Page, token: str) -> None:
+    """Stop browser-side typing before propagating caller cancellation."""
+
+    cleanup = asyncio.create_task(page.evaluate(_CANCEL_TYPE_URL_SCRIPT, token))
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            return
+        except asyncio.CancelledError:
+            if cleanup.done():
+                return
+            # A repeated caller cancellation must not detach the browser cleanup.
+            continue
+        except Exception:
+            # Closing/navigation can make the execution context unavailable; in
+            # that case the old schedule cannot mutate the replacement document.
+            return
+
+
 class Chrome:
     """Install and control the macOS-style browser bar used during render.
 
@@ -83,14 +142,17 @@ class Chrome:
         prelude = f"window.__guidebot_chrome_config = {json.dumps(prelude_config)};\n"
         self._script = prelude + body
 
-        shell_body = files("guidebot_recorder.chrome").joinpath("shell.js").read_text(
-            encoding="utf-8"
+        shell_body = (
+            files("guidebot_recorder.chrome").joinpath("shell.js").read_text(encoding="utf-8")
         )
-        shell_appearance = {**appearance, "focusColor": self.config.focus_color,
-                            "showCaret": self.config.show_caret}
+        shell_appearance = {
+            **appearance,
+            "focusColor": self.config.focus_color,
+            "showCaret": self.config.show_caret,
+        }
         self._shell_script = shell_body
         self._shell_html = (
-            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            '<!doctype html><html><head><meta charset="utf-8">'
             "<title>guidebot</title>"
             "<style>html,body{margin:0;padding:0;height:100%;"
             "background:#fff;overflow:hidden}</style></head><body>"
@@ -231,8 +293,6 @@ class Chrome:
             await overlay.ripple(page)
             if on_sfx is not None:
                 on_sfx("click")
-        await page.evaluate("() => window.__guidebot_shell.focusPill()")
-        await page.evaluate("() => window.__guidebot_shell.clearUrl()")
         delays = typing_schedule(
             url,
             char_delay_ms=self.config.char_delay_ms,
@@ -240,10 +300,45 @@ class Chrome:
             segment_pause_ms=self.config.segment_pause_ms,
             seed=seed,
         )
-        for character, delay in zip(url, delays, strict=True):
-            await page.wait_for_timeout(delay)
-            await page.evaluate("c => window.__guidebot_shell.appendChar(c)", character)
-            if on_sfx is not None:
+        token = uuid4().hex
+        await page.evaluate(_ARM_TYPE_URL_SCRIPT, token)
+
+        async def _drive_browser_typing() -> None:
+            # One batched browser-side schedule types the whole URL (focus, clear,
+            # per-character append, blur all run in-page), so the render loop pays a
+            # single page.evaluate instead of one round-trip per character.
+            try:
+                await page.evaluate(
+                    _TYPE_URL_SCRIPT,
+                    {
+                        "text": url,
+                        "delays": delays,
+                        "preNavigatePauseMs": self.config.pre_navigate_pause_ms,
+                        "token": token,
+                    },
+                )
+            except asyncio.CancelledError:
+                await _cancel_type_url(page, token)
+                raise
+
+        if on_sfx is None:
+            await _drive_browser_typing()
+            return
+
+        # The address bar stays audible per character without reintroducing the
+        # per-character page.evaluate round-trips the batched schedule removed: a
+        # sibling asyncio timer replays the same delay schedule and clicks as each
+        # character lands in-page. asyncio.sleep (not page.wait_for_timeout) keeps
+        # the browser-side schedule the single source of DOM truth.
+        async def _emit_key_sfx() -> None:
+            for delay in delays:
+                await asyncio.sleep(delay / 1000)
                 on_sfx("key")
-        await page.wait_for_timeout(self.config.pre_navigate_pause_ms)
-        await page.evaluate("() => window.__guidebot_shell.blurPill()")
+
+        sfx_task = asyncio.create_task(_emit_key_sfx())
+        try:
+            await _drive_browser_typing()
+        finally:
+            sfx_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sfx_task

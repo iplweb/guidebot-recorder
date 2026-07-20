@@ -298,10 +298,19 @@ async def run_compile(
     steps = scenario.steps
     cpath = compiled_path(path)
     actions = _load_prior_actions(cpath, len(steps))
+    artifact_dirty = not _compiled_artifact_is_current(cpath, path.name, len(steps))
+
+    def checkpoint() -> None:
+        """Persist only semantic progress, while keeping fresh resolves crash-safe."""
+
+        nonlocal artifact_dirty
+        write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
+        artifact_dirty = False
 
     bar = tqdm(total=len(steps), desc="compile", unit="krok", disable=not verbose)
     try:
         for index, step in enumerate(steps):
+            action_before = actions[index]
             if main_page.is_closed():
                 raise RuntimeError("główne okno zostało zamknięte podczas compile")
             if active_page.is_closed():
@@ -432,9 +441,17 @@ async def run_compile(
                         sensitive_values,
                     )
                 raise RuntimeError(f"{type(exc).__name__}: {safe_message}") from None
-            # persist incrementally so partial progress survives a later failure
-            write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
+            if actions[index] != action_before:
+                # A fresh resolve (or refreshed popup lifecycle metadata) is real
+                # progress and remains checkpointed before the next step. Pure
+                # cache hits and targetless steps do not rewrite the full sidecar.
+                artifact_dirty = True
+                checkpoint()
             bar.update(1)
+        if steps and artifact_dirty:
+            # Targetless scenarios and artifact-only repairs still need one final,
+            # aligned sidecar even though no per-step action changed.
+            checkpoint()
     finally:
         context.remove_listener("page", observe_page)
         bar.close()
