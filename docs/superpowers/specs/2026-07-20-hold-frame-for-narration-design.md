@@ -104,13 +104,21 @@ def to_virtual(self, frame: int) -> int          # frame index -> frame index
 def to_virtual_seconds(self, t_real: float) -> float   # convenience at the boundary
 ```
 
-This is the load-bearing decision. `anchor` currently feeds **three** consumers:
-narration offsets (`render.py:966`), `sfx_events` (`render.py:893-896`) and
-popup `opened_at`/`closed_at` (`render.py:1315-1330`). Remapping only narration
-would drift key-click SFX and popup composition by the running sum of all
-freezes — an error that grows over the film, so the opening looks correct and
-the ending does not. A single mapping function makes forgetting a consumer
-impossible, because there is no other path.
+This is the load-bearing decision. `anchor` feeds three consumers, and they
+split into two groups:
+
+- **Remapped to `t_virtual`:** narration offsets (`render.py:966`) and
+  `sfx_events` (`render.py:893-896`). Both are consumed *after* time editing.
+  Remapping only narration would drift every key-click and mouse-click by the
+  running sum of all freezes — an error that grows over the film, so the opening
+  looks right and the ending does not.
+- **Stays on `t_real`:** popup `opened_at`/`closed_at` (`render.py:1315-1330`).
+  Popup composition runs *before* time editing (§2) and operates entirely on the
+  recording axis. Remapping these would be a bug.
+
+Because offsets must be mapped against the *complete* edit list, raw `t_real`
+readings are stored during recording and converted once at the end — not
+converted inline as they are taken today.
 
 Boundary policy: a timestamp falling *inside* a cut span clamps to the span's
 start. Cuts remove dead time, so nothing is lost — but this is an explicit
@@ -225,11 +233,23 @@ instant narration starts would catch mid-flight entry animations — an accordio
 still opening, content still fading in — and hold that half-finished state for
 seconds.
 
-To be unambiguous: the settle is paid **at each freeze point**, not once per
-page load. The renderer waits `hold_frame_settle` seconds of real time, then
-freezes the frame reached at that moment. So a step whose narration runs 6 s
-costs 1 s of recording instead of 6 s, and entry animations triggered by that
-step's action have a second to finish first.
+To be unambiguous, for a step whose longest narration runs `D` seconds:
+
+1. The narration offset is recorded **at the start** of the settle window.
+2. `min(settle, D)` seconds of real time elapse — the recording keeps rolling,
+   so entry animations triggered by this step play normally, under the voice.
+3. A freeze of `D - settle` seconds is inserted at the frame reached. If
+   `D <= settle` no freeze is emitted at all and the step behaves exactly as it
+   does today.
+
+The settle is therefore paid **at each freeze point**, not once per page load —
+and, importantly, it is paid *out of* the narration, not on top of it. Total
+virtual time for the step stays exactly `D`, so **the finished film has the same
+length and pacing as before**; only recording wall-clock shrinks. A step with 6 s
+of narration costs 1 s of recording instead of 6 s.
+
+Falling back to real time when `D <= settle` also means short narrations lose
+nothing: there is no freeze to get wrong.
 
 Consequence worth stating plainly: **defaulting to `True` changes the appearance
 of already-produced films.** Re-rendering an existing scenario yields a still
