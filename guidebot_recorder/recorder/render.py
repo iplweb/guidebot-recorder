@@ -75,6 +75,7 @@ from guidebot_recorder.tts.base import (
 )
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
+    FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
@@ -1428,6 +1429,7 @@ async def _assemble_audio_tracks(
     preencoded: bool = False,
     sound: SoundConfig | None = None,
     sfx_offsets: list[tuple[str, float]] | None = None,
+    fade: FadeSpec | None = None,
 ) -> None:
     """Stage a complete bed set, mux atomically, then publish durable WAVs.
 
@@ -1467,6 +1469,7 @@ async def _assemble_audio_tracks(
             staged_mp4,
             preencoded=preencoded,
             video_duration=total,
+            fade=fade,
         )
         _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
 
@@ -2264,6 +2267,16 @@ async def run_render(
         preencoded=preencoded,
         sound=cfg.sound,
         sfx_offsets=sfx_offsets,
+        fade=(
+            FadeSpec(
+                fade_in=cfg.fade.fade_in,
+                fade_out=cfg.fade.fade_out,
+                color=cfg.fade.color,
+                audio=cfg.fade.audio,
+            )
+            if cfg.fade.enabled
+            else None
+        ),
     )
 
 
