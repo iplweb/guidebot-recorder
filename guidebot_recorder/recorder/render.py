@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -544,6 +544,59 @@ async def _pace_narration(
             frames=seconds_to_frames(remaining),
         )
     )
+
+
+def _build_timeline(edits: Iterable[TimeEdit], *, source_frames: int) -> Timeline:
+    """Coalesce collected edits onto the frame grid, then validate them.
+
+    ``Timeline`` is deliberately strict — it rejects two edits on one frame, and
+    anything at or past the end of the recording — because those are nonsense as
+    a *model*. They are not nonsense as *observations*: the pacing loop stamps
+    ``at`` from the wall clock, so a small ``holdFrameSettle`` (0 is a legal
+    config value) makes consecutive fast steps land on the same frame, and a
+    freeze recorded near the end can round past the 0.1s postroll. Both would
+    otherwise blow up after the entire recording is finished, losing the render.
+
+    So the collected list is reconciled here, where the observations are:
+
+    * an ``at`` at or beyond the end clamps to the last real frame — there is no
+      later frame to hold, and the film must still gain those frames;
+    * freezes sharing a frame merge by SUMMING their lengths, because two steps
+      that both want the picture held at frame N mean the film holds frame N for
+      the total of both. The film comes out exactly as long as the narration
+      asked for, which is the invariant that matters.
+    """
+    merged: dict[int, TimeEdit] = {}
+    passthrough: list[TimeEdit] = []
+    for edit in edits:
+        if edit.kind != "freeze":
+            passthrough.append(edit)
+            continue
+        at = min(edit.at, source_frames - 1)
+        previous = merged.get(at)
+        frames = edit.frames + (previous.frames if previous else 0)
+        merged[at] = TimeEdit(at=at, kind="freeze", frames=frames)
+    return Timeline.build([*merged.values(), *passthrough], source_frames=source_frames)
+
+
+def _apply_timeline_edits(source: Path, timeline: Timeline, dest: Path) -> None:
+    """Apply *timeline* to *source*, then verify the result against the model.
+
+    Everything downstream trusts ``Timeline.virtual_duration``: the audio beds
+    are built to that length and ``mux_audio_tracks`` is handed the same number
+    as its ``video_duration``, so its duration guard compares the model against
+    itself and can never catch a model/file disagreement. This is the one place
+    the model meets the file, so the check is exact — both sides are integer
+    frame counts, and a difference of even one frame means the filtergraph did
+    something other than what was modelled.
+    """
+    apply_time_edits(source, timeline, dest)
+    produced = probe_frame_count(dest)
+    if produced != timeline.virtual_frames:
+        raise RenderError(
+            f"time-edit stage produced {produced} frames but the timeline models "
+            f"{timeline.virtual_frames} — audio would be written at the wrong length"
+        )
 
 
 async def _presynthesize_narration(
@@ -1341,11 +1394,11 @@ async def run_render(
     # recording axis (their opened_at/closed_at are raw wall clock) and must stay
     # there. Only what is consumed downstream — narration and SFX — moves onto
     # the virtual axis.
-    timeline = Timeline.build(time_edits, source_frames=probe_frame_count(source_video))
+    timeline = _build_timeline(time_edits, source_frames=probe_frame_count(source_video))
     if not timeline.is_empty:
         assert_recording_fps(source_video)
         edited = work / f"{out_mp4.stem}.timeline.mp4"
-        apply_time_edits(source_video, timeline, edited)
+        _apply_timeline_edits(source_video, timeline, edited)
         source_video = edited
         preencoded = True
 

@@ -20,7 +20,9 @@ from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import (
     _POPUP_REQUEST_SCRIPT,
     RenderError,
+    _apply_timeline_edits,
     _assemble_audio_tracks,
+    _build_timeline,
     _mux_tracks_for_timeline,
     _pace_narration,
     _parse_window_request,
@@ -35,7 +37,7 @@ from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import MuxAudioTrack, compose_popup_video, probe_duration
-from guidebot_recorder.video.timeline import TimeEdit
+from guidebot_recorder.video.timeline import TimeEdit, Timeline, probe_frame_count
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -1989,44 +1991,204 @@ class LongTts(FakeTts):
     duration = 3.0
 
 
-async def test_hold_frame_preserves_film_length_while_shortening_the_recording(tmp_path):
-    # The whole point of the feature: identical output pacing, less wall clock.
-    scenario = textwrap.dedent(
-        """\
-        config:
-          title: Zamrożona klatka
-          viewport: {width: 640, height: 480}
-          tts: {provider: fake, voice: v, lang: pl-PL}
-          holdFrameForNarration: %s
-          holdFrameSettle: 0.4
-        steps:
-          - say: "Pierwszy."
-          - say: "Drugi."
-        """
+async def test_hold_frame_film_matches_the_model_exactly(tmp_path, monkeypatch):
+    """The finished film is exactly as long as the time model says it is.
+
+    This is the deterministic form of "hold-frame preserves the pacing": the
+    earlier version rendered the scenario twice and compared the two durations
+    within a tolerance, but the no-hold baseline is pure wall clock and drifted
+    run to run — the tolerance was absorbing that jitter rather than proving
+    anything. Frame counts on both sides are integers, so they can be compared
+    for equality.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "hold.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Zamrożona klatka
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              holdFrameForNarration: true
+              holdFrameSettle: 0.4
+            steps:
+              - say: "Pierwszy."
+              - say: "Drugi."
+            """
+        ),
+        encoding="utf-8",
     )
 
-    durations: dict[bool, float] = {}
-    elapsed: dict[bool, float] = {}
+    seen: list[Timeline] = []
+    original = R._apply_timeline_edits
 
+    def spy(source, timeline, dest):
+        seen.append(timeline)
+        return original(source, timeline, dest)
+
+    monkeypatch.setattr(R, "_apply_timeline_edits", spy)
+
+    out = tmp_path / "out.mp4"
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        for hold in (False, True):
-            path = tmp_path / f"hold-{hold}.scenario.yaml"
-            path.write_text(scenario % ("true" if hold else "false"), encoding="utf-8")
-            page = await browser.new_page()
-            await run_compile(path, page, MockReasoner())
-            await page.context.close()
-
-            out = tmp_path / f"out-{hold}.mp4"
-            started = time.monotonic()
-            await run_render(path, out, LongTts(), tmp_path / "cache", browser)
-            elapsed[hold] = time.monotonic() - started
-            durations[hold] = probe_duration(out)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+        await run_render(path, out, LongTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    # Two 3.0s narrations: real time only pays 2x0.4s settle when holding.
-    assert elapsed[True] < elapsed[False] - 4.0, f"holding did not shorten the recording: {elapsed}"
-    # The finished films must agree to within a frame or two of the 25 fps grid.
-    assert abs(durations[True] - durations[False]) < 0.15, (
-        f"hold-frame changed the film length: {durations}"
+    assert seen, "two 3.0s narrations under a 0.4s settle emitted no freezes"
+    timeline = seen[0]
+    # The point of the feature, stated deterministically: the recording the
+    # browser produced is shorter than the film that ships.
+    assert timeline.source_frames < timeline.virtual_frames
+    # ...and the file on disk is exactly what the model promised.
+    assert probe_frame_count(out) == timeline.virtual_frames
+
+    # The audio beds are built from the model's duration, so they must line up
+    # with the file the model produced — coverage the unedited path cannot give.
+    beds = list((tmp_path / ".guidebot_video" / "out").glob("bed-*.wav"))
+    assert beds, "no narration bed was published"
+    for bed in beds:
+        assert probe_duration(bed) == pytest.approx(probe_duration(out), abs=0.05)
+
+
+async def test_zero_settle_still_renders(tmp_path, monkeypatch):
+    """`holdFrameSettle: 0` is a legal config value and must not lose the render.
+
+    With no settle the pacing loop stamps several steps onto the same frame, and
+    the strict `Timeline` rejected that — after the whole recording had already
+    completed.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "zero-settle.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Zero
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              holdFrameForNarration: true
+              holdFrameSettle: 0
+            steps:
+              - say: "Pierwszy."
+              - say: "Drugi."
+              - say: "Trzeci."
+              - say: "Czwarty."
+              - say: "Piąty."
+            """
+        ),
+        encoding="utf-8",
     )
+
+    seen: list[Timeline] = []
+    original = R._apply_timeline_edits
+
+    def spy(source, timeline, dest):
+        seen.append(timeline)
+        return original(source, timeline, dest)
+
+    monkeypatch.setattr(R, "_apply_timeline_edits", spy)
+
+    out = tmp_path / "out.mp4"
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+        await run_render(path, out, LongTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert seen, "no freezes were recorded at settle=0"
+    timeline = seen[0]
+    # Five 3.0s narrations, nothing paid in real time: the film owes 5x75 frames
+    # of hold whether or not they collapsed onto shared frames.
+    assert timeline.virtual_frames == timeline.source_frames + 5 * 75
+    assert probe_frame_count(out) == timeline.virtual_frames
+
+
+def test_build_timeline_merges_two_freezes_on_the_same_frame() -> None:
+    # A settle of 0 (a legal config value) makes consecutive fast steps stamp
+    # the same frame index. Both want the picture held there, so the film holds
+    # it for the total of both.
+    timeline = _build_timeline(
+        [
+            TimeEdit(at=40, kind="freeze", frames=25),
+            TimeEdit(at=40, kind="freeze", frames=50),
+        ],
+        source_frames=100,
+    )
+    assert timeline.edits == (TimeEdit(at=40, kind="freeze", frames=75),)
+    assert timeline.virtual_frames == 100 + 75
+
+
+def test_build_timeline_merges_three_freezes_on_the_same_frame() -> None:
+    timeline = _build_timeline(
+        [TimeEdit(at=7, kind="freeze", frames=n) for n in (10, 20, 30)],
+        source_frames=100,
+    )
+    assert timeline.edits == (TimeEdit(at=7, kind="freeze", frames=60),)
+    assert timeline.virtual_frames == 100 + 60
+
+
+def test_build_timeline_clamps_a_freeze_past_the_end() -> None:
+    timeline = _build_timeline(
+        [TimeEdit(at=140, kind="freeze", frames=30)],
+        source_frames=100,
+    )
+    assert timeline.edits == (TimeEdit(at=99, kind="freeze", frames=30),)
+    assert timeline.virtual_frames == 100 + 30
+
+
+def test_build_timeline_clamps_a_freeze_exactly_at_source_frames_and_merges() -> None:
+    # The postroll is only 0.1s, so a freeze stamped at the very end rounds onto
+    # (or past) the last frame. Clamping happens before merging, so a clamped
+    # edit coalesces with one already sitting on the last frame.
+    timeline = _build_timeline(
+        [
+            TimeEdit(at=99, kind="freeze", frames=12),
+            TimeEdit(at=100, kind="freeze", frames=13),
+        ],
+        source_frames=100,
+    )
+    assert timeline.edits == (TimeEdit(at=99, kind="freeze", frames=25),)
+    assert timeline.virtual_frames == 100 + 25
+
+
+def test_build_timeline_keeps_distinct_frames_apart() -> None:
+    timeline = _build_timeline(
+        [
+            TimeEdit(at=10, kind="freeze", frames=5),
+            TimeEdit(at=20, kind="freeze", frames=7),
+        ],
+        source_frames=100,
+    )
+    assert timeline.edits == (
+        TimeEdit(at=10, kind="freeze", frames=5),
+        TimeEdit(at=20, kind="freeze", frames=7),
+    )
+    assert timeline.virtual_frames == 100 + 12
+
+
+def test_apply_timeline_edits_rejects_a_file_that_disagrees_with_the_model(
+    tmp_path, monkeypatch
+) -> None:
+    # Nothing downstream re-probes the video: `mux_audio_tracks` is handed the
+    # model's own duration, so its tolerance compares the model against itself.
+    # This is the only place the model meets reality.
+    import guidebot_recorder.recorder.render as R
+
+    timeline = Timeline.build([TimeEdit(at=10, kind="freeze", frames=25)], source_frames=100)
+    monkeypatch.setattr(R, "apply_time_edits", lambda src, tl, out: None)
+    monkeypatch.setattr(R, "probe_frame_count", lambda path: 123)
+
+    with pytest.raises(RenderError) as excinfo:
+        _apply_timeline_edits(tmp_path / "src.mp4", timeline, tmp_path / "out.mp4")
+
+    message = str(excinfo.value)
+    assert "123" in message
+    assert str(timeline.virtual_frames) in message
