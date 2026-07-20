@@ -14,7 +14,7 @@ from collections.abc import Callable
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Frame, Locator, Page
 
-from guidebot_recorder.chrome.typing import typing_schedule
+from guidebot_recorder.chrome.typing import DEFAULT_MAX_DELAY_FACTOR, typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
@@ -34,6 +34,7 @@ class Recorder:
         *,
         type_delay_ms: float | None = None,
         type_jitter_ms: int = 0,
+        type_max_delay_factor: float = DEFAULT_MAX_DELAY_FACTOR,
         on_sfx: Callable[[str], None] | None = None,
     ) -> None:
         self.page = page
@@ -52,6 +53,8 @@ class Recorder:
         # ± jitter (ms) around the per-character delay so form typing reads as
         # natural as the address bar, not metronomic.
         self._type_jitter_ms = type_jitter_ms
+        # Hard ceiling on one character's delay, as a multiple of the base delay.
+        self._type_max_delay_factor = type_max_delay_factor
         # Sound-effect hook, called with "click" or "key"; None means silent.
         self._on_sfx = on_sfx
 
@@ -119,6 +122,7 @@ class Recorder:
             char_jitter_ms=self._type_jitter_ms,
             segment_pause_ms=0,
             seed=text,
+            max_delay_factor=self._type_max_delay_factor,
         )
         for i, ch in enumerate(text):
             await locator.press_sequentially(ch)

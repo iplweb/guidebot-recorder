@@ -299,6 +299,7 @@ class Chrome:
             char_jitter_ms=self.config.char_jitter_ms,
             segment_pause_ms=self.config.segment_pause_ms,
             seed=seed,
+            max_delay_factor=self.config.max_delay_factor,
         )
         token = uuid4().hex
         await page.evaluate(_ARM_TYPE_URL_SCRIPT, token)

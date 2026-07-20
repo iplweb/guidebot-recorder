@@ -1041,6 +1041,7 @@ async def run_render(
                 frame=site_frame if on_shell else None,
                 type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
                 type_jitter_ms=cfg.typing.jitter_ms,
+                type_max_delay_factor=cfg.typing.max_delay_factor,
                 on_sfx=(sfx_sink if cfg.sound.enabled else None),
             )
             try:
