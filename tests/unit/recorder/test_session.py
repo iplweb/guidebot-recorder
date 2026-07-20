@@ -411,3 +411,37 @@ async def test_replay_then_verify_fail_raises_text_diagnostic(tmp_path, monkeypa
     with pytest.raises(SetupSessionError, match="verifyUserLoggedIn|--headed|not found"):
         await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert rec.replayed == 1
+
+
+# --------------------------------------------------------------------------- #
+# Review-fix regressions
+# --------------------------------------------------------------------------- #
+
+
+def test_build_check_kwargs_raises_without_goto_url(tmp_path: Path) -> None:
+    # A health-check is configured but neither target nor setup exposes a baseUrl:
+    # fail with a clear config error rather than crashing on page.goto(None).
+    cfg = load_scenario(_write_setup(tmp_path), _ENV).config
+    verify = cfg.verify_user_logged_in
+    assert verify is not None
+    with pytest.raises(SetupSessionError, match="baseUrl"):
+        session_mod._build_check_kwargs(cfg, None, verify)
+
+
+def test_save_session_concurrent_same_key_stays_valid(tmp_path: Path) -> None:
+    # Regression for the deterministic temp-name race: many concurrent writers to
+    # the SAME key must never corrupt the cache or leave a stray temp file.
+    import concurrent.futures
+
+    sessions = tmp_path / "sessions"
+    key = "k" * 16
+
+    def _save(i: int) -> None:
+        save_session(sessions, key, {"cookies": [{"n": i}], "origins": []}, {"i": i})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_save, range(40)))
+
+    loaded = load_session(sessions, key, None)
+    assert isinstance(loaded, dict) and "cookies" in loaded  # valid JSON, not truncated
+    assert not list(sessions.glob("*.tmp")), "no leftover temp files"

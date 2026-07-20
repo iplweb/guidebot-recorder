@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -172,9 +173,11 @@ def save_session(
         "storage_state": storage_state,
     }
     target = sessions_dir / f"{key}.json"
-    tmp = sessions_dir / f".{key}.json.tmp"
-    # Write with 0o600 from the start so the credential is never briefly readable.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # A per-writer unique temp name (not f".{key}.json.tmp") so two processes
+    # establishing the same key concurrently cannot clobber one another's temp
+    # file or lose it under the other's os.replace. mkstemp creates it 0o600.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{key}.", suffix=".json.tmp", dir=sessions_dir)
+    tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(wrapper, fh, ensure_ascii=False)
@@ -344,6 +347,11 @@ def _build_check_kwargs(cfg: Config, goto_url: str | None, verify: VerifyLoggedI
     identically from either entry point.
     """
 
+    if goto_url is None:
+        raise SetupSessionError(
+            "verifyUserLoggedIn is configured but no baseUrl is available on the "
+            "target or setup scenario — the health-check has no page to visit"
+        )
     return {
         "goto_url": goto_url,
         "contains_text": verify.contains_text,

@@ -230,10 +230,22 @@ So the Reasoner resolves targets against the logged-in DOM.
 ### Compile invalidation (review §1)
 
 Adding/removing/changing `config.setup` must invalidate the target sidecar.
-Fold a `setup` marker into the target's compile fingerprint: extend
-`config_hash` projection (`models/config.py:309`) with `setup` (the resolved
-setup path) and the setup `env_digest`, so a changed login user/flow re-resolves.
+The `config_hash` projection (`models/config.py`) is extended with the `setup`
+path (only when set), so adding/removing/repointing `setup` re-resolves.
 `verifyUserLoggedIn`/`maxAgeHours` stay out of the hash.
+
+**Implemented scope (post code-review):** only the `setup` *path* enters the
+target hash, not the setup `env_digest`. `config_hash(cfg)` is a pure function of
+`Config` and cannot see `env`, and threading credentials into it would touch
+every fingerprint-stamping and currency-check call site. Consequence: switching
+the login credential to a *different user whose authenticated DOM differs
+structurally* refreshes the session (the cache key **does** include
+`env_digest`) but does not by itself recompile the target. This is an accepted
+v1 limitation, bounded because (a) same-user credential rotations leave the DOM
+shape unchanged, and (b) render performs a live identity check for
+click/hover/type, so a genuine DOM drift **fails loudly** (prompting
+`guidebot compile --force`) rather than producing a wrong video silently.
+Folding `env_digest` into the target compile fingerprint is deferred.
 
 ### CLI: `guidebot setup SETUP_SCENARIO [--headed] [--force]`
 
