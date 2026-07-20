@@ -126,6 +126,28 @@ def test_render_rejects_non_edge_provider_before_browser_launch(tmp_path):
     assert "obsługuje provider TTS `edge`" in result.output
 
 
+def test_render_rejects_bad_hold_frame_settle_before_browser_launch(tmp_path, monkeypatch):
+    """`--hold-frame-settle 0` must report `BŁĄD:`/exit 2, not a raw traceback.
+
+    It used to reach `run_render` unchecked and blow up as an unhandled
+    pydantic `ValidationError` — AFTER the browser had already launched. The
+    fix validates it the same way as every other `render` rejection: eagerly,
+    before `async_playwright` is ever touched, so a broken `async_playwright`
+    stub (nothing is patched here) never gets exercised for this case either.
+    """
+    path = tmp_path / "s.yaml"
+    path.write_text(GOOD, encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["render", str(path), "--out", str(tmp_path / "o.mp4"), "--hold-frame-settle", "0"],
+    )
+
+    assert result.exit_code == 2
+    assert "BŁĄD: nieprawidłowa wartość --hold-frame-settle" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_compile_success_uses_locale_aware_helper_and_closes_browser(tmp_path, monkeypatch):
     path = tmp_path / "localized.scenario.yaml"
     path.write_text(GOOD.replace("  tts:", "  locale: pl-PL\n  tts:"), encoding="utf-8")
