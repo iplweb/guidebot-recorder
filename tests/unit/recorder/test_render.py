@@ -22,11 +22,11 @@ from guidebot_recorder.recorder.render import (
     RenderError,
     _assemble_audio_tracks,
     _mux_tracks_for_timeline,
+    _pace_narration,
     _parse_window_request,
     _popup_window_request,
     _prime_visuals,
     _publish_render_artifacts,
-    _wait_for_step_narration,
     run_render,
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
@@ -35,6 +35,7 @@ from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import MuxAudioTrack, compose_popup_video, probe_duration
+from guidebot_recorder.video.timeline import TimeEdit
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -456,12 +457,12 @@ async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path,
     provider = MultilingualFakeTts()
     narration_waits: list[float] = []
 
-    async def observe_narration_wait(segments: list[Segment]) -> None:
+    async def observe_narration_wait(segments: list[Segment], **kwargs) -> None:
         narration_waits.append(max(segment.duration for segment in segments))
-        await _wait_for_step_narration(segments)
+        await _pace_narration(segments, **kwargs)
 
     monkeypatch.setattr(
-        "guidebot_recorder.recorder.render._wait_for_step_narration",
+        "guidebot_recorder.recorder.render._pace_narration",
         observe_narration_wait,
     )
 
@@ -1418,13 +1419,13 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
 
     monkeypatch.setattr(R, "SlideOverlay", MidWaitDestroySlide)
 
-    original_wait = R._wait_for_step_narration
+    original_wait = R._pace_narration
 
-    async def destroy_during_wait(segments):
-        await original_wait(segments)
+    async def destroy_during_wait(segments, **kwargs):
+        await original_wait(segments, **kwargs)
         destroyed["value"] = True  # a navigation replaced the document mid-say
 
-    monkeypatch.setattr(R, "_wait_for_step_narration", destroy_during_wait)
+    monkeypatch.setattr(R, "_pace_narration", destroy_during_wait)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1485,13 +1486,13 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
 
     monkeypatch.setattr(R, "SlideOverlay", GhostNavSlide)
 
-    original_wait = R._wait_for_step_narration
+    original_wait = R._pace_narration
 
-    async def destroy_during_wait(segments):
-        await original_wait(segments)
+    async def destroy_during_wait(segments, **kwargs):
+        await original_wait(segments, **kwargs)
         destroyed["value"] = True  # a navigation replaced the document mid-say
 
-    monkeypatch.setattr(R, "_wait_for_step_narration", destroy_during_wait)
+    monkeypatch.setattr(R, "_pace_narration", destroy_during_wait)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1837,3 +1838,195 @@ async def test_popup_window_request_finds_the_opener_iframe(tmp_path):
         assert await _popup_window_request(page) == (500, 360)
         await context.close()
         await browser.close()
+
+
+class _Seg:
+    def __init__(self, duration: float) -> None:
+        self.duration = duration
+
+
+async def test_pace_narration_sleeps_in_full_when_disabled() -> None:
+    edits: list[TimeEdit] = []
+    started = time.monotonic()
+    await _pace_narration([_Seg(0.3)], anchor=started, hold_frame=False, settle=0.1, edits=edits)
+    assert time.monotonic() - started >= 0.3
+    assert edits == []
+
+
+async def test_pace_narration_records_a_freeze_for_the_remainder() -> None:
+    edits: list[TimeEdit] = []
+    anchor = time.monotonic()
+    await _pace_narration([_Seg(2.0)], anchor=anchor, hold_frame=True, settle=0.1, edits=edits)
+    elapsed = time.monotonic() - anchor
+    # Only the settle is paid in real time.
+    assert elapsed < 1.0
+    assert len(edits) == 1
+    assert edits[0].kind == "freeze"
+    # 2.0s narration - 0.1s settle = 1.9s -> 48 frames (rounded to the grid)
+    assert edits[0].frames == 48
+
+
+async def test_pace_narration_uses_the_longest_language() -> None:
+    edits: list[TimeEdit] = []
+    anchor = time.monotonic()
+    await _pace_narration(
+        [_Seg(0.5), _Seg(2.0)], anchor=anchor, hold_frame=True, settle=0.1, edits=edits
+    )
+    assert edits[0].frames == 48
+
+
+async def test_pace_narration_emits_no_freeze_when_narration_is_shorter_than_settle() -> None:
+    edits: list[TimeEdit] = []
+    anchor = time.monotonic()
+    await _pace_narration([_Seg(0.2)], anchor=anchor, hold_frame=True, settle=1.0, edits=edits)
+    assert time.monotonic() - anchor >= 0.2
+    assert edits == []
+
+
+async def test_pace_narration_ignores_empty_segments() -> None:
+    edits: list[TimeEdit] = []
+    await _pace_narration([], anchor=time.monotonic(), hold_frame=True, settle=1.0, edits=edits)
+    assert edits == []
+
+
+async def test_run_render_hold_frame_overrides_reach_the_pacing_decision(tmp_path, monkeypatch):
+    # The CLI passes its flags as keyword overrides because `run_render` loads
+    # the scenario itself — mutating a caller-side Config would be a no-op. This
+    # asserts the override really lands on the pacing call, not just on `cfg`.
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "hold.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Zamrożona klatka
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              holdFrameForNarration: true
+              holdFrameSettle: 0.2
+            steps:
+              - say: "Krok pierwszy."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    pacing_kwargs: list[dict] = []
+    original = R._pace_narration
+
+    async def spy(segments, **kwargs):
+        pacing_kwargs.append(kwargs)
+        await original(segments, **kwargs)
+
+    monkeypatch.setattr(R, "_pace_narration", spy)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        await run_render(
+            path,
+            tmp_path / "out.mp4",
+            FakeTts(),
+            tmp_path / "cache",
+            browser,
+            hold_frame=False,
+            hold_frame_settle=0.75,
+        )
+        await browser.close()
+
+    assert pacing_kwargs, "narration pacing never ran"
+    assert pacing_kwargs[0]["hold_frame"] is False, "the --no-hold-frame override was discarded"
+    assert pacing_kwargs[0]["settle"] == 0.75, "the --hold-frame-settle override was discarded"
+
+
+async def test_run_render_uses_the_scenario_value_when_no_override_is_given(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "hold-default.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Zamrożona klatka
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              holdFrameForNarration: false
+              holdFrameSettle: 0.25
+            steps:
+              - say: "Krok pierwszy."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    pacing_kwargs: list[dict] = []
+    original = R._pace_narration
+
+    async def spy(segments, **kwargs):
+        pacing_kwargs.append(kwargs)
+        await original(segments, **kwargs)
+
+    monkeypatch.setattr(R, "_pace_narration", spy)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert pacing_kwargs[0]["hold_frame"] is False
+    assert pacing_kwargs[0]["settle"] == 0.25
+
+
+class LongTts(FakeTts):
+    duration = 3.0
+
+
+async def test_hold_frame_preserves_film_length_while_shortening_the_recording(tmp_path):
+    # The whole point of the feature: identical output pacing, less wall clock.
+    scenario = textwrap.dedent(
+        """\
+        config:
+          title: Zamrożona klatka
+          viewport: {width: 640, height: 480}
+          tts: {provider: fake, voice: v, lang: pl-PL}
+          holdFrameForNarration: %s
+          holdFrameSettle: 0.4
+        steps:
+          - say: "Pierwszy."
+          - say: "Drugi."
+        """
+    )
+
+    durations: dict[bool, float] = {}
+    elapsed: dict[bool, float] = {}
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        for hold in (False, True):
+            path = tmp_path / f"hold-{hold}.scenario.yaml"
+            path.write_text(scenario % ("true" if hold else "false"), encoding="utf-8")
+            page = await browser.new_page()
+            await run_compile(path, page, MockReasoner())
+            await page.context.close()
+
+            out = tmp_path / f"out-{hold}.mp4"
+            started = time.monotonic()
+            await run_render(path, out, LongTts(), tmp_path / "cache", browser)
+            elapsed[hold] = time.monotonic() - started
+            durations[hold] = probe_duration(out)
+        await browser.close()
+
+    # Two 3.0s narrations: real time only pays 2x0.4s settle when holding.
+    assert elapsed[True] < elapsed[False] - 4.0, f"holding did not shorten the recording: {elapsed}"
+    # The finished films must agree to within a frame or two of the 25 fps grid.
+    assert abs(durations[True] - durations[False]) < 0.15, (
+        f"hold-frame changed the film length: {durations}"
+    )

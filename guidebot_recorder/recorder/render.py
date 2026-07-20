@@ -62,6 +62,14 @@ from guidebot_recorder.video.mux import (
     probe_duration,
 )
 from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
+from guidebot_recorder.video.timeline import (
+    TimeEdit,
+    Timeline,
+    apply_time_edits,
+    assert_recording_fps,
+    probe_frame_count,
+    seconds_to_frames,
+)
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
@@ -498,11 +506,44 @@ def _narration(step: Step) -> str | None:
     return step.narration()
 
 
-async def _wait_for_step_narration(segments: list[Segment]) -> None:
-    """Pace one shared visual step by its longest configured narration."""
+async def _pace_narration(
+    segments: list[Segment],
+    *,
+    anchor: float,
+    hold_frame: bool,
+    settle: float,
+    edits: list[TimeEdit],
+) -> None:
+    """Pace one shared visual step by its longest configured narration.
 
-    if segments:
-        await asyncio.sleep(max(segment.duration for segment in segments))
+    With ``hold_frame`` the wall clock only pays ``settle`` seconds — enough for
+    entry animations triggered by this step to finish — and the rest of the
+    voice-over becomes a held frame inserted in post. The settle comes *out of*
+    the narration, not on top of it, so the finished film keeps the exact pacing
+    it had when the renderer slept through the whole thing.
+    """
+
+    if not segments:
+        return
+    duration = max(segment.duration for segment in segments)
+
+    if not hold_frame:
+        await asyncio.sleep(duration)
+        return
+
+    real = min(settle, duration)
+    await asyncio.sleep(real)
+
+    remaining = duration - real
+    if remaining <= 0:
+        return
+    edits.append(
+        TimeEdit(
+            at=seconds_to_frames(time.monotonic() - anchor),
+            kind="freeze",
+            frames=seconds_to_frames(remaining),
+        )
+    )
 
 
 async def _presynthesize_narration(
@@ -802,6 +843,8 @@ async def run_render(
     timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
+    hold_frame: bool | None = None,
+    hold_frame_settle: float | None = None,
 ) -> None:
     path = Path(path)
     out_mp4 = Path(out_mp4)
@@ -810,6 +853,13 @@ async def run_render(
     scenario = load_scenario(path, env)
     sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cfg = scenario.config
+    # Caller-side overrides (the CLI flags). ``None`` means "use whatever the
+    # scenario configured" — the scenario is loaded here, so an override applied
+    # to a Config built by the caller would be discarded.
+    if hold_frame is not None:
+        cfg.hold_frame_for_narration = hold_frame
+    if hold_frame_settle is not None:
+        cfg.hold_frame_settle = hold_frame_settle
     audio_configs = [cfg.tts, *cfg.audio_tracks]
     providers = {tts.provider for tts in audio_configs}
     if len(providers) != 1:
@@ -1006,6 +1056,9 @@ async def run_render(
     anchor = time.monotonic()
 
     sfx_events: list[tuple[str, float]] = []
+    # Freezes recorded while rendering, on the *recording* axis. Applied to the
+    # video — and used to remap every audio offset — once the loop is done.
+    time_edits: list[TimeEdit] = []
 
     def sfx_sink(kind: str) -> None:
         sfx_events.append((kind, time.monotonic()))
@@ -1078,6 +1131,8 @@ async def run_render(
                 )
 
             step_segments: list[Segment] = []
+            # Raw wall clock: the mapping onto the finished film needs the
+            # complete edit list, which does not exist until the loop ends.
             narration_offset = time.monotonic() - anchor
             for tts in audio_configs:
                 seg = segments[tts.lang].get(index)
@@ -1089,7 +1144,13 @@ async def run_render(
             if step_segments:
                 # One picture timeline: the action waits for the longest language,
                 # while shorter tracks naturally contain silence before the action.
-                await _wait_for_step_narration(step_segments)
+                await _pace_narration(
+                    step_segments,
+                    anchor=anchor,
+                    hold_frame=cfg.hold_frame_for_narration,
+                    settle=cfg.hold_frame_settle,
+                    edits=time_edits,
+                )
 
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
@@ -1239,58 +1300,74 @@ async def run_render(
 
     main_webm = Path(await video.path())
     if popup is None:
-        total = probe_duration(main_webm)
-        await _assemble_audio_tracks(
+        source_video = main_webm
+        preencoded = False
+    else:
+        popup_webm = Path(await popup.video.path())
+        closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
+        assert closed_at is not None
+        composite = work / f"{out_mp4.stem}.composite.mp4"
+        compose_popup_video(
             main_webm,
-            audio_configs,
-            placed_by_language,
-            total,
-            work,
-            out_mp4,
-            sound=cfg.sound,
-            sfx_offsets=sfx_offsets,
+            popup_webm,
+            composite,
+            popup.opened_at,
+            closed_at,
+            visual_ready_delay=popup.visual_ready_delay,
+            transition=cfg.popup.effective_transition,
+            slide_ms=cfg.popup.slide_ms,
+            scale=cfg.popup.scale,
+            corner_radius=cfg.popup.corner_radius,
+            shadow=cfg.popup.shadow,
+            backdrop_dim=cfg.popup.backdrop_dim,
+            backdrop_blur=cfg.popup.backdrop_blur,
+            open_ms=cfg.popup.open_ms,
+            close_ms=cfg.popup.close_ms,
+            hold_open_at_end=popup_open_at_end,
+            # The popup recorded onto the main window's canvas; crop it back to
+            # the window the site actually asked for so the float mode frames
+            # that and not a viewport-sized rectangle of filler. Unknown size ->
+            # no crop.
+            popup_crop=(
+                (popup.window_size[0], popup.window_size[1], 0, 0)
+                if popup.window_size is not None
+                else None
+            ),
         )
-        return
+        source_video = composite
+        preencoded = True
 
-    popup_webm = Path(await popup.video.path())
-    closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
-    assert closed_at is not None
-    composite = work / f"{out_mp4.stem}.composite.mp4"
-    compose_popup_video(
-        main_webm,
-        popup_webm,
-        composite,
-        popup.opened_at,
-        closed_at,
-        visual_ready_delay=popup.visual_ready_delay,
-        transition=cfg.popup.effective_transition,
-        slide_ms=cfg.popup.slide_ms,
-        scale=cfg.popup.scale,
-        corner_radius=cfg.popup.corner_radius,
-        shadow=cfg.popup.shadow,
-        backdrop_dim=cfg.popup.backdrop_dim,
-        backdrop_blur=cfg.popup.backdrop_blur,
-        open_ms=cfg.popup.open_ms,
-        close_ms=cfg.popup.close_ms,
-        hold_open_at_end=popup_open_at_end,
-        # The popup recorded onto the main window's canvas; crop it back to the
-        # window the site actually asked for so the float mode frames that and
-        # not a viewport-sized rectangle of filler. Unknown size -> no crop.
-        popup_crop=(
-            (popup.window_size[0], popup.window_size[1], 0, 0)
-            if popup.window_size is not None
-            else None
-        ),
-    )
-    total = probe_duration(composite)
+    # Time editing runs AFTER popup composition: popups are composed on the
+    # recording axis (their opened_at/closed_at are raw wall clock) and must stay
+    # there. Only what is consumed downstream — narration and SFX — moves onto
+    # the virtual axis.
+    timeline = Timeline.build(time_edits, source_frames=probe_frame_count(source_video))
+    if not timeline.is_empty:
+        assert_recording_fps(source_video)
+        edited = work / f"{out_mp4.stem}.timeline.mp4"
+        apply_time_edits(source_video, timeline, edited)
+        source_video = edited
+        preencoded = True
+
+    # Taken from the model rather than probed, which is what makes the audio and
+    # video axes agree by construction.
+    total = timeline.virtual_duration
+    placed_by_language = {
+        lang: [
+            Placed(segment=p.segment, offset=timeline.to_virtual_seconds(p.offset)) for p in placed
+        ]
+        for lang, placed in placed_by_language.items()
+    }
+    sfx_offsets = [(kind, timeline.to_virtual_seconds(off)) for kind, off in sfx_offsets]
+
     await _assemble_audio_tracks(
-        composite,
+        source_video,
         audio_configs,
         placed_by_language,
         total,
         work,
         out_mp4,
-        preencoded=True,
+        preencoded=preencoded,
         sound=cfg.sound,
         sfx_offsets=sfx_offsets,
     )
