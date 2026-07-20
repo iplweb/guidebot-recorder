@@ -115,3 +115,75 @@ async def test_enter_text_control_char_falls_back_to_instant(page):
     await rec.enter_text(RoleTarget(role="textbox", name="T"), "a\nb")
     assert await page.locator("#t").input_value() == "a\nb"
     assert events == []  # instant path, no per-char key events
+
+
+class _FakeLocator:
+    def __init__(self, box):
+        self._box = box
+        self.hovered = False
+
+    async def evaluate(self, _script):
+        return None
+
+    async def bounding_box(self):
+        return self._box
+
+
+class _FakeOverlay:
+    def __init__(self):
+        self.moves = []
+        self.ripples = 0
+
+    async def move_to(self, _page, x, y):
+        self.moves.append((x, y))
+
+    async def ripple(self, _page, flash=False):
+        self.ripples += 1
+
+
+class _FakePage:
+    async def wait_for_timeout(self, _ms):
+        return None
+
+
+@pytest.fixture
+def patched_locator(monkeypatch):
+    box = {"x": 10, "y": 20, "width": 100, "height": 40}
+    loc = _FakeLocator(box)
+
+    async def _fake_build_locator(_frame, _target):
+        return loc
+
+    monkeypatch.setattr("guidebot_recorder.recorder.recorder.build_locator", _fake_build_locator)
+    return loc, box
+
+
+async def test_point_returns_center_and_box(patched_locator):
+    loc, box = patched_locator
+    overlay = _FakeOverlay()
+    rec = Recorder(_FakePage(), overlay)
+    res = await rec.point(object())  # target unused by the fake build_locator
+    assert res.locator is loc
+    assert res.box == box
+    assert res.center == (60.0, 40.0)  # 10+100/2, 20+40/2
+
+
+async def test_point_ripple_false_skips_ripple(patched_locator):
+    overlay = _FakeOverlay()
+    rec = Recorder(_FakePage(), overlay)
+    await rec.point(object(), ripple=False)
+    assert overlay.ripples == 0
+    assert overlay.moves == [(60.0, 40.0)]  # still moves the cursor
+
+
+async def test_point_no_box_gives_none_center(monkeypatch):
+    loc = _FakeLocator(None)
+
+    async def _fake_build_locator(_frame, _target):
+        return loc
+
+    monkeypatch.setattr("guidebot_recorder.recorder.recorder.build_locator", _fake_build_locator)
+    rec = Recorder(_FakePage(), _FakeOverlay())
+    res = await rec.point(object())
+    assert res.box is None
+    assert res.center is None
