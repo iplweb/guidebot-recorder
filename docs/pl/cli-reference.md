@@ -81,6 +81,9 @@ Następnie generuje wszystkie narracje, nagrywa świeży kontekst i publikuje MP
 | `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
 | `--verbose`, `-v` | wyłączone | Pokazuje postęp TTS i kroków. |
 | `--auto-heal` | wyłączone | Zarezerwowane; włączenie kończy się błędem. |
+| `--hold-frame` / `--no-hold-frame` | nieustawione — bierze `config.holdFrameForNarration` | Nadpisuje `holdFrameForNarration` scenariusza tylko na ten przebieg. `--no-hold-frame` nagrywa narrację każdego kroku w czasie rzeczywistym, tak jak zanim ta funkcja powstała — użyj go, gdy animacje scenariusza muszą działać przez cały czas lektora. Żadna z flag nie zmienia pliku konfiguracji. |
+| `--hold-frame-settle FLOAT` | nieustawione — bierze `config.holdFrameSettle` | Nadpisuje `holdFrameSettle` tylko na ten przebieg, w sekundach. Obowiązuje to samo minimum co dla pola konfiguracji (dwie klatki, `2/25` s). |
+| `--dump-timeline` | wyłączone | Zapisuje obok wideo wyliczoną oś czasu zamrożeń jako `<nazwa>.timeline.json`. Przydatne, gdy audio i wideo w wyrenderowanym pliku wydają się rozjeżdżać — pozwala sprawdzić, gdzie i na jak długo obraz był zamrożony. |
 
 Standardowe CLI wymaga, aby provider każdej skonfigurowanej ścieżki był `edge`.
 Mieszane albo inne nazwy są odrzucane przed nagraniem. API Pythona może użyć innego
@@ -88,6 +91,13 @@ adaptera, ale jeden render nadal wymaga wspólnej nazwy providera dla wszystkich
 
 `audioTracks` tworzy wiele strumieni w jednym MP4. Popup zapisany przez compile jest
 automatycznie nagrywany i składany z główną stroną.
+
+Zamrożenie klatki na czas narracji skraca nagrywanie z grubsza o całkowitą długość
+lektora, nie zmieniając długości ani tempa gotowego filmu — zmienia się tylko czas
+nagrywania i, przy domyślnym ustawieniu, wygląd pod narracją (strona stoi
+nieruchomo, zamiast się animować). Pełne wyjaśnienie:
+[`holdFrameForNarration` i `holdFrameSettle`](scenario-reference.md#holdframefornarration-i-holdframesettle)
+w dokumentacji YAML scenariusza.
 
 ## `guidebot render-set`
 

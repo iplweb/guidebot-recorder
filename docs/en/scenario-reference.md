@@ -69,6 +69,8 @@ steps:
 | `typing` | No | object / instant fill | Character-by-character input animation, render-only. |
 | `sound` | No | object / disabled | Opt-in built-in click/key sound effects, render-only. |
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
+| `holdFrameForNarration` | No | boolean / `true` | Freeze the picture during narration instead of recording in real time, render-only. |
+| `holdFrameSettle` | No | number / `1.0` | Real seconds recorded before the frame freezes, render-only. |
 
 ### `viewport`
 
@@ -288,6 +290,24 @@ identical white bootstrap.
 | `notes` | none | Optional additional notes text. |
 
 The card is built from `config.title` plus `intro.subtitle` and `intro.notes`.
+
+### `holdFrameForNarration` and `holdFrameSettle`
+
+Render-only pacing control, **on by default**, and outside the config hash like
+`cursor` and `popup`.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `holdFrameForNarration` | `true` | Instead of keeping the browser running for the whole length of a step's narration, record only a `holdFrameSettle`-second sample and freeze that picture; an ffmpeg pass afterwards holds the frame for the rest of the voice-over. |
+| `holdFrameSettle` | `1.0` | Seconds of real time still recorded before the frame is held, giving an animation the step triggers — an accordion opening, content fading in — time to finish under the voice, exactly as before this feature existed. The settle is paid *out of* the narration, not on top of it, so the finished film's length is unchanged. If a step's narration is shorter than `holdFrameSettle`, the whole step still records in real time and no freeze happens. Must be at least `2/25` s (two frames at the renderer's 25 fps); a smaller value can place two consecutive steps' narration on the same output frame and collapse them together. |
+
+The finished film has the **same length and pacing** whether `holdFrameForNarration`
+is on or off — only recording time changes. But it can **look different**: with the
+default on, the page sits still under the voice-over wherever it used to keep
+animating. Re-rendering an existing scenario with this default will not reproduce
+the pixels of a film rendered before this feature — only its length and timing. Use
+`guidebot render --no-hold-frame` to record fully live, as before; see the
+[CLI reference](cli-reference.md).
 
 ### `popup`
 
@@ -547,6 +567,7 @@ use explicit waits and verify the result.
 |---|---:|
 | `cursor` (size, `click`, centred start) | No — render-only |
 | `typing`, `sound`, `intro`, `chrome` | No — render-only |
+| `holdFrameForNarration`, `holdFrameSettle` | No — render-only |
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
 | Adding, removing, or reordering a `slide` step | Yes |

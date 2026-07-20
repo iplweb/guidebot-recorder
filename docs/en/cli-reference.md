@@ -126,10 +126,20 @@ follows one compiled pop-up lifecycle, and atomically publishes an MP4.
 | `--timeout SECONDS` | `15` | Playwright action timeout. |
 | `--verbose`, `-v` | off | Show TTS and render progress plus step errors. |
 | `--auto-heal` | off | Reserved but not implemented; enabling it exits with an error. |
+| `--hold-frame` / `--no-hold-frame` | unset — use `config.holdFrameForNarration` | Override the scenario's `holdFrameForNarration` for this run only. `--no-hold-frame` records every step's narration in real time, as before this feature existed; use it when a scenario's animations must keep running for the whole voice-over. Neither flag changes the config file. |
+| `--hold-frame-settle FLOAT` | unset — use `config.holdFrameSettle` | Override `holdFrameSettle` for this run only, in seconds. Subject to the same minimum as the config field (two frames, `2/25` s). |
+| `--dump-timeline` | off | Alongside the video, write the computed hold-frame timeline as `<name>.timeline.json`. Useful when the audio and video of a rendered file appear to drift, to inspect exactly where and how long the picture was held. |
 
 Rendering makes no LLM calls. The stock command rejects any configured provider other
 than `edge` before launching the recording browser. Tracks are configured in YAML;
 there is no audio-track CLI flag. See [Multilingual audio](multilingual-audio.md).
+
+Holding a frame for narration cuts render time roughly by the total length of the
+voice-over, without changing the finished film's length or pacing — only its
+recording time and, when the default is on, its look under narration (the page is
+static instead of animating). See
+[`holdFrameForNarration` and `holdFrameSettle`](scenario-reference.md#holdframefornarration-and-holdframesettle)
+in the scenario reference for the full explanation.
 
 There is no CLI flag for the synthetic browser bar. Enable it with `config.chrome`
 in YAML. It is injected only by `render`; `compile --headed` never displays it.

@@ -49,6 +49,8 @@ steps:
 | `typing` | Nie | Animacja wpisywania znak po znaku; wyłącznie podczas renderu. |
 | `sound` | Nie | Opcjonalne wbudowane efekty dźwiękowe; wyłącznie podczas renderu. |
 | `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
+| `holdFrameForNarration` | Nie | Zamraża obraz na czas narracji zamiast nagrywać w czasie rzeczywistym; wyłącznie podczas renderu. |
+| `holdFrameSettle` | Nie | Sekundy realnego czasu nagrane przed zamrożeniem klatki; wyłącznie podczas renderu. |
 
 ### `baseUrl`
 
@@ -252,6 +254,24 @@ biały start.
 
 Plansza powstaje z `config.title` oraz `intro.subtitle` i `intro.notes`.
 
+### `holdFrameForNarration` i `holdFrameSettle`
+
+Sterowanie tempem renderu, wyłącznie podczas renderu, **domyślnie włączone**, i —
+podobnie jak `cursor` i `popup` — poza config hashem.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `holdFrameForNarration` | `true` | Zamiast trzymać przeglądarkę żywą przez cały czas trwania narracji kroku, render nagrywa tylko `holdFrameSettle` sekund, po czym zamraża tę klatkę; oddzielny przebieg ffmpeg dokleja zamrożoną klatkę na pozostały czas lektora. |
+| `holdFrameSettle` | `1.0` | Sekundy realnego czasu wciąż nagrywane przed zamrożeniem klatki — dają czas animacjom wywołanym przez ten krok (np. rozwijaniu akordeonu, pojawianiu się treści), by dokończyć się pod głosem, tak jak przed tą funkcją. Settle jest opłacany *z* narracji, nie dodawany do niej, więc długość gotowego filmu się nie zmienia. Jeśli narracja kroku jest krótsza niż `holdFrameSettle`, cały krok nagrywa się w czasie rzeczywistym i zamrożenie nie następuje. Minimum to `2/25` s (dwie klatki przy 25 fps renderu) — mniejsza wartość mogłaby umieścić narracje dwóch kolejnych kroków na tej samej klatce wyjściowej i je zlepić. |
+
+Gotowy film ma **taką samą długość i tempo** niezależnie od tego, czy
+`holdFrameForNarration` jest włączone — zmienia się tylko czas nagrywania. Może
+jednak **inaczej wyglądać**: przy domyślnym ustawieniu strona stoi nieruchomo pod
+lektorem tam, gdzie wcześniej wciąż się animowała. Ponowne wyrenderowanie istniejącego
+scenariusza z tym domyślnym ustawieniem nie odtworzy pikseli filmu nagranego przed tą
+funkcją — tylko jego długość i tempo. Użyj `guidebot render --no-hold-frame`, aby
+nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference.md).
+
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
@@ -369,6 +389,7 @@ zmiany URL i nie traktuje źródłowej wartości jako stabilnego sterowania. Nie
 |---|---:|
 | `cursor` (rozmiar, `click`, wyśrodkowany start) | Nie — render-only |
 | `typing`, `sound`, `intro`, `chrome` | Nie — render-only |
+| `holdFrameForNarration`, `holdFrameSettle` | Nie — render-only |
 | Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
 | Sama wartość `enterText.text` | Nie — render-only |
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
