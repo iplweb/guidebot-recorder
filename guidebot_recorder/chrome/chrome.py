@@ -141,6 +141,12 @@ class Chrome:
         prelude_config = {**appearance, "barePopups": bare_popups}
         prelude = f"window.__guidebot_chrome_config = {json.dumps(prelude_config)};\n"
         self._script = prelude + body
+        # The same body with the bar forced on, for the one window that must show
+        # it while every other popup stays bare (a `target=_blank` tab is a real
+        # browser tab and reads as broken without an address bar).
+        bar_config = {**appearance, "barePopups": False}
+        bar_prelude = f"window.__guidebot_chrome_config = {json.dumps(bar_config)};\n"
+        self._script_with_bar = bar_prelude + body
 
         shell_body = (
             files("guidebot_recorder.chrome").joinpath("shell.js").read_text(encoding="utf-8")
@@ -170,6 +176,19 @@ class Chrome:
         """Register the bar before pages are created so their first frame has it."""
 
         await context.add_init_script(script=self._script)
+
+    async def install_bar(self, page: Page) -> None:
+        """Mount the legacy in-DOM bar on ONE page, overriding ``bare_popups``.
+
+        The context-wide script bailed before assigning the API, so re-evaluating
+        the non-bare variant here is a clean first mount rather than a conflict.
+        The init-script registration is per-page and runs after the context one,
+        so the bar survives a navigation inside this window.
+        """
+
+        await page.add_init_script(script=self._script_with_bar)
+        await page.evaluate(self._script_with_bar)
+        await page.evaluate("url => window.__guidebot_chrome.ensure(url)", page.url)
 
     async def ensure(self, page: Page) -> None:
         """Recreate a missing controller/bar and synchronize Playwright's URL."""

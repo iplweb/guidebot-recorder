@@ -6,7 +6,7 @@ CompiledScenario (``*.compiled.yaml``), not inline on the step.
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -14,7 +14,16 @@ from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
 
 #: "primary" commands (an action/step); `say` may accompany one as narration
-PRIMARY_COMMANDS = ("teach", "navigate", "click", "hover", "enter_text", "wait", "slide")
+PRIMARY_COMMANDS = (
+    "teach",
+    "navigate",
+    "click",
+    "hover",
+    "enter_text",
+    "wait",
+    "slide",
+    "close_window",
+)
 
 
 class EnterText(BaseModel):
@@ -64,6 +73,9 @@ class Step(BaseModel):
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
+    #: close the active window and return to the one that opened it; `Literal[True]`
+    #: so that `closeWindow: false` is a validation error rather than a silent no-op
+    close_window: Literal[True] | None = Field(default=None, alias="closeWindow")
     expect: Expect | None = None
     #: tolerate an absent element instead of failing the run (single-step shorthand)
     optional: bool = False
@@ -101,7 +113,11 @@ class Step(BaseModel):
     def command_kind(self) -> str:
         for c in PRIMARY_COMMANDS:
             if getattr(self, c) is not None:
-                return "enterText" if c == "enter_text" else c
+                if c == "enter_text":
+                    return "enterText"
+                if c == "close_window":
+                    return "closeWindow"
+                return c
         return "say"
 
     def requires_target(self) -> bool:
