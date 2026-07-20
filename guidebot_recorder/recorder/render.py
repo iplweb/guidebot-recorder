@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -113,6 +114,17 @@ class _PopupSession:
 # popup is matched to it right after it opens.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
+# How long the opener's frames get to answer the geometry probe. They read a
+# value the page already wrote synchronously, so a healthy frame answers in
+# milliseconds; the budget exists purely to survive frames that can never
+# answer at all (see ``_scan_frames_for_window_request``).
+_POPUP_REQUEST_LOOKUP_TIMEOUT = 2.0
+
+# Absolute ceiling on the lookup, cleanup included. The scan bounds itself, so
+# reaching this means the bounding itself misbehaved; it exists so that no page
+# can ever hang a render here.
+_POPUP_REQUEST_HARD_TIMEOUT = 5.0
+
 _POPUP_REQUEST_SCRIPT = f"""
 (() => {{
   const KEY = "{_POPUP_REQUEST_KEY}";
@@ -120,6 +132,11 @@ _POPUP_REQUEST_SCRIPT = f"""
   const native = window.open;
   if (typeof native !== "function") return;
   window[KEY] = null;
+  // Captured before chrome.js shadows ``top`` (frame-bust neutralization), so
+  // this is the *real* top document even from inside the shell's site iframe.
+  // Publishing the record there lets the Python side read one frame instead of
+  // interrogating every ad iframe on the page.
+  const realTop = window.top;
   const parse = (features) => {{
     if (typeof features !== "string") return null;
     const sizes = {{}};
@@ -136,7 +153,15 @@ _POPUP_REQUEST_SCRIPT = f"""
   }};
   window.open = function (...args) {{
     const requested = parse(args[2]);
-    if (requested) window[KEY] = requested;
+    if (requested) {{
+      window[KEY] = requested;
+      // Best effort: a genuinely cross-origin opener frame cannot write to the
+      // top document, and that is fine — the Python side falls back to a
+      // bounded per-frame scan.
+      try {{
+        if (realTop && realTop !== window) realTop[KEY] = requested;
+      }} catch (e) {{}}
+    }}
     return native.apply(this, args);
   }};
 }})();
@@ -155,24 +180,93 @@ def _parse_window_request(requested: object) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
+def _discard_pending(task: asyncio.Future) -> None:
+    """Cancel a lookup we no longer need, and never orphan its exception.
+
+    A cancelled ``Frame.evaluate`` can still settle later — typically with
+    ``Frame was detached`` — and an unread exception on an abandoned future is
+    what produces asyncio's "Future exception was never retrieved" noise.
+    Retrieving it in a done-callback keeps that silent.
+    """
+
+    if task.done():
+        return
+    task.cancel()
+    task.add_done_callback(lambda done: done.cancelled() or done.exception())
+
+
+async def _frame_window_request(frame: Frame) -> tuple[int, int] | None:
+    """Read one frame's ``window.open`` record, or ``None`` if it cannot answer."""
+
+    try:
+        requested = await frame.evaluate(f"() => window.{_POPUP_REQUEST_KEY} || null")
+    except PlaywrightError:
+        # The frame navigated away, detached, or never ran the init script.
+        return None
+    return _parse_window_request(requested)
+
+
+async def _scan_frames_for_window_request(opener: Page) -> tuple[int, int] | None:
+    """Ask every frame for its record *concurrently*, then take the best answer.
+
+    Concurrency is the point, not an optimisation. ``Frame.evaluate`` accepts no
+    timeout, and an ad-heavy page routinely carries iframes whose document never
+    commits an execution context — evaluating on one of those never returns.
+    Asking the frames one after another therefore lets a single dead ad iframe
+    block the render forever (and it did). Asking them all at once means a dead
+    frame costs only the frames that answer nothing, and the opener still gets
+    to report its geometry within the budget.
+
+    Frames are preferred newest-first, with the top document first of all: the
+    init script republishes each record on the real top document, so the top
+    frame holds the answer whenever it is same-origin with the opener frame.
+    """
+
+    top = opener.main_frame
+    frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
+    tasks = [asyncio.ensure_future(_frame_window_request(frame)) for frame in frames]
+    try:
+        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                if (size := task.result()) is not None:
+                    return size
+        return None
+    finally:
+        for task in tasks:
+            _discard_pending(task)
+
+
 async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
     """Return the window size the *opener* asked ``window.open`` for, if any.
 
-    Scans every frame because the click that opens the popup usually happens
-    inside the shell's site iframe, not the top document. Frames that have
-    navigated away (or that never ran the init script) are skipped rather than
-    failing the render: an unknown size simply means no crop, i.e. the previous
-    full-canvas behaviour.
+    Bounded twice over, because this runs at the worst possible moment — right
+    after a popup opens, while the opener is at its busiest — and a render that
+    hangs here is unrecoverable. An unknown size is by contrast harmless: it
+    means no crop, i.e. the full-canvas behaviour that predates popup cropping.
+    So the lookup always terminates, and says so when it gives up.
     """
-    for frame in reversed(opener.frames):
-        try:
-            requested = await frame.evaluate(f"() => window.{_POPUP_REQUEST_KEY} || null")
-        except PlaywrightError:
-            continue
-        size = _parse_window_request(requested)
-        if size is not None:
-            return size
-    return None
+
+    lookup = asyncio.ensure_future(_scan_frames_for_window_request(opener))
+    try:
+        size = await asyncio.wait_for(asyncio.shield(lookup), _POPUP_REQUEST_HARD_TIMEOUT)
+    except TimeoutError:
+        # ``shield`` means the timeout does not itself cancel the lookup, so it
+        # is still ours to dispose of cleanly.
+        _discard_pending(lookup)
+        tqdm.write(
+            "OSTRZEŻENIE: odczyt rozmiaru okna popupu nie zakończył się w "
+            f"{_POPUP_REQUEST_HARD_TIMEOUT:g}s — popup bez przycięcia",
+            file=sys.stderr,
+        )
+        return None
+    if size is None:
+        tqdm.write(
+            "OSTRZEŻENIE: żadna ramka nie podała rozmiaru okna z window.open() "
+            "— popup bez przycięcia",
+            file=sys.stderr,
+        )
+    return size
 
 
 @dataclass(slots=True)
