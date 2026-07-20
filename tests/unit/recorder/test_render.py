@@ -2261,6 +2261,110 @@ def test_resolve_popup_crop_does_not_run_cropdetect_when_a_level_answered(tmp_pa
     )
 
 
+def test_resolve_popup_crop_scales_the_window_open_rect_into_recording_pixels(
+    tmp_path, monkeypatch, capsys
+):
+    # A headed browser on a HiDPI screen composites the popup at the screen's
+    # backing scale, so Playwright fits a 500x670 window into the 1376x800 canvas
+    # at 1.19x instead of 1:1 — the CSS rect would cut 96px off the right and
+    # 130px off the bottom.
+    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: (596, 800, 0, 0))
+
+    crop, level = _resolve_popup_crop(
+        window_size=(500, 670),
+        content_box=None,
+        viewport=(500, 670),
+        canvas=(1376, 800),
+        popup_video=tmp_path / "popup.webm",
+        verbose=True,
+    )
+
+    assert crop == (596, 800, 0, 0)
+    assert level == "window.open"
+    assert "1.19" in capsys.readouterr().out
+
+
+def test_resolve_popup_crop_scales_the_content_box_into_recording_pixels(tmp_path, monkeypatch):
+    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: (1000, 800, 0, 0))
+
+    crop, level = _resolve_popup_crop(
+        window_size=None,
+        content_box=(320, 240, 4, 6),
+        viewport=(500, 400),
+        canvas=(1000, 800),
+        popup_video=tmp_path / "popup.webm",
+        verbose=False,
+    )
+
+    # Scale 2x, origin floored and far edges ceiled so rounding never shaves ink.
+    assert crop == (640, 480, 8, 12)
+    assert level == "bbox"
+
+
+def test_resolve_popup_crop_keeps_css_pixels_when_the_recording_is_unscaled(tmp_path, monkeypatch):
+    # Headless: the popup records 1:1, so ``detect_content_crop`` finds the whole
+    # window already trimmed and declines. The CSS rect is then already correct.
+    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: None)
+
+    crop, level = _resolve_popup_crop(
+        window_size=(500, 670),
+        content_box=None,
+        viewport=(500, 670),
+        canvas=(1376, 800),
+        popup_video=tmp_path / "popup.webm",
+        verbose=False,
+    )
+
+    assert crop == (500, 670, 0, 0)
+    assert level == "window.open"
+
+
+@pytest.mark.parametrize(
+    "measured",
+    [
+        (900, 300, 0, 0),  # aspect contradicts the 500x670 window
+        (596, 800, 10, 4),  # Playwright anchors the window at the origin
+        (120, 160, 0, 0),  # 0.24x — no backing scale produces it
+    ],
+)
+def test_resolve_popup_crop_refuses_a_measurement_that_contradicts_the_viewport(
+    tmp_path, monkeypatch, measured
+):
+    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: measured)
+
+    crop, level = _resolve_popup_crop(
+        window_size=(500, 670),
+        content_box=None,
+        viewport=(500, 670),
+        canvas=(1376, 800),
+        popup_video=tmp_path / "popup.webm",
+        verbose=False,
+    )
+
+    # A measurement that cannot be a scaled popup window is not evidence about
+    # the scale; fall back to 1:1 rather than crop to a guess.
+    assert crop == (500, 670, 0, 0)
+    assert level == "window.open"
+
+
+def test_resolve_popup_crop_skips_the_scale_probe_without_a_viewport(tmp_path, monkeypatch):
+    def forbidden(path):  # pragma: no cover - failure path
+        raise AssertionError("nothing to correct against, so nothing to measure")
+
+    monkeypatch.setattr(render_module, "detect_content_crop", forbidden)
+
+    crop, _level = _resolve_popup_crop(
+        window_size=(500, 670),
+        content_box=None,
+        viewport=None,
+        canvas=(1376, 800),
+        popup_video=tmp_path / "popup.webm",
+        verbose=False,
+    )
+
+    assert crop == (500, 670, 0, 0)
+
+
 class _CursorPage:
     """A page that records nothing but its own liveness and viewport."""
 

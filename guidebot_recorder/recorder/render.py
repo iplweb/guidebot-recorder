@@ -144,6 +144,14 @@ class _PopupSession:
     matter how small a window the site asked for. This is the geometry the
     compositor crops that canvas back down to.
     """
+    viewport: tuple[int, int] | None = None
+    """The popup page's own layout viewport in CSS px, or ``None`` if unknown.
+
+    Not the same thing as :attr:`window_size` (which the site *asked* for) nor as
+    the recording canvas: it is what the popup actually got, and it is the unit
+    levels 1 and 2 measure in. Paired with the canvas it lets
+    :func:`_recording_scale` convert those measurements into recording pixels.
+    """
     content_box: tuple[int, int, int, int] | None = None
     """The popup's painted content as ``(width, height, x, y)``, or ``None``.
 
@@ -168,6 +176,10 @@ class _PopupSession:
 # rather than from the popup because it is available the moment the popup
 # opens, before its document has committed. Record the request on the *opener*
 # frame; the popup is matched to it right after it opens.
+#
+# Note the unit: this is the popup's viewport in **CSS px**, which is only the
+# same as its size in the *recording* when the compositor draws at scale 1. See
+# :func:`_recording_scale` for the conversion and for why headed renders differ.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
 # How long the opener's frames get to answer the geometry probe. They read a
@@ -559,6 +571,14 @@ async def _settle_popup_content_box(popup: _PopupSession) -> None:
         popup.content_box = None
 
 
+def _page_viewport(page: Page) -> tuple[int, int] | None:
+    """*page*'s layout viewport as a plain pair, or ``None`` when unset."""
+    viewport = page.viewport_size
+    if viewport is None:
+        return None
+    return viewport["width"], viewport["height"]
+
+
 def _log_popup_crop(level: str, crop: tuple[int, int, int, int] | None, verbose: bool) -> None:
     """Say which fallback level framed the popup — silent degradation is a bug."""
     if not verbose:
@@ -570,12 +590,92 @@ def _log_popup_crop(level: str, crop: tuple[int, int, int, int] | None, verbose:
     tqdm.write(f"   ⤷ kadr popupu: {level} → {width}x{height}+{x}+{y}")
 
 
+#: Backing scales a compositor plausibly renders a window at. Headless Chromium
+#: draws at 1; a headed window inherits its screen's scale factor, which is 2 on
+#: every shipping HiDPI display and 3 only on the densest mobile-class panels.
+#: Used to sanity-check a *measured* recording scale, never to pick one.
+_PLAUSIBLE_BACKING_SCALES = (1, 2, 3)
+
+#: How far a measured recording scale may sit from the nearest scale the fit
+#: rule can produce. Wide enough for the recorder's even-pixel snapping (a 597px
+#: window records as 596), far too narrow to admit an unrelated rect.
+_RECORDING_SCALE_TOLERANCE = 0.02
+
+
+def _recording_scale(
+    measured: tuple[int, int, int, int] | None,
+    viewport: tuple[int, int] | None,
+    canvas: tuple[int, int] | None,
+) -> float | None:
+    """How many recording pixels the popup got per CSS pixel, or ``None``.
+
+    Playwright records every page in a context onto one canvas of
+    ``record_video_size``, and fits each page's *compositor* frame into it
+    preserving aspect ratio, anchored top-left, padding the rest. That frame is
+    in **device** pixels: a headed browser on a HiDPI screen composites at the
+    screen's backing scale, so a 500x670 popup arrives as 1000x1340 and is fitted
+    into a 1376x800 canvas at 0.597 — leaving the window occupying 597x800
+    *recording* pixels, not 500x670. Headless composites at 1 and the same popup
+    records 1:1, which is why this only ever bit headed renders.
+
+    The backing scale is not observable from the page (``devicePixelRatio``
+    reports the emulated 1) nor from ``screenshot(scale="device")``, so it is
+    read back off the recording: *measured* is the popup's rendered rect as
+    trimmed out of the padding, and the scale is its width over the viewport's.
+
+    The measurement is a pixel heuristic, so it is only believed when it looks
+    like a fitted window: anchored at the origin, aspect preserved, and within
+    :data:`_RECORDING_SCALE_TOLERANCE` of a scale the fit rule can actually
+    produce for some plausible backing scale. Anything else — a page whose own
+    background matched the padding colour, ink mistaken for a window — returns
+    ``None``, i.e. "assume 1:1", which is the behaviour that predates this.
+    """
+    if measured is None or viewport is None or canvas is None:
+        return None
+    width, height, x, y = measured
+    viewport_width, viewport_height = viewport
+    if (x, y) != (0, 0) or viewport_width <= 0 or viewport_height <= 0:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    scale = width / viewport_width
+    if abs(height / viewport_height - scale) > _RECORDING_SCALE_TOLERANCE * scale:
+        return None  # not a uniformly scaled window
+    fitted = [
+        min(backing, canvas[0] / viewport_width, canvas[1] / viewport_height)
+        for backing in _PLAUSIBLE_BACKING_SCALES
+    ]
+    if not any(
+        abs(scale - candidate) <= _RECORDING_SCALE_TOLERANCE * candidate for candidate in fitted
+    ):
+        return None
+    return scale
+
+
+def _scale_rect(rect: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
+    """Map a CSS-pixel ``(width, height, x, y)`` into recording pixels.
+
+    The origin floors and the far edges ceil, so the rounding can only ever add
+    a fringe pixel of padding — never shave one off the popup's own ink.
+    """
+    width, height, x, y = rect
+    left, top = math.floor(x * scale), math.floor(y * scale)
+    return (
+        math.ceil((x + width) * scale) - left,
+        math.ceil((y + height) * scale) - top,
+        left,
+        top,
+    )
+
+
 def _resolve_popup_crop(
     *,
     window_size: tuple[int, int] | None,
     content_box: tuple[int, int, int, int] | None,
     popup_video: Path,
     verbose: bool,
+    viewport: tuple[int, int] | None = None,
+    canvas: tuple[int, int] | None = None,
 ) -> tuple[tuple[int, int, int, int] | None, str]:
     """Pick the popup crop rect from the best available witness.
 
@@ -587,19 +687,40 @@ def _resolve_popup_crop(
        :data:`POPUP_BBOX_DEGENERATE_RATIO`.
     3. ``cropdetect`` over the recording — a pixel heuristic, last resort.
 
+    Levels 1 and 2 speak **CSS pixels** and the crop is applied to the
+    *recording*, which are not the same unit — see :func:`_recording_scale`. The
+    same padding-trimming pass that backs level 3 supplies the conversion factor
+    whenever there is a *viewport* and a *canvas* to correct between; without
+    them, or when the measurement does not look like a fitted window, the rects
+    pass through as-is (1:1, which is what headless produces).
+
     All three declining yields ``(None, "none")``: the pre-crop full-canvas
     filtergraph, byte for byte.
     """
-    if window_size is not None:
-        crop = (window_size[0], window_size[1], 0, 0)
-        _log_popup_crop("window.open", crop, verbose)
-        return crop, "window.open"
-    if content_box is not None:
-        _log_popup_crop("bbox", content_box, verbose)
-        return content_box, "bbox"
-    detected = detect_content_crop(popup_video)
-    _log_popup_crop("cropdetect", detected, verbose)
-    return (detected, "cropdetect") if detected is not None else (None, "none")
+    css_evidence = window_size is not None or content_box is not None
+    measured = (
+        detect_content_crop(popup_video)
+        if not css_evidence or (viewport is not None and canvas is not None)
+        else None
+    )
+    if window_size is not None or content_box is not None:
+        scale = _recording_scale(measured, viewport, canvas)
+        if verbose and scale is not None and abs(scale - 1.0) > _RECORDING_SCALE_TOLERANCE:
+            tqdm.write(f"   ⤷ nagranie popupu w skali {scale:.3f}× — kadr przeliczony")
+        if window_size is not None:
+            # The measured rect *is* the whole window in recording pixels, so
+            # prefer it over rescaling the request: it needs no rounding and
+            # cannot leave a seam of padding along the right or bottom edge.
+            crop = measured if scale is not None else (window_size[0], window_size[1], 0, 0)
+            assert crop is not None
+            _log_popup_crop("window.open", crop, verbose)
+            return crop, "window.open"
+        assert content_box is not None
+        crop = content_box if scale is None else _scale_rect(content_box, scale)
+        _log_popup_crop("bbox", crop, verbose)
+        return crop, "bbox"
+    _log_popup_crop("cropdetect", measured, verbose)
+    return (measured, "cropdetect") if measured is not None else (None, "none")
 
 
 @dataclass(slots=True)
@@ -1285,9 +1406,7 @@ async def _resolve_pending_target(
         assert isinstance(result, TargetAbsent)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _OptionalAbsent(
-                f"{step_instruction(step)!r}: {result.reason} ({result.message})"
-            )
+            raise _OptionalAbsent(f"{step_instruction(step)!r}: {result.reason} ({result.message})")
         await asyncio.sleep(min(_PENDING_POLL_SECONDS, remaining))
 
 
@@ -1896,6 +2015,8 @@ async def run_render(
         content_box=popup.content_box,
         popup_video=popup_webm,
         verbose=verbose,
+        viewport=popup.viewport,
+        canvas=(cfg.viewport.width, cfg.viewport.height),
     )
     closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
     assert closed_at is not None
@@ -2112,12 +2233,16 @@ async def _render_step(
                     else 0.0
                 ),
                 closed_at=closed_at,
-                # Read from the opener while it is still alive; the popup's own
-                # viewport is the context's and so cannot report this.
+                # Read from the opener while it is still alive.
                 window_size=await _popup_window_request(page),
-                # Level 2, started (not awaited) now for the same reason: by
-                # composition time the popup page is closed. Only the *painted*
-                # content can be measured — the popup's layout viewport is the
+                # Available the instant the popup opens, and authoritative: a
+                # popup opened with size features reports that size, a featureless
+                # one reports the context viewport it inherited (which is exactly
+                # the case levels 2 and 3 exist for).
+                viewport=_page_viewport(popup_page),
+                # Level 2, started (not awaited) now because by composition time
+                # the popup page is closed. Only the *painted* content can be
+                # measured: a featureless popup's layout viewport is the
                 # context's, so innerWidth/outerWidth/clientWidth all restate the
                 # oversized number instead of the real window. Awaiting it here
                 # would spend its latency on camera; it is reaped before the
