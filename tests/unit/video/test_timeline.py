@@ -9,6 +9,7 @@ from guidebot_recorder.video.timeline import (
     TimeEdit,
     Timeline,
     TimelineError,
+    build_filtergraph,
     frames_to_seconds,
     seconds_to_frames,
 )
@@ -152,3 +153,61 @@ def test_rejects_edit_landing_inside_a_cut() -> None:
 def test_rejects_non_positive_source_frames() -> None:
     with pytest.raises(TimelineError):
         Timeline.build([], source_frames=0)
+
+
+def test_filtergraph_for_a_single_freeze() -> None:
+    tl = Timeline.build([TimeEdit(at=75, kind="freeze", frames=59)], source_frames=148)
+    assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=3[s0][s1][s2];"
+        "[s0]trim=start_frame=0:end_frame=75,setpts=PTS-STARTPTS[v0];"
+        "[s1]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=59[v1];"
+        "[s2]trim=start_frame=76,setpts=PTS-STARTPTS[v2];"
+        "[v0][v1][v2]concat=n=3:v=1:a=0[v]"
+    )
+
+
+def test_filtergraph_for_a_single_cut() -> None:
+    tl = Timeline.build([TimeEdit(at=25, kind="cut", frames=25)], source_frames=148)
+    assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=2[s0][s1];"
+        "[s0]trim=start_frame=0:end_frame=25,setpts=PTS-STARTPTS[v0];"
+        "[s1]trim=start_frame=50,setpts=PTS-STARTPTS[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0[v]"
+    )
+
+
+def test_filtergraph_for_cut_then_freeze() -> None:
+    tl = Timeline.build(
+        [
+            TimeEdit(at=25, kind="cut", frames=25),
+            TimeEdit(at=75, kind="freeze", frames=59),
+        ],
+        source_frames=148,
+    )
+    assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=4[s0][s1][s2][s3];"
+        "[s0]trim=start_frame=0:end_frame=25,setpts=PTS-STARTPTS[v0];"
+        "[s1]trim=start_frame=50:end_frame=75,setpts=PTS-STARTPTS[v1];"
+        "[s2]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=59[v2];"
+        "[s3]trim=start_frame=76,setpts=PTS-STARTPTS[v3];"
+        "[v0][v1][v2][v3]concat=n=4:v=1:a=0[v]"
+    )
+
+
+def test_filtergraph_rejects_an_empty_timeline() -> None:
+    tl = Timeline.build([], source_frames=148)
+    with pytest.raises(TimelineError):
+        build_filtergraph(tl)
+
+
+def test_filtergraph_handles_a_freeze_on_the_last_frame() -> None:
+    tl = Timeline.build([TimeEdit(at=147, kind="freeze", frames=25)], source_frames=148)
+    assert build_filtergraph(tl) == (
+        "[0:v]fps=25,split=2[s0][s1];"
+        "[s0]trim=start_frame=0:end_frame=147,setpts=PTS-STARTPTS[v0];"
+        "[s1]trim=start_frame=147:end_frame=148,setpts=PTS-STARTPTS,"
+        "tpad=stop_mode=clone:stop=25[v1];"
+        "[v0][v1]concat=n=2:v=1:a=0[v]"
+    )
