@@ -23,7 +23,23 @@ PRIMARY_COMMANDS = (
     "wait",
     "slide",
     "close_window",
+    "desktop",
 )
+
+#: Built-in generic browser icons for the ``desktop`` step. Deliberately NOT the
+#: real browser logos — those are trademarks and this package is redistributable.
+#: They are hand-drawn stand-ins whose names merely say which browser they evoke;
+#: a scenario that wants a real logo points ``icon`` at its own file instead.
+DESKTOP_ICON_ALIASES = {
+    "chrome": "browser",
+    "browser": "browser",
+    "firefox": "flame",
+    "flame": "flame",
+    "iexplore": "legacy",
+    "edge": "legacy",
+    "legacy": "legacy",
+    "globe": "globe",
+}
 
 
 class EnterText(BaseModel):
@@ -62,6 +78,25 @@ class Slide(BaseModel):
         return self
 
 
+class Desktop(BaseModel):
+    """A simulated desktop opener: cursor double-clicks a browser icon, window opens.
+
+    Visual-only, like :class:`Slide` — resolves to no compiled action. ``icon`` is
+    either a built-in name (see :data:`DESKTOP_ICON_ALIASES`) or a path to the
+    scenario author's own image; ``label`` is the caption under the icon. The
+    desktop background colour is a render setting (``config.desktop.color``), not
+    a per-step field, so every desktop step in a film matches.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    icon: str = "chrome"
+    label: str = "Przeglądarka internetowa"
+    hold: float = 1.0
+
+    def is_builtin_icon(self) -> bool:
+        return self.icon in DESKTOP_ICON_ALIASES
+
+
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -73,6 +108,7 @@ class Step(BaseModel):
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
+    desktop: Desktop | None = None
     #: close the active window and return to the one that opened it; `Literal[True]`
     #: so that `closeWindow: false` is a validation error rather than a silent no-op
     close_window: Literal[True] | None = Field(default=None, alias="closeWindow")

@@ -435,6 +435,42 @@ nie ma komendy „otwórz okno".
 Jak `slide`, `closeWindow` zmienia liczbę kroków, więc **wymaga `guidebot compile`**.
 Pełny przykład: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
 
+### `desktop`
+
+```yaml
+- desktop:
+    icon: chrome                     # opcjonalne; wbudowana nazwa lub ścieżka do pliku
+    label: Przeglądarka internetowa  # opcjonalne; podpis pod ikoną
+    hold: 1.0                        # opcjonalne; sekundy zatrzymania na otwartym oknie
+  say: "Otwieramy przeglądarkę."     # opcjonalna narracja
+```
+
+Symulowany „pulpit" otwierający film: kursor podjeżdża po łuku do ikony
+przeglądarki, klika dwa razy, a z ikony wyrasta okno, które odsłania pasek
+przeglądarki. Wizualny jak `slide` — kompiluje się do niczego, więc
+**wymaga `guidebot compile`** wyłącznie dlatego, że dodaje/przesuwa krok (render
+sprawdza liczbę kroków). Zwykle jest pierwszym krokiem; kolejny `navigate` wpisuje
+adres w odsłonięty pasek.
+
+Kolor tła pulpitu jest ustawieniem filmu, nie krokiem — `config.desktop.color`
+(domyślnie granatowy `#1f3a63`), więc każdy krok `desktop` w filmie ma to samo tło.
+
+`icon` przyjmuje **wbudowaną nazwę** albo **ścieżkę do własnego pliku**
+(`.svg/.png/.jpg/.gif/.webp`; ścieżki względne liczone od katalogu scenariusza).
+Wbudowane ikony to celowo **rodzajowe, własnoręcznie narysowane** grafiki — nie
+prawdziwe logotypy przeglądarek (to znaki towarowe, a pakiet jest
+redystrybuowalny); nazwa mówi tylko, którą przeglądarkę ikona przywołuje:
+
+| Nazwa | Rysunek |
+|---|---|
+| `chrome`, `browser` | kolorowy pierścień z niebieskim środkiem |
+| `firefox`, `flame` | płomień |
+| `iexplore`, `edge`, `legacy` | niebieskie „e" |
+| `globe` | prosty globus |
+
+Aby użyć prawdziwego logo, wskaż `icon` na własny plik — wtedy nic nie jest
+dystrybuowane z pakietem.
+
 ### `expect`
 
 Model przyjmuje pole `expect`, lecz compiler sam wyprowadza gotowość z obserwowanej

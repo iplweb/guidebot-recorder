@@ -38,6 +38,7 @@ from tqdm import tqdm
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
+from guidebot_recorder.desktop import DesktopOverlay, resolve_icon
 from guidebot_recorder.models.action import (
     COMPILER_VERSION,
     CachedAction,
@@ -1046,6 +1047,63 @@ def _is_shell_page(page: Page) -> bool:
     return page.url.startswith(SHELL_URL)
 
 
+#: Desktop-opener beats, in ms. The window growth (`_DESKTOP_OPEN_MS`) is the one
+#: the eye actually reads; the rest are short settles that keep the double-click
+#: legible without dragging the opener out.
+_DESKTOP_SETTLE_MS = 260
+_DESKTOP_DOUBLE_CLICK_GAP_MS = 130
+_DESKTOP_PRE_OPEN_MS = 220
+_DESKTOP_OPEN_MS = 760
+
+
+async def _play_desktop_opener(
+    desktop: DesktopOverlay,
+    overlay: Overlay,
+    page: Page,
+    payload: dict[str, str],
+    *,
+    hold: float,
+    settle_ms: float,
+    reveal: Callable[[], Awaitable[None]],
+    on_click: Callable[[str], None] | None = None,
+) -> None:
+    """Paint a desktop, arc the cursor to its icon, double-click, open the window.
+
+    The visual half of a :class:`~guidebot_recorder.models.scenario.Desktop` step.
+    Ends on the revealed underlay (the chrome shell) — *reveal* is called with the
+    faux window still covering it, so hiding the desktop overlay uncovers a live
+    browser rather than a blank frame. ``on_click`` (when given) stamps a click
+    SFX at each of the two clicks.
+
+    Fails loud if the icon cannot be located: the desktop was just painted, so a
+    missing icon is a real overlay bug, not a case to paper over.
+    """
+    await desktop.show(page, payload)
+    await overlay.show(page)
+    center = await desktop.icon_center(page)
+    if center is None:
+        raise RenderError("nie udało się zlokalizować ikony pulpitu po jej narysowaniu")
+    await overlay.move_to(page, center[0], center[1])
+    await page.wait_for_timeout(max(settle_ms, _DESKTOP_SETTLE_MS))
+    # Double-click: two ripples a beat apart, each with its own click SFX.
+    await overlay.ripple(page)
+    if on_click is not None:
+        on_click("click")
+    await page.wait_for_timeout(_DESKTOP_DOUBLE_CLICK_GAP_MS)
+    await overlay.ripple(page)
+    if on_click is not None:
+        on_click("click")
+    await page.wait_for_timeout(_DESKTOP_PRE_OPEN_MS)
+    await desktop.open_window(page, _DESKTOP_OPEN_MS)
+    await page.wait_for_timeout(_DESKTOP_OPEN_MS)
+    # Uncover the live browser: show the underlay first, THEN drop the overlay, so
+    # the reveal never flashes a blank document between the two.
+    await reveal()
+    await desktop.hide(page)
+    if hold > 0:
+        await page.wait_for_timeout(int(hold * 1000))
+
+
 async def _ensure_visuals(
     page: Page,
     overlay: Overlay,
@@ -1847,6 +1905,19 @@ async def run_render(
                 f"krok {index}: wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
             )
 
+    # Desktop icons are resolved here, before recording: an unknown built-in or a
+    # missing file is an authoring error and must fail loud up front, not after
+    # minutes of render. Relative icon paths resolve against the scenario file's
+    # directory. Keyed by flat-step index for the render loop to read back.
+    desktop_payloads: dict[int, dict[str, str]] = {}
+    for index, step in enumerate(flat_steps):
+        if step.desktop is not None:
+            desktop_payloads[index] = {
+                "color": cfg.desktop.color,
+                "label": step.desktop.label,
+                **resolve_icon(step.desktop, base_dir=path.parent),
+            }
+
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
     narration_count = sum(_narration(step) is not None for step in flat_steps)
@@ -1898,6 +1969,11 @@ async def run_render(
     await overlay.install_context(context)
     slide = SlideOverlay()
     await slide.install_context(context)
+    # Same role-gating rationale as slide.js (isTop guard): must be registered
+    # before chrome.js so it reads the real ``window.top`` and never mounts the
+    # desktop inside the framed site.
+    desktop = DesktopOverlay(config={"background": cfg.desktop.color})
+    await desktop.install_context(context)
     # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
     # compositor frames them in post. This flips the chrome.js popup-site branch
     # off and gates the fail-loud "expect chrome" checks on popup pages below.
@@ -2075,7 +2151,31 @@ async def run_render(
             # first (asserting it survived, fail-loud) before its normal
             # `_ensure_visuals`. With no card ever painted this is exactly
             # today's unconditional `_ensure_visuals` call (back-compat).
-            if kind == "slide":
+            if kind == "desktop":
+                assert step.desktop is not None  # guaranteed by command_kind()
+                if card_active:
+                    await _assert_card_alive(active_page)
+                    await slide.hide(active_page)
+                    card_active = False
+                    active_card = None
+
+                async def _reveal_shell(pg: Page = active_page) -> None:
+                    await _chrome_show(pg)
+
+                await _play_desktop_opener(
+                    desktop,
+                    overlay,
+                    active_page,
+                    desktop_payloads[index],
+                    hold=step.desktop.hold,
+                    settle_ms=cfg.cursor.settle,
+                    reveal=_reveal_shell,
+                    on_click=(sfx_sink if cfg.sound.enabled else None),
+                )
+                # The opener ends on the revealed chrome shell — normal visible
+                # state, so from here it is exactly the no-card path (card_active
+                # stays False).
+            elif kind == "slide":
                 assert step.slide is not None  # guaranteed by command_kind()
                 if card_active:
                     # Fail loud before repainting: a slide following a say whose
@@ -2525,6 +2625,11 @@ async def _render_step(
     on_shell = action_frame is not recorder.page
 
     if kind == "say":
+        return None
+    if kind == "desktop":
+        # The opener's whole choreography (paint, cursor arc, double-click, window
+        # growth) already ran in the card block before narration; nothing is left
+        # to do in the action phase. Mirrors the visual-only `slide`/`say` returns.
         return None
     if kind == "slide":
         assert step.slide is not None  # guaranteed by command_kind()
