@@ -61,6 +61,9 @@ steps:
 | `baseUrl` | No | string / none | Base used to resolve relative `navigate` values. |
 | `viewport` | Yes | object | Compile/render browser and video dimensions. |
 | `locale` | No | string / browser default | Locale used by both compile and render browser contexts and the target fingerprint. |
+| `setup` | No | string / none | On a **target**: path to a setup scenario whose cached session is established before compile and render. Participates in the target's compile hash. |
+| `verifyUserLoggedIn` | No | string or object / none | On a **setup**: login health-check for the cached session. Render-only (outside the setup's compile hash). |
+| `maxAgeHours` | No | number / none | On a **setup**: optional TTL for the cached session. Render-only (outside the setup's compile hash). |
 | `tts` | Yes | object | Narration settings and cache identity. |
 | `audioTracks` | No | list / `[]` | Alternate narration streams for the same visual flow. |
 | `cursor` | No | object / built-in defaults | Visual cursor appearance and motion. |
@@ -106,6 +109,85 @@ the base path and would resolve the example above to `https://staging.example.co
 compiler and renderer both create a fresh Playwright context with this locale and the
 configured viewport. An application may still choose language from its URL, account,
 or persisted server state; keep those inputs deterministic too.
+
+### `setup`, `verifyUserLoggedIn`, and `maxAgeHours`
+
+These three keys implement **pre-recording setup**: recording a target scenario
+with the site already prepared (logged in, cookies accepted) without that
+preparation appearing on the film. The preparation runs on a separate,
+non-recording browser context, and the resulting session (a Playwright
+`storage_state`) is cached and reused.
+
+**`setup` — on the target scenario.** A path, relative to the target file, to a
+setup scenario — an ordinary, already-compiled `*.scenario.yaml`, typically one
+that teaches logging in. The target then omits its own login steps.
+
+```yaml
+config:
+  setup: teach-login.scenario.yaml
+```
+
+`guidebot compile` and `guidebot render` of the target both auto-establish or
+reuse the cached session before their own work when `setup` is present. The
+**setup scenario must be compiled first** (`guidebot compile teach-login.scenario.yaml`);
+otherwise compile, render, or `guidebot setup` of the target fail loudly and tell
+you to compile the setup. Establishing the session replays the setup's frozen
+targets and makes **zero LLM calls**. A scenario used as a setup source must not
+itself declare `config.setup` (recursion is a validation error), and the setup
+and target must share the same origin (host); cross-origin reuse is a hard error.
+
+Because `setup` changes the authenticated DOM that compile resolves against, it
+is **not cosmetic**: it participates in the target's compile hash (see the
+[recompile matrix](#recompile-matrix)), so adding, removing, or changing it — or
+changing the login user — re-resolves the target.
+
+**`verifyUserLoggedIn` — on the setup scenario.** The login health-check that
+decides whether a cached session is still valid. It accepts a string (shorthand
+for `containsText`) or an object:
+
+```yaml
+config:
+  verifyUserLoggedIn: "Sign out"     # shorthand for {containsText: "Sign out"}
+  # full form:
+  # verifyUserLoggedIn:
+  #   containsText: "Sign out"       # required
+  #   url: /dashboard                # optional; defaults to the target's baseUrl
+  #   timeout: 8                     # optional; seconds, default 8
+```
+
+| Field | Required | Default | Meaning |
+|---|---:|---:|---|
+| `containsText` | Yes | — | Text that must be present on the page for the session to count as live. |
+| `url` | No | target `baseUrl` | Page to visit before checking. Cookies are origin-scoped, so the check runs against the target's origin. |
+| `timeout` | No | `8` | Seconds to poll for `containsText` before deciding the session is logged out. |
+
+The match is a plain, **case-sensitive substring** of the page's rendered
+`document.body.innerText`. Choose text that renders **only when authenticated** —
+a username is the robust choice; because the match has no word boundaries, a
+logged-out footer like `sign out whenever you like` would false-positive.
+
+**`maxAgeHours` — on the setup scenario.** Optional time-to-live for the cached
+session, computed from the cache's `created_at` (not file mtime, so it survives
+`git clean`, copies, and CI restore). When the age is exceeded, the session is
+refreshed on the next compile/render/`setup`.
+
+If a setup scenario declares **neither** `verifyUserLoggedIn` **nor**
+`maxAgeHours`, a present cache is trusted until `--force`, and the tool prints a
+loud warning. The "never silently logged-out" guarantee holds only when a
+health-check is configured.
+
+Both `verifyUserLoggedIn` and `maxAgeHours` are **render-only** on the setup
+file: they stay outside the setup file's own compile hash. See
+[`guidebot setup`](cli-reference.md#guidebot-setup) for building or refreshing the
+cache by hand.
+
+!!! warning "Known limitations (v1)"
+
+    Only cookies and `localStorage` are cached; a session kept in
+    `sessionStorage` or IndexedDB (some OIDC/MSAL SPAs) cannot be cached, and the
+    tool detects and reports it. Setup and target must share the same origin. One
+    language-agnostic session is reused across localized render-set variants; if a
+    backend pins UI language to the session, frozen localized labels can mismatch.
 
 ### `tts`
 
@@ -679,8 +761,10 @@ use explicit waits and verify the result.
 | `cursor` (size, `click`, centred start) | No — render-only |
 | `typing`, `sound`, `intro`, `chrome` | No — render-only |
 | `holdFrameForNarration`, `holdFrameSettle` | No — render-only |
+| `verifyUserLoggedIn`, `maxAgeHours` (on a setup) | No — render-only, outside the compile hash |
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
+| `config.setup` (on a target) added, removed, changed, or its login user changed | Yes — folded into the target's compile hash |
 | Adding, removing, or reordering a `slide` step | Yes |
 | A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Yes |
 | Switching a step's command kind | Yes |

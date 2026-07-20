@@ -42,6 +42,9 @@ steps:
 | `tts` | Tak | Domyślna narracja i pierwszy, domyślny strumień audio. |
 | `baseUrl` | Nie | Baza względnych wartości `navigate`. |
 | `locale` | Nie | Locale kontekstu Chromium w obu fazach i część config hash. |
+| `setup` | Nie | Na **celu**: ścieżka do scenariusza setup, którego buforowana sesja jest ustanawiana przed compile i render. Wchodzi do config hasha celu. |
+| `verifyUserLoggedIn` | Nie | Na **setupie**: health-check logowania buforowanej sesji. Render-only (poza config hashem setupu). |
+| `maxAgeHours` | Nie | Na **setupie**: opcjonalny TTL buforowanej sesji. Render-only (poza config hashem setupu). |
 | `audioTracks` | Nie | Alternatywne ścieżki narracji w tym samym MP4. |
 | `cursor` | Nie | Wygląd i timing syntetycznego kursora. |
 | `chrome` | Nie | Opcjonalny syntetyczny pasek, wyłącznie podczas renderu. |
@@ -70,6 +73,87 @@ Compile i render tworzą świeże konteksty Playwrighta z tym samym `locale` ora
 viewportem. Zmiana locale unieważnia targety. Aplikacja może nadal wybierać język na
 podstawie hosta, URL-a, cookies albo konta, więc te elementy stanu również ustawiaj
 deterministycznie.
+
+### `setup`, `verifyUserLoggedIn` i `maxAgeHours`
+
+Te trzy pola realizują **przygotowanie środowiska przed nagraniem**: nagranie
+scenariusza docelowego z serwisem już przygotowanym (zalogowanym, z
+zaakceptowanymi cookies) bez pokazywania tego przygotowania na filmie.
+Przygotowanie działa w osobnym, nienagrywanym kontekście przeglądarki, a uzyskana
+sesja (Playwrightowy `storage_state`) jest buforowana i używana ponownie.
+
+**`setup` — w scenariuszu docelowym.** Ścieżka, względem pliku docelowego, do
+scenariusza setup — zwykłego, wcześniej skompilowanego `*.scenario.yaml`, zwykle
+takiego, który uczy logowania. Cel pomija wtedy własne kroki logowania.
+
+```yaml
+config:
+  setup: teach-login.scenario.yaml
+```
+
+`guidebot compile` i `guidebot render` celu automatycznie ustanawiają lub
+ponownie używają buforowanej sesji przed własną pracą, gdy `setup` jest
+ustawione. **Scenariusz setup musi być najpierw skompilowany**
+(`guidebot compile teach-login.scenario.yaml`); inaczej compile, render albo
+`guidebot setup` celu kończą się jawnym błędem z instrukcją skompilowania setupu.
+Ustanowienie sesji odtwarza zamrożone cele setupu i wykonuje **zero wywołań
+LLM**. Scenariusz użyty jako źródło setupu nie może sam deklarować `config.setup`
+(rekurencja to błąd walidacji), a setup i cel muszą mieć to samo pochodzenie
+(host); reużycie między pochodzeniami to twardy błąd.
+
+Ponieważ `setup` zmienia zalogowany DOM, względem którego compile rozwiązuje
+cele, **nie jest kosmetyczne**: wchodzi do config hasha celu (patrz
+[macierz przebudowy](#macierz-przebudowy)), więc dodanie, usunięcie lub jego
+zmiana — albo zmiana użytkownika logowania — rozwiązuje cele od nowa.
+
+**`verifyUserLoggedIn` — w scenariuszu setup.** Health-check logowania, który
+decyduje, czy buforowana sesja jest wciąż ważna. Przyjmuje tekst (skrót na
+`containsText`) albo obiekt:
+
+```yaml
+config:
+  verifyUserLoggedIn: "Wyloguj"      # skrót na {containsText: "Wyloguj"}
+  # pełna forma:
+  # verifyUserLoggedIn:
+  #   containsText: "Wyloguj"        # wymagane
+  #   url: /dashboard                # opcjonalne; domyślnie baseUrl celu
+  #   timeout: 8                     # opcjonalne; sekundy, domyślnie 8
+```
+
+| Pole | Wymagane | Domyślnie | Znaczenie |
+|---|---:|---:|---|
+| `containsText` | Tak | — | Tekst, który musi być na stronie, by sesja liczyła się jako żywa. |
+| `url` | Nie | `baseUrl` celu | Strona odwiedzana przed sprawdzeniem. Cookies są związane z pochodzeniem, więc sprawdzenie idzie na pochodzenie celu. |
+| `timeout` | Nie | `8` | Sekundy odpytywania o `containsText`, zanim uznamy sesję za wylogowaną. |
+
+Dopasowanie to zwykły, **rozróżniający wielkość liter podciąg** wyrenderowanego
+`document.body.innerText` strony. Wybierz tekst, który pojawia się **tylko po
+zalogowaniu** — nazwa użytkownika to najpewniejszy wybór; ponieważ dopasowanie
+nie ma granic słów, wylogowana stopka typu `wyloguj się kiedy chcesz` dałaby
+fałszywy pozytyw.
+
+**`maxAgeHours` — w scenariuszu setup.** Opcjonalny czas życia buforowanej sesji,
+liczony z `created_at` cache (nie z mtime pliku, więc przeżywa `git clean`, kopie
+i restore w CI). Po przekroczeniu wieku sesja jest odświeżana przy kolejnym
+compile/render/`setup`.
+
+Gdy scenariusz setup nie deklaruje **ani** `verifyUserLoggedIn`, **ani**
+`maxAgeHours`, obecny cache jest ufany aż do `--force`, a narzędzie wypisuje
+głośne ostrzeżenie. Gwarancja „nigdy po cichu wylogowany" obowiązuje tylko, gdy
+health-check jest skonfigurowany.
+
+Zarówno `verifyUserLoggedIn`, jak i `maxAgeHours` są **render-only** na pliku
+setup: pozostają poza config hashem samego setupu. Budowanie lub odświeżanie
+cache ręcznie opisuje [`guidebot setup`](cli-reference.md#guidebot-setup).
+
+!!! warning "Znane ograniczenia (v1)"
+
+    Buforowane są tylko cookies i `localStorage`; sesja trzymana w
+    `sessionStorage` albo IndexedDB (część SPA OIDC/MSAL) nie da się zbuforować —
+    narzędzie wykrywa to i zgłasza. Setup i cel muszą mieć to samo pochodzenie.
+    Jedna, niezależna od języka sesja jest współdzielona przez warianty
+    zlokalizowanego zestawu renderów; jeśli backend przypina język UI do sesji,
+    zamrożone zlokalizowane etykiety mogą się rozjechać.
 
 ### `tts` i `audioTracks`
 
@@ -504,8 +588,10 @@ render jak zwykle.
 | `cursor` (rozmiar, `click`, wyśrodkowany start) | Nie — render-only |
 | `typing`, `sound`, `intro`, `chrome` | Nie — render-only |
 | `holdFrameForNarration`, `holdFrameSettle` | Nie — render-only |
+| `verifyUserLoggedIn`, `maxAgeHours` (na setupie) | Nie — render-only, poza config hashem |
 | Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
 | Sama wartość `enterText.text` | Nie — render-only |
+| `config.setup` (na celu) dodane, usunięte, zmienione lub zmiana użytkownika logowania | Tak — wchodzi do config hasha celu |
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
 | Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Tak |
 | Zmiana rodzaju komendy kroku | Tak |
