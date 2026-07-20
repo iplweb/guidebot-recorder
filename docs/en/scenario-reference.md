@@ -24,6 +24,7 @@ config:
     outline: "#ffffff"
     glow: "rgba(239,68,68,.75)"
     easing: "cubic-bezier(.45,.05,.25,1)"
+    bow: 0.12
     speed: 1.15
     minDuration: 320
     maxDuration: 1400
@@ -162,7 +163,8 @@ knob.
 | `color` | `#ef4444` | Arrow fill CSS color. |
 | `outline` | `#ffffff` | Arrow outline CSS color. |
 | `glow` | `rgba(239,68,68,.75)` | Halo CSS color. |
-| `easing` | `cubic-bezier(.45,.05,.25,1)` | CSS movement easing. |
+| `easing` | `cubic-bezier(.45,.05,.25,1)` | Movement easing (a `cubic-bezier(...)` curve, evaluated in JS). |
+| `bow` | `0.12` | Depth of the arc the pointer traces, as a fraction of travel distance. `0` gives straight-line moves. |
 | `speed` | `1.15` | Pixels per millisecond; higher is faster. |
 | `minDuration` | `320` | Minimum movement duration in milliseconds. |
 | `maxDuration` | `1400` | Maximum movement duration in milliseconds. |
