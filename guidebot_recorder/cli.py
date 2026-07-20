@@ -12,6 +12,11 @@ from pydantic import ValidationError
 
 from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
+from guidebot_recorder.recorder.session import (
+    SetupNeedsCompile,
+    SetupSessionError,
+    establish_session,
+)
 from guidebot_recorder.recorder.render_set import (
     RenderSetError,
     ensure_render_set_compiled,
@@ -142,6 +147,45 @@ def compile_set_cmd(
     except RenderSetError as exc:
         typer.echo(f"BŁĄD: {exc}", err=True)
         raise typer.Exit(code=1) from None
+
+
+@app.command("setup")
+def setup_cmd(
+    scenario: Path = typer.Argument(..., help="Scenariusz setup (przygotowanie sesji)"),
+    headed: bool = typer.Option(
+        False, "--headed", help="Pokaż okno; pozwól dokończyć logowanie ręcznie (MFA/captcha)"
+    ),
+    force: bool = typer.Option(False, "--force", help="Zawsze odbuduj sesję, ignoruj cache"),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Pokaż postęp"),
+) -> None:
+    """Przygotuj i zbuforuj sesję (logowanie itp.) z scenariusza setup."""
+
+    async def _run() -> None:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=not headed)
+            try:
+                status, _state = await establish_session(
+                    browser,
+                    scenario,
+                    Path(".guidebot/sessions"),
+                    None,
+                    timeout=timeout,
+                    force=force,
+                    manual=headed,
+                )
+            finally:
+                await browser.close()
+        if status == "reused":
+            typer.echo("session reused (already live)")
+        else:
+            typer.echo("session refreshed and cached")
+
+    try:
+        asyncio.run(_run())
+    except (SetupNeedsCompile, SetupSessionError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command("render")

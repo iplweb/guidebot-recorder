@@ -211,9 +211,22 @@ async def run_compile_in_browser(
     # When chrome is enabled the site renders inside the shell iframe of height
     # ``H - chrome.height``; compile must resolve it at the same reduced viewport.
     site_width, site_height = site_viewport(cfg)
+    # Pre-recording setup: when the target declares ``config.setup`` its login
+    # steps were removed, so the compile context must resolve targets against the
+    # already-logged-in DOM (spec: "Target compile", review §1). ``ensure_session``
+    # is imported lazily: ``session`` imports ``run_compile`` from this module at
+    # its top, so a module-level import here would form a cycle.
+    setup_state = None
+    if cfg.setup is not None:
+        from guidebot_recorder.recorder.session import ensure_session
+
+        setup_state = await ensure_session(
+            browser, Path(path), Path(".guidebot/sessions"), env, timeout=timeout
+        )
     context = await browser.new_context(
         viewport={"width": site_width, "height": site_height},
         locale=cfg.locale,
+        **({"storage_state": setup_state} if setup_state is not None else {}),
     )
     try:
         page = await context.new_page()

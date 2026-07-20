@@ -25,12 +25,18 @@ import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import urljoin, urlsplit
 
 from playwright.async_api import Browser
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from guidebot_recorder.models.config import Config, config_hash, site_viewport
+from guidebot_recorder.models.config import (
+    Config,
+    VerifyLoggedIn,
+    config_hash,
+    site_viewport,
+)
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.resolver.page_context import Candidate
 from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
@@ -42,6 +48,7 @@ __all__ = [
     "SetupSessionError",
     "check_logged_in",
     "ensure_session",
+    "establish_session",
     "load_session",
     "replay_setup",
     "save_session",
@@ -331,6 +338,46 @@ def _health_url(target_cfg: Config, setup_cfg: Config, verify) -> str | None:
     return origin
 
 
+def _build_check_kwargs(
+    cfg: Config, goto_url: str | None, verify: VerifyLoggedIn
+) -> dict:
+    """The keyword arguments :func:`check_logged_in` is called with.
+
+    Shared by :func:`ensure_session` (target-driven) and
+    :func:`establish_session` (setup-driven) so the health-check is parameterised
+    identically from either entry point.
+    """
+
+    return {
+        "goto_url": goto_url,
+        "contains_text": verify.contains_text,
+        "locale": cfg.locale,
+        "viewport": dict(zip(("width", "height"), site_viewport(cfg), strict=True)),
+        "timeout": verify.timeout,
+    }
+
+
+def _raise_health_failed(storage_state: dict) -> NoReturn:
+    """Fail loudly after a fresh replay whose health-check still did not pass.
+
+    Disambiguates the two causes so the operator gets an actionable message: an
+    app that keeps auth outside cookies/localStorage vs a mis-configured
+    ``verifyUserLoggedIn`` (or one that genuinely needs manual completion).
+    """
+
+    if not _has_persisted_state(storage_state):
+        raise SetupSessionError(
+            "setup ran but produced no cookies or localStorage: this app may "
+            "keep its session outside cookies/localStorage "
+            "(sessionStorage/IndexedDB) — pre-recording setup cannot cache it"
+        )
+    raise SetupSessionError(
+        "setup ran and a session was cached, but the logged-in text was not "
+        "found: check verifyUserLoggedIn, or complete login manually with "
+        "`guidebot setup <setup> --headed`"
+    )
+
+
 async def ensure_session(
     browser: Browser,
     target_scenario_path: Path,
@@ -385,42 +432,22 @@ async def ensure_session(
     key_inputs = _key_inputs(setup_path, setup.config, env)
     goto_url = _health_url(target.config, setup.config, verify)
 
-    def _check_kwargs(state: dict) -> dict:
-        assert verify is not None  # only called when a health-check is configured
-        return {
-            "goto_url": goto_url,
-            "contains_text": verify.contains_text,
-            "locale": setup.config.locale,
-            "viewport": dict(
-                zip(("width", "height"), site_viewport(setup.config), strict=True)
-            ),
-            "timeout": verify.timeout,
-        }
-
     cached = load_session(sessions_dir, key, max_age)
     if cached is not None:
         if verify is None:
             return cached
-        if await check_logged_in(browser, cached, **_check_kwargs(cached)):
+        if await check_logged_in(
+            browser, cached, **_build_check_kwargs(setup.config, goto_url, verify)
+        ):
             return cached
 
     storage_state = await replay_setup(browser, setup_path, env, timeout=timeout)
     save_session(sessions_dir, key, storage_state, key_inputs)
 
     if verify is not None and not await check_logged_in(
-        browser, storage_state, **_check_kwargs(storage_state)
+        browser, storage_state, **_build_check_kwargs(setup.config, goto_url, verify)
     ):
-        if not _has_persisted_state(storage_state):
-            raise SetupSessionError(
-                "setup ran but produced no cookies or localStorage: this app may "
-                "keep its session outside cookies/localStorage "
-                "(sessionStorage/IndexedDB) — pre-recording setup cannot cache it"
-            )
-        raise SetupSessionError(
-            "setup ran and a session was cached, but the logged-in text was not "
-            "found: check verifyUserLoggedIn, or complete login manually with "
-            "`guidebot setup <setup> --headed`"
-        )
+        _raise_health_failed(storage_state)
 
     return storage_state
 
@@ -431,3 +458,117 @@ def _has_persisted_state(storage_state: dict) -> bool:
     cookies = storage_state.get("cookies") or []
     origins = storage_state.get("origins") or []
     return bool(cookies) or bool(origins)
+
+
+# --------------------------------------------------------------------------- #
+# Setup-scenario-driven orchestration (the `guidebot setup` entry point)
+# --------------------------------------------------------------------------- #
+
+
+async def _manual_finish(
+    browser: Browser,
+    setup_cfg: Config,
+    goto_url: str | None,
+    storage_state: dict,
+    prompt: Callable[[str], str],
+) -> dict:
+    """Hand the (already-headed) browser to the operator to finish login by hand.
+
+    Opens a fresh context seeded with the just-replayed ``storage_state`` (so the
+    operator continues from where the automated replay left off — e.g. an MFA or
+    captcha gate), waits for them to confirm via ``prompt``, then re-snapshots
+    ``storage_state`` before closing. The caller re-checks and re-saves.
+    """
+
+    site_width, site_height = site_viewport(setup_cfg)
+    context = await browser.new_context(
+        storage_state=storage_state,
+        locale=setup_cfg.locale,
+        viewport={"width": site_width, "height": site_height},
+    )
+    try:
+        page = await context.new_page()
+        await page.goto(setup_cfg.base_url)
+        prompt("Finish logging in in the browser window, then press Enter...")
+        state = await context.storage_state()
+    finally:
+        await context.close()
+    return state
+
+
+async def establish_session(
+    browser: Browser,
+    setup_path: Path,
+    sessions_dir: Path,
+    env: Mapping[str, str] | None,
+    *,
+    timeout: float,
+    force: bool = False,
+    manual: bool = False,
+    prompt: Callable[[str], str] = input,
+    warn: Callable[[str], None] = logging.warning,
+) -> tuple[str, dict]:
+    """Establish (or reuse) a prepared session directly from a *setup* scenario.
+
+    The CLI-facing counterpart to :func:`ensure_session`: it operates on the setup
+    scenario itself rather than a target that references one. Returns
+    ``("reused", state)`` when a live cached session is trusted, or
+    ``("refreshed", state)`` after a fresh replay (optionally completed by hand
+    when ``manual`` is set). Fails loudly (``SetupSessionError``) if a configured
+    health-check still fails after a fresh replay.
+    """
+
+    setup_path = Path(setup_path)
+    setup = load_scenario(setup_path, env)
+
+    # Recursion guard: a setup source must not itself declare config.setup.
+    if setup.config.setup is not None:
+        raise SetupSessionError(
+            "a setup scenario must not itself declare config.setup (no nested setup)"
+        )
+
+    verify = setup.config.verify_user_logged_in
+    max_age = setup.config.max_age_hours
+
+    if verify is None and max_age is None:
+        warn(
+            "pre-recording setup: neither verifyUserLoggedIn nor maxAgeHours is "
+            "configured on the setup scenario — a present cached session will be "
+            "trusted (never re-checked) until you pass --force"
+        )
+
+    key = session_cache_key(setup_path, setup.config, env)
+    key_inputs = _key_inputs(setup_path, setup.config, env)
+    if verify is not None and verify.url:
+        goto_url = urljoin(setup.config.base_url or "", verify.url)
+    else:
+        goto_url = setup.config.base_url
+
+    if not force:
+        cached = load_session(sessions_dir, key, max_age)
+        if cached is not None and (
+            verify is None
+            or await check_logged_in(
+                browser, cached, **_build_check_kwargs(setup.config, goto_url, verify)
+            )
+        ):
+            return ("reused", cached)
+
+    storage_state = await replay_setup(browser, setup_path, env, timeout=timeout)
+    save_session(sessions_dir, key, storage_state, key_inputs)
+
+    if verify is not None and not await check_logged_in(
+        browser, storage_state, **_build_check_kwargs(setup.config, goto_url, verify)
+    ):
+        if not manual:
+            _raise_health_failed(storage_state)
+        storage_state = await _manual_finish(
+            browser, setup.config, goto_url, storage_state, prompt
+        )
+        save_session(sessions_dir, key, storage_state, key_inputs)
+        if not await check_logged_in(
+            browser, storage_state, **_build_check_kwargs(setup.config, goto_url, verify)
+        ):
+            _raise_health_failed(storage_state)
+
+    return ("refreshed", storage_state)
