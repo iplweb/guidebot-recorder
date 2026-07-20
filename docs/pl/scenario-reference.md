@@ -140,8 +140,9 @@ włączonym chrome viewport układu strony to `width × (height − chrome.heigh
 | `closeColor`, `minimizeColor`, `maximizeColor` | kolory macOS | Kolory dekoracyjnych kropek. |
 | `interactOnNavigate` | `true` | W kroku nawigacji kursor podjeżdża do pola adresu, klika, pole dostaje wygląd „w fokusie", a potem URL jest wpisywany. |
 | `charDelayMs` | `60` | Bazowe opóźnienie na znak przy wpisywaniu (ms). |
-| `charJitterMs` | `55` | Losowy jitter dodawany do opóźnienia każdego znaku (ms). |
-| `segmentPauseMs` | `180` | Pauza między segmentami URL-a (ms). |
+| `charJitterMs` | `55` | Pasmo jittera (ms) wokół opóźnienia znaku. Losowanie jest skośne w prawo (log-normalne): większość znaków trafia blisko `charDelayMs`, mniejszość jest wyraźnie wolniejsza, a żaden nie jest szybszy niż `charDelayMs − charJitterMs`. |
+| `segmentPauseMs` | `180` | Pauza między segmentami URL-a (ms). Wypada tylko na *prawdziwej* granicy — zdublowany separator, np. drugi `/` w `://`, jest pisany jednym ruchem i nie dostaje pauzy. |
+| `maxDelayFactor` | `2.5` | Twardy sufit opóźnienia pojedynczego znaku, jako wielokrotność `charDelayMs`. Sporadyczna pauza „na zastanowienie" nigdy nie sumuje się z pauzą segmentową, więc żaden znak nie zawiesza się absurdalnie długo. |
 | `preNavigatePauseMs` | `400` | Pauza po zakończeniu wpisywania, przed załadowaniem (ms). |
 | `focusColor` | `#3b82f6` | Kolor akcentu pola „w fokusie" (CSS). |
 | `showCaret` | `true` | Pokazuje migający kursor w polu podczas wpisywania. |
@@ -151,7 +152,8 @@ wymusza rekompilacji. Wyjątki to `enabled` i `height`: oba zmieniają viewport
 kompilacji strony (iframe ma wysokość `height − chrome.height`), więc **wchodzą** do
 config hasha — włączenie lub wyłączenie chrome albo zmiana jego wysokości wymusza
 rekompilację. Pola wpisywania i interakcji (`interactOnNavigate`, `charDelayMs`,
-`charJitterMs`, `segmentPauseMs`, `preNavigatePauseMs`, `focusColor`, `showCaret`) są
+`charJitterMs`, `segmentPauseMs`, `maxDelayFactor`, `preNavigatePauseMs`,
+`focusColor`, `showCaret`) są
 tylko wizualne (render) i pozostają poza hashem.
 
 Aby wczytać dowolne strony w iframe, render usuwa nagłówek `X-Frame-Options` oraz
@@ -216,7 +218,8 @@ wyłącznie `render`.
 |---|---:|---|
 | `animate` | `true` | Wpisuje tekst znak po znaku zamiast wklejać od razu. Ustaw `false` per scenariusz, by wrócić do natychmiastowego wypełnienia. |
 | `speed` | `60` | Bazowe milisekundy **na znak** — opóźnienie; im więcej, tym wolniej. Nie mylić z `cursor.speed`, które jest tempem (px/ms) — to dwa różne pojęcia. |
-| `jitterMs` | `40` | ± losowy jitter (ms) wokół `speed`, żeby wpisywanie było naturalne, nie metronomiczne. |
+| `jitterMs` | `40` | Pasmo jittera (ms) wokół `speed`, żeby wpisywanie było naturalne, nie metronomiczne. Skośne w prawo jak w pasku adresu: głównie blisko `speed`, sporadycznie wolniej, nigdy poniżej `speed − jitterMs`; zdublowany znak zachowuje tylko piątą część pasma. |
+| `maxDelayFactor` | `2.5` | Twardy sufit opóźnienia pojedynczego znaku, jako wielokrotność `speed`. |
 
 Ustaw `animate: false` dla pól maskowanych, formatowanych lub z autouzupełnianiem,
 gdzie animacja znak po znaku mogłaby zniekształcić finalną wartość (finalna wartość

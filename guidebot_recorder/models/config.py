@@ -107,6 +107,9 @@ class ChromeConfig(BaseModel):
     char_delay_ms: int = Field(default=60, alias="charDelayMs")
     char_jitter_ms: int = Field(default=55, alias="charJitterMs")
     segment_pause_ms: int = Field(default=180, alias="segmentPauseMs")
+    # Hard ceiling on a single character's delay, as a multiple of
+    # ``char_delay_ms`` — keeps the jitter tail from producing absurd stalls.
+    max_delay_factor: float = Field(default=2.5, alias="maxDelayFactor", ge=1.0)
     pre_navigate_pause_ms: int = Field(default=400, alias="preNavigatePauseMs")
     focus_color: str = Field(default="#3b82f6", alias="focusColor")
     show_caret: bool = Field(default=True, alias="showCaret")
@@ -151,6 +154,9 @@ class TypingConfig(BaseModel):
     # ± jitter (ms) around ``speed`` so form typing is natural, not metronomic —
     # matching the address-bar feel (ChromeConfig.char_jitter_ms).
     jitter_ms: int = Field(default=40, alias="jitterMs", ge=0)
+    # Hard ceiling on a single character's delay, as a multiple of ``speed``
+    # (same meaning as ChromeConfig.max_delay_factor).
+    max_delay_factor: float = Field(default=2.5, alias="maxDelayFactor", ge=1.0)
 
 
 class PopupConfig(BaseModel):

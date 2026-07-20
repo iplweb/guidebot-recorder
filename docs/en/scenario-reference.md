@@ -215,8 +215,9 @@ chrome:
 | `maximizeColor` | `#28c840` | Maximize-dot CSS color. |
 | `interactOnNavigate` | `true` | On a navigate step the cursor glides to the address pill, clicks, the pill takes a focused look, then the URL is typed. |
 | `charDelayMs` | `60` | Base per-character typing delay in milliseconds. |
-| `charJitterMs` | `55` | Random jitter added to each character delay, in milliseconds. |
-| `segmentPauseMs` | `180` | Pause between URL segments, in milliseconds. |
+| `charJitterMs` | `55` | Jitter band (ms) around the per-character delay. The draw is right-skewed (log-normal): most characters land near `charDelayMs`, a minority are noticeably slower, and none is faster than `charDelayMs − charJitterMs`. |
+| `segmentPauseMs` | `180` | Pause between URL segments, in milliseconds. It fires only at a *real* boundary — a doubled separator such as the second `/` in `://` is typed as one motor burst and gets no pause. |
+| `maxDelayFactor` | `2.5` | Hard ceiling on a single character's delay, as a multiple of `charDelayMs`. The occasional deliberate "thinking" beat never stacks on a segment pause, so no keystroke stalls absurdly. |
 | `preNavigatePauseMs` | `400` | Pause after typing completes and before the load, in milliseconds. |
 | `focusColor` | `#3b82f6` | Focused-pill accent CSS color. |
 | `showCaret` | `true` | Show a blinking caret in the focused pill while typing. |
@@ -227,7 +228,8 @@ change the compiled site viewport (the iframe is `height − chrome.height` tall
 they **do** participate in the config hash — toggling chrome on or off, or changing
 its height, forces a recompile. The typing and interaction fields
 (`interactOnNavigate`, `charDelayMs`, `charJitterMs`, `segmentPauseMs`,
-`preNavigatePauseMs`, `focusColor`, `showCaret`) are render-only visuals and stay
+`maxDelayFactor`, `preNavigatePauseMs`, `focusColor`, `showCaret`) are render-only
+visuals and stay
 outside the hash.
 
 To load arbitrary sites inside the iframe, the render step strips the
@@ -253,7 +255,8 @@ plus jitter. Compilation always uses instant fill; only `render` animates typing
 |---|---:|---|
 | `animate` | `true` | Type each character in the render instead of pasting the value instantly. Set `false` per scenario to keep the instant fill. |
 | `speed` | `60` | Base milliseconds **per character** — a delay; higher is slower. Unrelated to `cursor.speed`, which is a pixels-per-millisecond rate; the two are not interchangeable. |
-| `jitterMs` | `40` | ± random jitter (ms) around `speed`, so typing is natural, not metronomic. |
+| `jitterMs` | `40` | Jitter band (ms) around `speed`, so typing is natural, not metronomic. Right-skewed like the address bar: mostly near `speed`, occasionally slower, never below `speed − jitterMs`; a doubled character keeps only a fifth of the band. |
+| `maxDelayFactor` | `2.5` | Hard ceiling on a single character's delay, as a multiple of `speed`. |
 
 Set `animate: false` for masked, formatted, or autocomplete-driven fields, where a
 character-by-character render could misrepresent the final value (the final value is
