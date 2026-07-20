@@ -1668,3 +1668,88 @@ async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
     assert show_calls == []
     assert out.exists()
     assert probe_duration(out) > 0
+
+
+class PopupCursorReasoner:
+    """Opens the popup, then closes it from inside the popup."""
+
+    async def resolve(self, instruction, candidates):
+        if "Zamknij" in instruction:
+            return ReasonerResult(
+                action="click",
+                target=RoleTarget(role="button", name="Zamknij", exact=True),
+            )
+        return ReasonerResult(
+            action="click",
+            target=RoleTarget(role="button", name="Zaloguj", exact=True),
+        )
+
+
+async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch):
+    """The cursor lives in exactly one window at a time.
+
+    While a popup is on screen the main window must not keep painting its own
+    synthetic cursor (the compositor shows the main video around/behind the
+    popup). On popup close the main window takes the cursor back.
+    """
+
+    import guidebot_recorder.recorder.render as R
+
+    popup_html = tmp_path / "popup.html"
+    popup_html.write_text(
+        '<h1>Popup</h1><button onclick="window.close()">Zamknij</button>',
+        encoding="utf-8",
+    )
+    main_html = tmp_path / "main.html"
+    main_html.write_text(
+        "<button onclick=\"window.open('popup.html')\">Zaloguj</button>",
+        encoding="utf-8",
+    )
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: t
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+        steps:
+          - navigate: "{main_html.resolve().as_uri()}"
+          - teach: "kliknij Zaloguj"
+          - teach: "kliknij Zamknij w popupie"
+          - wait: 0.3
+        """
+    )
+    path = tmp_path / "popup-cursor.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+
+    events: list[tuple[str, str]] = []
+
+    def _role(page) -> str:
+        return "popup" if page.url.endswith("popup.html") else "main"
+
+    class SpyOverlay(R.Overlay):
+        async def hide(self, page):
+            events.append(("hide", _role(page)))
+            await super().hide(page)
+
+        async def show(self, page):
+            events.append(("show", _role(page)))
+            await super().show(page)
+
+    monkeypatch.setattr(R, "Overlay", SpyOverlay)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, PopupCursorReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    # The popup's own cursor is never suppressed; only the main window's is.
+    assert ("hide", "popup") not in events
+    assert ("hide", "main") in events, events
+    assert ("show", "main") in events, events
+    # Hidden on handover to the popup, revealed again once the popup is gone.
+    assert events.index(("hide", "main")) < events.index(("show", "main")), events
+    assert events.count(("hide", "main")) == events.count(("show", "main")), events
