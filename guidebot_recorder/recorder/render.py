@@ -130,6 +130,12 @@ class _PopupSession:
     visual_ready_delay: float = 0.0
     closed_at: float | None = None
     close_handled: bool = False
+    main_cursor_pos: tuple[float, float] | None = None
+    """Where the main window's cursor stood before the popup took it over.
+
+    :attr:`Overlay.pos` is shared by every page, so centring the cursor in the
+    popup overwrites the opener's. Restored on close.
+    """
     window_size: tuple[int, int] | None = None
     """The popup's real window size in CSS px, or ``None`` when unknown.
 
@@ -154,10 +160,14 @@ class _PopupSession:
 
 
 # The site's own ``window.open(url, name, "width=...,height=...")`` request is
-# the only deterministic statement of how big the popup window really is: the
-# page itself cannot tell us, because its layout viewport is the context's
-# (shared with the main window). Record the request on the *opener* frame; the
-# popup is matched to it right after it opens.
+# the most deterministic statement of how big the popup window really is, and
+# Chromium honours it: a popup opened with size features gets exactly that
+# viewport, *not* the context's (verified — ``new_context(viewport=...)`` does
+# not override the request; only a featureless ``window.open`` inherits the
+# context viewport, which is what levels 2 and 3 exist for). It is read here
+# rather than from the popup because it is available the moment the popup
+# opens, before its document has committed. Record the request on the *opener*
+# frame; the popup is matched to it right after it opens.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
 # How long the opener's frames get to answer the geometry probe. They read a
@@ -863,14 +873,22 @@ async def _prepare_main_after_popup_close(
     overlay: Overlay,
     chrome: Chrome | None,
     settle_ms: float,
+    restore_cursor_to: tuple[float, float] | None = None,
 ) -> None:
     """Let opener navigation settle before touching its execution context again.
 
     This is the single funnel for "the popup is gone, the main window is active
     again", so it is also where the cursor handed over to the popup by
     :func:`_hand_cursor_to_popup` is handed back.
+
+    ``restore_cursor_to`` undoes that hand-over's side effect: centring the
+    cursor in the popup moved the *shared* :attr:`Overlay.pos`, so without this
+    the reappearing main-window cursor would jump to wherever the popup's centre
+    happened to be rather than the control it last used.
     """
 
+    if restore_cursor_to is not None:
+        overlay.pos = restore_cursor_to
     await page.bring_to_front()
     await Recorder(page, None, settle_ms=settle_ms).apply_readiness("none")
     try:
@@ -886,8 +904,8 @@ async def _prepare_main_after_popup_close(
     await overlay.show(page)
 
 
-async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
-    """Suppress the main window's cursor for as long as the popup is on screen.
+async def _hand_cursor_to_popup(main_page: Page, popup: _PopupSession, overlay: Overlay) -> None:
+    """Move the cursor into the popup, centred, for as long as it is on screen.
 
     The cursor is a DOM element injected into every top-level document, so a
     popup mounts its *own* instance — leaving two cursors alive at once. The
@@ -898,6 +916,13 @@ async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
 
     ``hide`` is a per-page call on purpose — a context-wide init-script flag
     (like ``barePopups``) cannot target one window.
+
+    The popup's own cursor is then parked at the centre of its viewport and
+    revealed. Without this it would inherit :attr:`Overlay.pos` — coordinates
+    from the *main* window, typically the opener control in a corner — and stay
+    invisible there until the first action moved it. ``ms=0`` because a glide
+    would be a slide in from wherever the other window's cursor happened to be,
+    which reads as motion that never occurred.
     """
 
     if main_page.is_closed():
@@ -908,6 +933,20 @@ async def _hand_cursor_to_popup(main_page: Page, overlay: Overlay) -> None:
         # The opener can navigate/close under us while the popup is opening;
         # the loop's own lifecycle checks report that authoritatively.
         if not main_page.is_closed():
+            raise
+    # Remembered so closing the popup does not leave the main window's cursor
+    # parked at the popup's centre: ``Overlay.pos`` is shared across pages.
+    popup.main_cursor_pos = overlay.pos
+    viewport = popup.page.viewport_size
+    if viewport is None or popup.page.is_closed():
+        return
+    try:
+        await overlay.move_to(popup.page, viewport["width"] / 2, viewport["height"] / 2, ms=0)
+        await overlay.show(popup.page)
+    except PlaywrightError:
+        # A popup that dies while being furnished is the loop's business, not
+        # the cursor's; losing the centring costs a cosmetic, never the render.
+        if not popup.page.is_closed():
             raise
 
 
@@ -1742,7 +1781,7 @@ async def run_render(
                         raise RenderError("popup zamknął się podczas otwierania")
                     # The popup now owns the cursor (it mounted its own); stop
                     # painting a second one in the main window behind it.
-                    await _hand_cursor_to_popup(page, overlay)
+                    await _hand_cursor_to_popup(page, popup, overlay)
                 if page.is_closed():
                     raise RenderError("główne okno zostało zamknięte podczas render")
                 _sync_popup_close(popup, observed_pages, anchor)
@@ -1758,6 +1797,7 @@ async def run_render(
                             overlay,
                             chrome,
                             cfg.cursor.settle,
+                            restore_cursor_to=popup.main_cursor_pos,
                         )
                 if _unexpected_pages(observed_pages, page, popup):
                     raise RenderError(

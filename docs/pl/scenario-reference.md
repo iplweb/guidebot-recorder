@@ -188,7 +188,7 @@ popup:
 |---|---:|---|
 | `transition` | wyprowadzane z `floating` | `cut`, `float` lub `slide` (patrz wyżej). |
 | `floating` | `true` | Przestarzały alias bool: `true` → `float`, `false` → `cut`. Jawne `transition` ma pierwszeństwo. |
-| `scale` | `0.72` | `float`: rozmiar pływającego okna jako ułamek viewportu. |
+| `scale` | `0.85` | `float`: rozmiar pływającego okna jako ułamek viewportu. |
 | `cornerRadius` | `14` | `float`: promień zaokrąglenia okna w px. |
 | `shadow` | `true` | `float`: rysuje cień. |
 | `backdropDim` | `0.45` | `float`: krycie ciemnego tła nad stroną główną. |
