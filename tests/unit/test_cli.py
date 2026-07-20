@@ -88,6 +88,33 @@ def test_render_auto_heal_not_implemented(tmp_path):
     assert result.exit_code != 0
 
 
+def test_render_passes_a_reasoner_only_when_codex_is_installed(tmp_path, monkeypatch):
+    """`render` stays LLM-free unless an unresolved optional branch needs healing.
+
+    Availability is probed on the binary rather than inferred from the generic
+    RuntimeError CodexReasoner raises, so a host without `codex` degrades to
+    "skip the branch" instead of a failed render.
+    """
+
+    path = tmp_path / "s.yaml"
+    path.write_text(GOOD, encoding="utf-8")
+    _install_fake_playwright(monkeypatch)
+    seen = []
+
+    async def fake_render(*args, **kwargs):
+        seen.append(kwargs.get("reasoner"))
+
+    monkeypatch.setattr(cli_module, "run_render", fake_render)
+
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: None)
+    runner.invoke(app, ["render", str(path), "--out", str(tmp_path / "o.mp4")])
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: "/usr/local/bin/codex")
+    runner.invoke(app, ["render", str(path), "--out", str(tmp_path / "o.mp4")])
+
+    assert seen[0] is None
+    assert isinstance(seen[1], cli_module.CodexReasoner)
+
+
 def test_render_rejects_non_edge_provider_before_browser_launch(tmp_path):
     path = tmp_path / "s.yaml"
     path.write_text(GOOD.replace("provider: edge", "provider: custom"), encoding="utf-8")
