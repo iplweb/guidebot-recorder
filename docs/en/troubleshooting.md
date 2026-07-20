@@ -185,8 +185,12 @@ Current beta constraints:
 - `enabled` currently waits for visibility rather than separately polling whether the
   element has become enabled.
 
-Use a numeric wait for delayed appearance and do not rely on `enabled` as a strict
-gate yet.
+Do not rely on `enabled` as a strict gate yet.
+
+For an element that may not appear at all — a cookie banner, a promo interstitial —
+reach for an optional branch (`when`) rather than a numeric wait. It polls for the
+element and skips its steps when the element never shows, instead of failing the run.
+See [Optional branches](scenario-reference.md#optional-branches).
 
 ## The synthetic browser bar changes the layout or URL
 

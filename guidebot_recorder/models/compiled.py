@@ -7,9 +7,28 @@ steps without a target carry a ``null`` entry.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from typing import Annotated, Any
 
-from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag
+
+from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction, PendingAction
+
+
+def _action_tag(value: Any) -> str:
+    """Discriminate a compiled entry on the ``pending`` key."""
+
+    if isinstance(value, PendingAction):
+        return "pending"
+    if isinstance(value, dict):
+        return "pending" if value.get("pending") else "cached"
+    return "cached"
+
+
+#: a resolved action, or a placeholder for one that could not be resolved yet
+CompiledAction = Annotated[
+    Annotated[CachedAction, Tag("cached")] | Annotated[PendingAction, Tag("pending")],
+    Discriminator(_action_tag),
+]
 
 
 class CompiledScenario(BaseModel):
@@ -18,5 +37,5 @@ class CompiledScenario(BaseModel):
     compiler_version: int = COMPILER_VERSION
     #: source file name (informational)
     source: str
-    #: actions aligned 1:1 with ``Scenario.steps``; None for steps without a target
-    actions: list[CachedAction | None]
+    #: entries aligned 1:1 with ``Scenario.flat_steps()``; None for steps without a target
+    actions: list[CompiledAction | None]

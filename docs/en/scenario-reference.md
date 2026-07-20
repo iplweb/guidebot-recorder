@@ -342,7 +342,11 @@ has no address bar — only the compositor frame is drawn.
   `enterText`, `wait`, and `slide`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
+- an optional `optional: true` marker (see [Optional branches](#optional-branches));
 - at least `say` when there is no main command.
+
+A list entry may also be a `when` block instead of a step; see
+[Optional branches](#optional-branches).
 
 Two main commands in one item are invalid. Split them so compilation can reproduce
 page state and align one generated action slot with each source step.
@@ -490,9 +494,12 @@ identity because there may be no matching element after success.
 
     Compile-time target validation generally needs the element to be present and
     visible before the conditional wait starts. If an element appears only after a
-    delay, add a numeric wait first. Also, the current `enabled` implementation waits
-    for visibility rather than independently polling the enabled predicate. Do not
-    rely on it as a strict enabled-state gate yet.
+    delay, add a numeric wait first — unless the element is genuinely conditional, in
+    which case use an [optional branch](#optional-branches) instead: a `when` gate
+    polls for its element and tolerates its absence, so no priming wait is needed.
+    Also, the current `enabled` implementation waits for visibility rather than
+    independently polling the enabled predicate. Do not rely on it as a strict
+    enabled-state gate yet.
 
 ### `slide`
 
@@ -521,6 +528,110 @@ follow it with a second, silent `slide` (same text, a `hold`, no `say`).
 Adding, removing, or reordering a `slide` step changes the step count, so it is the
 one step kind that **needs `guidebot compile`**; render preflights the step count
 against the sidecar and fails loudly otherwise.
+
+## Optional branches
+
+Some parts of a flow are genuinely conditional. The canonical case is a cookie consent
+banner: it shows on one run and not on the next, depending on stored consent, A/B
+bucketing, or geography. Without an explicit marker such a step is a hard failure — the
+wait times out and the whole run dies.
+
+An **optional branch** marks a group of steps as "run these only if this element is
+there". If the element is absent, the branch is skipped — including its narration, which
+is removed from the timeline rather than left as silence — and the following steps run
+normally.
+
+### The `when` block
+
+A `when` block is a top-level entry in `steps`, alongside ordinary steps:
+
+```yaml
+steps:
+  - navigate: https://www.example.com
+
+  - when: "the cookie consent banner"
+    state: visible
+    timeout: 20
+    steps:
+      - teach: "click the button that continues to the site"
+      - say: "We accept the cookies and move on."
+
+  - teach: "click the account icon"      # always runs
+```
+
+| Field | Required | Default | Meaning |
+|---|---:|---:|---|
+| `when` | Yes | — | Semantic description of the gating element. |
+| `state` | No | `visible` | `visible`, `hidden`, `enabled` — as in a conditional `wait`. |
+| `timeout` | No | `10.0` | Seconds to wait for the gating element before deciding it is absent. |
+| `steps` | Yes | — | The steps to run when the gate is satisfied. |
+
+The gate behaves like a conditional `wait` whose timeout is not an error. Give the
+banner enough `timeout` to appear; a gate that is merely slow and a gate that is
+genuinely absent are indistinguishable from the outside.
+
+`when` blocks **cannot be nested**. A `when` inside another block's `steps` is a
+validation error. There is no `else` and no alternative branch.
+
+### `optional: true` on a single step
+
+For a single conditional step, add `optional: true` instead of wrapping it in a block:
+
+```yaml
+- click: "the 'dismiss' link in the notification bar"
+  optional: true
+```
+
+It is allowed on steps that resolve a target — `teach`, `click`, `hover`,
+`enterText`, and conditional `wait` — and on a numeric `wait`. It is a **validation
+error** on `say`-only, `navigate`, and `slide` steps: those resolve nothing, so
+"optional" would promise a tolerance Guidebot cannot provide.
+
+### Compile and render
+
+`guidebot compile` does not fail when the gating element is missing. It records the gate
+and every child of the branch as *pending* in the sidecar, prints a warning, and exits
+`0`. A pending entry counts as up to date, so a later `compile` does not relaunch the
+browser only to burn the gate timeout again; use `--force` to retry resolution.
+
+`guidebot render` handles a pending branch **in place**: if the gate does appear, the
+renderer calls the reasoner, polls until the element resolves or `timeout` elapses,
+executes the children, and rewrites `.compiled.yaml` so that every later render of that
+branch is deterministic and LLM-free. If the reasoner is unavailable, render warns loudly
+and skips the branch rather than failing.
+
+### Error boundary
+
+Optional does not mean "ignore errors". Only these signals count as *element absent*:
+
+| Situation | Counts as absent |
+|---|---|
+| Gate with a compiled action | Playwright `TimeoutError` from the wait |
+| Gate still pending | The poll window elapses, or the reasoner answers `no_action` / `no_handle` |
+| Optional step, still pending | The reasoner answers `no_action` / `no_handle` |
+| Optional step with a compiled action | The cached target no longer validates for reuse |
+
+Everything else still fails the render. In particular **`multiple_actions` — an ambiguous
+target description — is a hard error**, inside an optional branch as much as outside it.
+An ambiguous description is an authoring mistake, not a missing element; swallowing it
+would let a typo silently delete a branch from the video.
+
+Errors *inside* a branch that has started are likewise fatal: a click failing on an
+already-resolved target, a navigation error, or a wait that times out on a non-gate step
+all fail the render as usual.
+
+!!! warning "Known limitations"
+
+    **A self-healing render freezes a frame.** Render records wall-clock time, so the
+    in-place reasoner call for a pending branch — up to two minutes — freezes a frame in
+    the output video, and an absent branch costs its `timeout` in dead air. Treat the
+    render that first resolves a branch as a throwaway; re-render afterwards for a clean
+    film. Cutting these stalls out of the timeline is planned.
+
+    **Pop-ups inside an optional branch are unsupported.** A click resolved at render
+    time carries no `opens_popup` observation from compile, so a pop-up opened from
+    inside a branch fails the render with "unexpected popup". Keep pop-up-opening clicks
+    outside optional branches.
 
 ## Pop-up behavior
 

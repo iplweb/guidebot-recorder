@@ -203,6 +203,7 @@ async def run_render_set(
     timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
+    reasoner: Reasoner | None = None,
 ) -> list[Path]:
     """Render one single-audio MP4 per variant in deterministic manifest order.
 
@@ -226,6 +227,7 @@ async def run_render_set(
                 timeout=timeout,
                 pause_on_error=pause_on_error,
                 verbose=verbose,
+                reasoner=reasoner,
             )
         except Exception as exc:
             detail = _safe_variant_error(variant.scenario, env, exc)

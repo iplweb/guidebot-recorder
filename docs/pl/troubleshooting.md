@@ -130,6 +130,10 @@ zestawu WAV jest atomowa; błąd nie powinien zastąpić poprzedniego mastera.
 
 - Target zwykle musi istnieć i być widoczny już podczas compile; poprzedź go liczbową
   pauzą, jeśli pojawia się później.
+- Jeśli element może się w ogóle nie pojawić (banner cookies, interstitial), użyj
+  gałęzi opcjonalnej `when` zamiast liczbowej pauzy — odpytuje o element i pomija
+  swoje kroki, gdy ten nie wystąpi, zamiast wywracać przebieg. Zobacz
+  [Gałęzie opcjonalne](scenario-reference.md#galezie-opcjonalne).
 - `hidden` może poprawnie nie mieć zamrożonej tożsamości.
 - `enabled` obecnie czeka na widoczność, a nie osobno na stan aktywności.
 - Dla przejścia SPA bez zmiany URL dodaj jawny wait po akcji.

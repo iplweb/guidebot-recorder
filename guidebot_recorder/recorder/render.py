@@ -29,11 +29,20 @@ from playwright.async_api import (
 from playwright.async_api import (
     Error as PlaywrightError,
 )
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 from tqdm import tqdm
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
-from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction
+from guidebot_recorder.models.action import (
+    COMPILER_VERSION,
+    CachedAction,
+    Fingerprint,
+    PendingAction,
+)
+from guidebot_recorder.models.compiled import CompiledAction
 from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
@@ -43,8 +52,16 @@ from guidebot_recorder.recorder._debug import (
     scenario_sensitive_values,
 )
 from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.resolver.reasoner import Reasoner
+from guidebot_recorder.resolver.resolution import (
+    ResolvedTarget,
+    TargetAbsent,
+    heuristic_expect,
+    resolve_step_target,
+    step_instruction,
+)
 from guidebot_recorder.resolver.validate import reuse_is_valid
-from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
+from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import (
@@ -67,6 +84,8 @@ _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
 _VIDEO_POSTROLL_SECONDS = 0.1
 _TTS_CONCURRENCY = 8
+#: how often a pending gate is re-resolved while its wait window is still open
+_PENDING_POLL_SECONDS = 0.25
 # Each worker can own a full ffmpeg process. Keep the pool below both the host's
 # CPU count and a conservative process ceiling instead of scaling with languages.
 _AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
@@ -74,6 +93,18 @@ _AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
 
 class RenderError(RuntimeError):
     """A step needs (re-)compile: missing action or mismatched identity."""
+
+
+class _OptionalAbsent(Exception):
+    """The element an *optional* step or branch gate stands for is simply not there.
+
+    Deliberately narrow, and deliberately not a :class:`RenderError`: it is raised
+    only from the four signals the design admits as "absent" (a timed-out cached
+    ``waitFor``, a ``no_action``/``no_handle`` verdict, an elapsed poll window, a
+    failed ``reuse_is_valid``). Everything else — an ambiguous description, a click
+    that fails on a resolved target, a navigation error — keeps propagating and
+    fails the render, so ``optional`` cannot decay into ``except Exception: pass``.
+    """
 
 
 #: A slide card's on-screen content, as consumed by ``SlideOverlay.show``/``.ensure``.
@@ -756,7 +787,7 @@ def _compiled_from(step: Step) -> str:
 
 
 def _compiled_action_is_current(
-    step: Step, action: CachedAction | None, scenario_hash: str
+    step: Step, action: CompiledAction | None, scenario_hash: str
 ) -> bool:
     """Check source/config fingerprints before replaying frozen behavior."""
 
@@ -765,6 +796,18 @@ def _compiled_action_is_current(
     if action is None:
         return False
     kind = step.command_kind()
+    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
+    if isinstance(action, PendingAction):
+        # Nothing was frozen yet, so there is no action/expect to cross-check —
+        # only that the placeholder still stands for *this* step and config.
+        fingerprint = action.fingerprint
+        return (
+            fingerprint.compiler_version == COMPILER_VERSION
+            and fingerprint.command_kind == kind
+            and fingerprint.compiled_from == _compiled_from(step)
+            and fingerprint.config_hash == scenario_hash
+            and fingerprint.state == expected_state
+        )
     expected_action = {
         "click": "click",
         "hover": "hover",
@@ -773,7 +816,6 @@ def _compiled_action_is_current(
     }.get(kind)
     if expected_action is not None and action.action != expected_action:
         return False
-    expected_state = step.wait.state if isinstance(step.wait, WaitUntil) else None
     fingerprint = action.fingerprint
     if not (
         fingerprint.compiler_version == COMPILER_VERSION
@@ -791,6 +833,70 @@ def _compiled_action_is_current(
     )
 
 
+async def _resolve_pending_target(
+    root: Page | Frame,
+    step: Step,
+    kind: str,
+    reasoner: Reasoner,
+) -> ResolvedTarget:
+    """Resolve a :class:`PendingAction` against the live page, polling while it may still appear.
+
+    A gate (`wait: {until: ...}`) gets the whole configured wait window, retried on
+    an interval: the canonical gating element — a cookie banner — is injected after
+    a delay, and a single snapshot would report a spurious absence and silently
+    delete the branch from the video. Any other optional step has no wait window,
+    so it is resolved exactly once.
+
+    Raises :class:`_OptionalAbsent` when the window closes on an "absent" verdict;
+    every other resolver failure propagates out of ``resolve_step_target``.
+    """
+
+    window = step.wait.timeout if isinstance(step.wait, WaitUntil) else 0.0
+    deadline = time.monotonic() + window
+    while True:
+        result = await resolve_step_target(root, step, kind, reasoner)
+        if isinstance(result, ResolvedTarget):
+            return result
+        assert isinstance(result, TargetAbsent)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _OptionalAbsent(
+                f"{step_instruction(step)!r}: {result.reason} ({result.message})"
+            )
+        await asyncio.sleep(min(_PENDING_POLL_SECONDS, remaining))
+
+
+def _freeze_resolved(
+    step: Step,
+    kind: str,
+    resolved: ResolvedTarget,
+    expect: str,
+    scenario_hash: str,
+) -> CachedAction:
+    """Build the ``CachedAction`` that replaces a pending entry in the sidecar.
+
+    ``opens_popup`` stays false by construction: a click resolved at render time
+    carries no popup observation from compile, and the render popup contract is
+    what fails loudly if one opens anyway (a documented limitation of branches).
+    """
+
+    return CachedAction(
+        action=resolved.action,
+        target=resolved.target,
+        identity=resolved.identity,
+        expect=expect,
+        state=resolved.state,
+        input_text=resolved.input_text,
+        fingerprint=Fingerprint(
+            command_kind=kind,
+            compiled_from=step_instruction(step),
+            expect=expect,
+            config_hash=scenario_hash,
+            state=resolved.state,
+        ),
+    )
+
+
 async def run_render(
     path: Path | str,
     out_mp4: Path | str,
@@ -802,6 +908,7 @@ async def run_render(
     timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
+    reasoner: Reasoner | None = None,
 ) -> None:
     path = Path(path)
     out_mp4 = Path(out_mp4)
@@ -827,7 +934,12 @@ async def run_render(
         raise RenderError(
             f"compiled pochodzi z innego scenariusza ({compiled.source}) — uruchom `compile`"
         )
-    if len(compiled.actions) != len(scenario.steps):
+    # Flat indexing: a `when:` block contributes its synthetic gate step followed by
+    # its children, so `actions`, narration segments and every `krok {index}` message
+    # index the same linear execution order.
+    flat = scenario.flat_steps()
+    flat_steps = [entry.step for entry in flat]
+    if len(compiled.actions) != len(flat):
         raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
     if compiled.compiler_version != COMPILER_VERSION or any(
         action is not None and action.fingerprint.compiler_version != COMPILER_VERSION
@@ -835,13 +947,19 @@ async def run_render(
     ):
         raise RenderError("compiled ma starszą wersję — uruchom `compile`")
     scenario_hash = config_hash(cfg)
-    for index, (step, action) in enumerate(zip(scenario.steps, compiled.actions, strict=True)):
-        if not _compiled_action_is_current(step, action, scenario_hash):
+    for index, (entry, action) in enumerate(zip(flat, compiled.actions, strict=True)):
+        if not _compiled_action_is_current(entry.step, action, scenario_hash):
             raise RenderError(f"krok {index}: compiled jest nieaktualny — uruchom `compile`")
+        if isinstance(action, PendingAction) and entry.branch is None and not entry.step.optional:
+            # A pending entry is only ever written for a branch (gate + children)
+            # or an `optional: true` step; anywhere else the sidecar is corrupt.
+            raise RenderError(
+                f"krok {index}: wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
+            )
 
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
-    narration_count = sum(_narration(step) is not None for step in scenario.steps)
+    narration_count = sum(_narration(step) is not None for step in flat_steps)
     presynth = tqdm(
         total=narration_count * len(audio_configs),
         desc="tts",
@@ -850,7 +968,7 @@ async def run_render(
     )
     try:
         segments = await _presynthesize_narration(
-            scenario.steps,
+            flat_steps,
             audio_configs,
             cache,
             tts_provider,
@@ -1014,9 +1132,30 @@ async def run_render(
     popup: _PopupSession | None = None
     popup_open_at_end = False
 
-    bar = tqdm(total=len(scenario.steps), desc="render", unit="krok", disable=not verbose)
+    #: branch whose gate turned out to be absent — every step of it is skipped
+    skipped_branch: int | None = None
+
+    def note_skip(entry_index: int, entry_step: Step, reason: str, *, gate: bool) -> None:
+        what = "bramka" if gate else "krok opcjonalny"
+        tqdm.write(f"⚠ krok {entry_index}: {what} pominięty — {reason}")
+
+    def persist_resolved(entry_index: int, resolved_action: CachedAction) -> None:
+        """Fold a render-time resolution back into the sidecar (full atomic rewrite)."""
+
+        compiled.actions[entry_index] = resolved_action
+        write_compiled(cpath, compiled)
+
+    bar = tqdm(total=len(flat), desc="render", unit="krok", disable=not verbose)
     try:
-        for index, step in enumerate(scenario.steps):
+        for index, entry in enumerate(flat):
+            step = entry.step
+            if skipped_branch is not None and entry.branch == skipped_branch:
+                # The gate never showed: the branch's children never run, and their
+                # narration is removed from the timeline rather than left as silence
+                # (segments are placed per index, so never placing them removes them).
+                bar.update(1)
+                continue
+            skipped_branch = None
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
                 raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
@@ -1024,7 +1163,7 @@ async def run_render(
                 raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
             kind = step.command_kind()
             if verbose:
-                tqdm.write(f"[{index + 1}/{len(scenario.steps)}] {kind}")
+                tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
 
             active_page = _active_page(page, popup)
             await active_page.bring_to_front()
@@ -1077,6 +1216,62 @@ async def run_render(
                     expect_chrome=_expect_chrome(chrome, bare_popups),
                 )
 
+            # --- absence probe / in-place resolution, ahead of the narration ----
+            # An optional step that turns out to be absent must not narrate first
+            # and only then do nothing, so everything decidable before the action —
+            # a stale frozen target, an unresolvable pending entry — is decided
+            # here. A cached gate is the exception: its `waitFor` IS the action, so
+            # it stays in `_render_step` (a synthetic gate step never narrates).
+            #
+            # `optional` marks the only two places absence is tolerated: a branch
+            # gate and an `optional: true` step. A *child* of an entered branch is
+            # not optional — the branch demonstrably happened, so anything failing
+            # inside it is a real regression (§5 of the design). Its pending entry
+            # is still resolved here; only the verdict on absence differs.
+            optional = entry.is_gate or step.optional
+            resolved: ResolvedTarget | None = None
+            cached = compiled.actions[index]
+            if step.requires_target() and (optional or isinstance(cached, PendingAction)):
+                probe_root: Page | Frame = (
+                    site_frame if active_page is page and site_frame is not None else active_page
+                )
+                try:
+                    if isinstance(cached, PendingAction):
+                        if reasoner is None:
+                            raise _OptionalAbsent(
+                                "brak dostępnego reasonera, a krok nie został skompilowany "
+                                "(pending) — zainstaluj `codex`, aby rozwiązać go na miejscu"
+                            )
+                        resolved = await _resolve_pending_target(probe_root, step, kind, reasoner)
+                    elif isinstance(cached, CachedAction) and cached.action != "waitFor":
+                        if not await reuse_is_valid(probe_root, cached):
+                            raise _OptionalAbsent("zamrożony namiar nie pasuje do strony")
+                except _OptionalAbsent as absent:
+                    if not optional:
+                        raise RenderError(f"krok {index}: {absent}") from None
+                    note_skip(index, step, str(absent), gate=entry.is_gate)
+                    if entry.is_gate:
+                        skipped_branch = entry.branch
+                    bar.update(1)
+                    continue
+                except Exception as exc:
+                    # Everything the resolver rejects for a reason other than
+                    # absence — `multiple_actions` above all — is an authoring bug
+                    # and fails the render, exactly as in the action loop below.
+                    safe_message = redact_exception(exc, sensitive_values)
+                    if verbose:
+                        tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
+                    if pause_on_error:
+                        await pause_for_inspection(
+                            _active_page(page, popup),
+                            "render",
+                            index,
+                            kind,
+                            exc,
+                            sensitive_values,
+                        )
+                    raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
+
             step_segments: list[Segment] = []
             narration_offset = time.monotonic() - anchor
             for tts in audio_configs:
@@ -1113,8 +1308,7 @@ async def run_render(
                     chrome,
                     expect_chrome=_expect_chrome(chrome, bare_popups),
                 )
-            cached = compiled.actions[index]
-            if cached is not None and cached.opens_popup and popup is not None:
+            if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
@@ -1143,6 +1337,10 @@ async def run_render(
                     observed_pages,
                     _ensure_card,
                     expect_chrome=_expect_chrome(chrome, bare_popups),
+                    resolved=resolved,
+                    optional=optional,
+                    scenario_hash=scenario_hash,
+                    on_resolved=persist_resolved,
                 )
                 if opened is not None:
                     popup = opened
@@ -1179,6 +1377,12 @@ async def run_render(
                     raise RenderError(
                         f"krok {index}: nieoczekiwany popup — uruchom `compile --force`"
                     )
+            except _OptionalAbsent as absent:
+                # Only a cached gate reaches here (its `waitFor` timed out); every
+                # other absence signal was already settled by the probe above.
+                note_skip(index, step, str(absent), gate=entry.is_gate)
+                if entry.is_gate:
+                    skipped_branch = entry.branch
             except Exception as exc:
                 safe_message = redact_exception(exc, sensitive_values)
                 if verbose:
@@ -1305,13 +1509,25 @@ async def _render_step(
     step: Step,
     kind: str,
     index: int,
-    cached: CachedAction | None,
+    cached: CompiledAction | None,
     anchor: float,
     observed_pages: dict[Page, _PageObservation],
     ensure_card: Callable[[Page], Awaitable[None]],
     *,
     expect_chrome: bool | None = None,
+    resolved: ResolvedTarget | None = None,
+    optional: bool = False,
+    scenario_hash: str = "",
+    on_resolved: Callable[[int, CachedAction], None] | None = None,
 ) -> _PopupSession | None:
+    """Replay one flat step.
+
+    ``resolved`` carries a target the caller resolved in place for a
+    :class:`PendingAction`; this call performs it, derives its ``expect`` the way
+    ``compile`` does (URL before vs after) and hands the frozen action back through
+    ``on_resolved`` so the sidecar stops being pending.
+    """
+
     if expect_chrome is None:
         expect_chrome = chrome is not None
     pages_before_prepare = set(observed_pages)
@@ -1389,10 +1605,18 @@ async def _render_step(
         await recorder.wait_seconds(float(step.wait))
         return None
 
-    if cached is None:
+    url_before = action_frame.url
+    if resolved is not None:
+        # Resolved in place a moment ago against this very frame: it is live by
+        # construction, and `expect` is only knowable after the action has run.
+        cached = _freeze_resolved(step, kind, resolved, "none", scenario_hash)
+    elif cached is None:
         raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
-    if cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
+    elif isinstance(cached, PendingAction):  # pragma: no cover - prologue rejects these
+        raise RenderError(f"krok {index}: nierozwiązany wpis oczekujący — uruchom `compile`")
+    elif cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
         raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
+    assert isinstance(cached, CachedAction)
     if cached.opens_popup and cached.action != "click":
         raise RenderError(f"krok {index}: tylko click może otworzyć popup")
 
@@ -1468,10 +1692,28 @@ async def _render_step(
         await recorder.enter_text(cached.target, input_text)
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
-        await recorder.wait_for(cached.target, cached.state or "visible", timeout)
+        try:
+            await recorder.wait_for(cached.target, cached.state or "visible", timeout)
+        except PlaywrightTimeoutError as exc:
+            # The one absence signal a frozen gate can give: its wait window
+            # elapsed. On a required step the timeout still fails the render.
+            if not optional:
+                raise
+            raise _OptionalAbsent(f"upłynął czas oczekiwania ({timeout}s)") from exc
+
+    expect = cached.expect
+    if resolved is not None:
+        # Mirror compile: the action reveals whether it navigated, and only then
+        # is the entry complete enough to replace the pending one on disk.
+        url_after = action_frame.url if not page.is_closed() else url_before
+        expect = heuristic_expect(url_before, url_after)
+        cached = _freeze_resolved(step, kind, resolved, expect, scenario_hash)
+        if on_resolved is not None:
+            on_resolved(index, cached)
+
     if not page.is_closed():
         try:
-            await recorder.apply_readiness(cached.expect)
+            await recorder.apply_readiness(expect)
         except PlaywrightError:
             if not page.is_closed():
                 raise

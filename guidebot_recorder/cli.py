@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import typer
@@ -24,6 +25,18 @@ from guidebot_recorder.scenario.render_set import RenderSetPlan, load_render_set
 from guidebot_recorder.tts.edge import EdgeTtsProvider
 
 app = typer.Typer(help="Kompilator scenariuszy YAML → deterministyczny film szkoleniowy.")
+
+
+def _render_reasoner() -> CodexReasoner | None:
+    """A Reasoner for render, or None when `codex` is not installed.
+
+    `render` is LLM-free except for one case: an optional branch that was never
+    compiled and does show up this time. Probing the binary is deliberate — the
+    generic RuntimeError `CodexReasoner` raises is not something to string-match,
+    and a missing binary must degrade to "skip the branch", not to a failed render.
+    """
+
+    return CodexReasoner() if shutil.which("codex") is not None else None
 
 
 def _load_set_or_exit(path: Path) -> RenderSetPlan:
@@ -171,6 +184,7 @@ def render_cmd(
                     timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
+                    reasoner=_render_reasoner(),
                 )
             finally:
                 await browser.close()
@@ -220,6 +234,7 @@ def render_set_cmd(
                     timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
+                    reasoner=_render_reasoner(),
                 )
             finally:
                 await browser.close()

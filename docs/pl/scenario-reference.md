@@ -258,6 +258,9 @@ Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `clic
 `enterText`, `wait` i `slide`. `say` może być jedyną treścią kroku albo towarzyszyć
 jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
+Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
+blokiem `when` zamiast kroku — patrz [Gałęzie opcjonalne](#galezie-opcjonalne).
+
 Narracją domyślną jest `say`, a gdy go nie ma — `teach`. Same `click`, `hover`,
 `enterText`, `navigate`, `wait` i `slide` nie są czytane — tekst planszy `slide` jest
 wyświetlany, nie wypowiadany.
@@ -329,6 +332,11 @@ lub `enabled`, a timeout jest w sekundach i domyślnie wynosi 10. `hidden` może
 tożsamości. Obecne `enabled` czeka na widoczność, nie sprawdza osobno aktywności — nie
 traktuj go jeszcze jako ścisłej bramki.
 
+Element, który pojawia się z opóźnieniem, wymagał wcześniej poprzedzającego `wait`
+liczbowego. Jeżeli element jest naprawdę warunkowy (raz jest, raz go nie ma), użyj
+zamiast tego [gałęzi opcjonalnej](#galezie-opcjonalne): bramka `when` sama odpytuje
+stronę i znosi nieobecność elementu.
+
 ### `slide`
 
 ```yaml
@@ -362,6 +370,112 @@ kroków przed startem i kończy się błędem przy nieaktualnym sidecarze.
 Model przyjmuje pole `expect`, lecz compiler sam wyprowadza gotowość z obserwowanej
 zmiany URL i nie traktuje źródłowej wartości jako stabilnego sterowania. Nie używaj
 `expect` w scenariuszach; dla SPA dodaj jawny `wait`.
+
+## Gałęzie opcjonalne {#galezie-opcjonalne}
+
+Część przepływu bywa naprawdę warunkowa. Sztandarowy przypadek to banner zgody na
+cookies: raz się pokazuje, raz nie — zależnie od zapisanej zgody, testu A/B albo
+geolokalizacji. Bez jawnego oznaczenia taki krok jest twardym błędem: `wait` przekracza
+timeout i cały przebieg pada.
+
+Gałąź opcjonalna oznacza grupę kroków jako „wykonaj tylko wtedy, gdy ten element jest
+na stronie". Gdy elementu nie ma, gałąź jest pomijana — razem z narracją, która znika z
+osi czasu, a nie zostaje jako cisza — a kolejne kroki wykonują się normalnie.
+
+### Blok `when`
+
+Blok `when` stoi w `steps` na tym samym poziomie co zwykłe kroki:
+
+```yaml
+steps:
+  - navigate: https://www.example.com
+
+  - when: "banner zgody na cookies"
+    state: visible
+    timeout: 20
+    steps:
+      - teach: "Kliknij przycisk przechodzący dalej do serwisu"
+      - say: "Akceptujemy cookies i ruszamy dalej."
+
+  - teach: "Kliknij ikonę konta"        # wykonuje się zawsze
+```
+
+| Pole | Wymagane | Domyślnie | Znaczenie |
+|---|---:|---:|---|
+| `when` | Tak | — | Semantyczny opis elementu-bramki. |
+| `state` | Nie | `visible` | `visible`, `hidden`, `enabled` — jak w warunkowym `wait`. |
+| `timeout` | Nie | `10.0` | Sekundy oczekiwania na element, zanim uznamy go za nieobecny. |
+| `steps` | Tak | — | Kroki wykonywane po spełnieniu bramki. |
+
+Bramka zachowuje się jak warunkowy `wait`, którego timeout nie jest błędem. Daj
+bannerowi wystarczający `timeout` — z zewnątrz bramka wolna i bramka nieobecna wyglądają
+tak samo.
+
+Bloków `when` **nie wolno zagnieżdżać**. `when` wewnątrz `steps` innego bloku jest błędem
+walidacji. Nie ma `else` ani gałęzi alternatywnej.
+
+### `optional: true` na pojedynczym kroku
+
+Dla jednego warunkowego kroku zamiast bloku wystarczy `optional: true`:
+
+```yaml
+- click: "link „zamknij" na pasku powiadomienia"
+  optional: true
+```
+
+Pole jest dozwolone na krokach rozwiązujących target — `teach`, `click`, `hover`,
+`enterText` i warunkowy `wait` — oraz na liczbowym `wait`. Na kroku z samym `say`, na
+`navigate` i na `slide` jest **błędem walidacji**: te kroki niczego nie rozwiązują, więc
+„opcjonalność" obiecywałaby tolerancję, której Guidebot nie daje.
+
+### Compile i render
+
+`guidebot compile` nie kończy się błędem, gdy elementu-bramki nie ma. Zapisuje bramkę i
+wszystkie kroki gałęzi jako *pending* w sidecarze, wypisuje ostrzeżenie i kończy się
+kodem `0`. Wpis pending liczy się jako aktualny, więc kolejny `compile` nie uruchamia
+przeglądarki tylko po to, żeby znów przepalić timeout bramki — do ponownej próby użyj
+`--force`.
+
+`guidebot render` obsługuje gałąź pending **w miejscu**: jeśli bramka jednak się pojawi,
+render woła reasoner, odpytuje stronę aż element się rozwiąże albo minie `timeout`,
+wykonuje kroki gałęzi i przepisuje `.compiled.yaml` — każdy następny render tej gałęzi
+jest już deterministyczny i bez AI. Gdy reasoner jest niedostępny, render głośno ostrzega
+i pomija gałąź, zamiast padać.
+
+### Granica błędów
+
+Opcjonalność nie znaczy „ignoruj błędy". Za *nieobecność elementu* liczą się wyłącznie te
+sygnały:
+
+| Sytuacja | Liczy się jako nieobecność |
+|---|---|
+| Bramka ze skompilowaną akcją | `TimeoutError` Playwrighta z oczekiwania |
+| Bramka nadal pending | Minie okno odpytywania albo reasoner odpowie `no_action` / `no_handle` |
+| Krok opcjonalny, nadal pending | Reasoner odpowie `no_action` / `no_handle` |
+| Krok opcjonalny ze skompilowaną akcją | Zapisany target nie przechodzi walidacji ponownego użycia |
+
+Wszystko poza tym nadal wywala render. W szczególności **`multiple_actions` — czyli
+niejednoznaczny opis targetu — jest twardym błędem**, tak samo w gałęzi opcjonalnej jak
+poza nią. Niejednoznaczny opis to błąd autora, a nie brakujący element; przemilczenie go
+pozwoliłoby literówce po cichu usunąć całą gałąź z filmu.
+
+Błędy *wewnątrz* rozpoczętej gałęzi też są śmiertelne: nieudane kliknięcie w rozwiązany
+już target, błąd nawigacji czy timeout `wait` na kroku, który nie jest bramką, kończą
+render jak zwykle.
+
+!!! warning "Znane ograniczenia"
+
+    **Render, który sam naprawia gałąź, zamraża klatkę.** Render nagrywa czas
+    rzeczywisty, więc wywołanie reasonera w miejscu — nawet do dwóch minut — zamraża
+    klatkę w filmie, a nieobecna gałąź kosztuje tyle sekund pustki, ile wynosi jej
+    `timeout`. Render, który po raz pierwszy rozwiązuje gałąź, traktuj jako
+    jednorazowy — czysty film uzyskasz z kolejnego renderu. Wycięcie tych przestojów z
+    osi czasu jest planowane.
+
+    **Pop-upy wewnątrz gałęzi opcjonalnej nie są wspierane.** Kliknięcie rozwiązane
+    dopiero podczas renderu nie niesie obserwacji `opens_popup` z compile, więc pop-up
+    otwarty z wnętrza gałęzi kończy render błędem „unexpected popup". Kliknięcia
+    otwierające pop-up trzymaj poza gałęziami opcjonalnymi.
 
 ## Macierz przebudowy
 
