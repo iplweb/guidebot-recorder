@@ -128,8 +128,9 @@ class SoundConfig(BaseModel):
     enabled: bool = True
     click: bool = True
     keys: bool = True
-    # dB attenuation on the SFX bed; <= 0 only. A positive gain would erode the
-    # −20 dBFS source headroom the clipping defence relies on.
+    # User attenuation on the already-balanced SFX bed. Per-kind mouse/key gains
+    # deliberately spend some of the −20 dBFS source headroom; positive user gain
+    # stays forbidden and the final narration mix has its own limiter.
     volume: float = Field(default=-12.0, le=0)
 
 

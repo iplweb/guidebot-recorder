@@ -6,6 +6,29 @@ from pathlib import Path
 
 from guidebot_recorder.video.mux import SAMPLE_RATE, _run_to_output, ffmpeg_bin
 
+# The assets retain ample source headroom, then are balanced here before the
+# scenario-wide ``sound.volume`` attenuation.  A mouse click is sparse and must cut
+# through speech; keys repeat rapidly and therefore stay softer.  Small pitch/level
+# changes stop a typed word from sounding like one perfectly looped sample.
+_KIND_GAIN_DB = {"click": 18.0, "key": 12.0}
+_KEY_VARIANTS = (
+    (1.000, 0.0),
+    (1.035, -0.6),
+    (0.972, -1.0),
+    (1.060, -1.4),
+    (0.945, -0.7),
+)
+
+
+def _event_filters(kind: str, event_index: int) -> str:
+    """Return deterministic per-event colour without moving its onset time."""
+
+    if kind != "key":
+        return ""
+    pitch, gain_db = _KEY_VARIANTS[event_index % len(_KEY_VARIANTS)]
+    rate = int(round(SAMPLE_RATE * pitch))
+    return f"asetrate={rate},aresample={SAMPLE_RATE},volume={gain_db}dB,"
+
 
 def build_sfx_bed(
     events: list[tuple[str, float]],
@@ -32,7 +55,11 @@ def build_sfx_bed(
     for kind, offset in events:
         if kind in by_kind:
             by_kind[kind][1].append(offset)
-    sources = [(path, offs) for path, offs in by_kind.values() if offs]
+    sources = [
+        (kind, path, offs)
+        for kind, (path, offs) in by_kind.items()
+        if offs
+    ]
     if not sources:
         return  # no events → no bed
 
@@ -46,21 +73,32 @@ def build_sfx_bed(
         "-i",
         f"anullsrc=r={SAMPLE_RATE}:cl=stereo",
     ]
-    for path, _ in sources:
+    for _kind, path, _offs in sources:
         cmd += ["-i", str(path)]
 
     filters: list[str] = []
     mix_labels = ["[0:a]"]
-    for idx, (_path, offs) in enumerate(sources, start=1):
-        base = f"[{idx}:a]aresample={SAMPLE_RATE},aformat=channel_layouts=stereo"
+    for idx, (kind, _path, offs) in enumerate(sources, start=1):
+        kind_gain = _KIND_GAIN_DB[kind]
+        base = (
+            f"[{idx}:a]aresample={SAMPLE_RATE},aformat=channel_layouts=stereo,"
+            f"volume={kind_gain}dB"
+        )
         if len(offs) == 1:
-            filters.append(f"{base},adelay={int(round(offs[0] * 1000))}:all=1[s{idx}_0]")
+            colour = _event_filters(kind, 0)
+            filters.append(
+                f"{base},{colour}adelay={int(round(offs[0] * 1000))}:all=1[s{idx}_0]"
+            )
             mix_labels.append(f"[s{idx}_0]")
         else:
             splits = "".join(f"[s{idx}_{j}]" for j in range(len(offs)))
             filters.append(f"{base},asplit={len(offs)}{splits}")
             for j, off in enumerate(offs):
-                filters.append(f"[s{idx}_{j}]adelay={int(round(off * 1000))}:all=1[d{idx}_{j}]")
+                colour = _event_filters(kind, j)
+                filters.append(
+                    f"[s{idx}_{j}]{colour}adelay={int(round(off * 1000))}:all=1"
+                    f"[d{idx}_{j}]"
+                )
                 mix_labels.append(f"[d{idx}_{j}]")
 
     filters.append(

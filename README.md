@@ -183,8 +183,10 @@ A few render-only, opt-in polish features round out a video:
 - **`config.typing`** — `animate: true` types `enterText`/`teach` input
   character-by-character during render instead of pasting it instantly; `speed` sets
   the delay per character (default `60` ms).
-- **`config.sound`** — `enabled: true` mixes a subtle, built-in key-tick and click
-  sound under the narration on every language track. No author-supplied files.
+- **`config.sound`** — `enabled: true` mixes a built-in recording of a low-profile
+  keyboard and a clearly audible two-stage mouse click under the narration on every
+  language track. Repeated keys receive tiny deterministic pitch/level variations
+  instead of looping one identical sound. No author-supplied files.
 - **`config.intro`** — `enabled: true` opens the film with a title card built from
   `config.title` plus `subtitle`/`notes`, instead of today's blank white first frame.
 - **Bigger cursor** — `config.cursor.width`/`height` control the pointer's size
@@ -475,8 +477,9 @@ Kilka opcjonalnych funkcji wyłącznie renderu dopełnia film:
   znaku podczas renderu zamiast wklejać go od razu; `speed` ustawia opóźnienie na
   znak (domyślnie `60` ms).
 - **`config.sound`** — `enabled: true` wmiksowuje pod narrację na każdej ścieżce
-  językowej cichy, wbudowany dźwięk klawisza i kliknięcia. Bez własnych plików
-  dźwiękowych.
+  językowej nagrany stuk niskoprofilowej klawiatury i wyraźny, dwuczęściowy klik
+  myszy. Kolejne klawisze dostają drobne, deterministyczne różnice wysokości i
+  poziomu zamiast zapętlać identyczny dźwięk. Bez własnych plików dźwiękowych.
 - **`config.intro`** — `enabled: true` otwiera film planszą tytułową zbudowaną z
   `config.title` oraz `subtitle`/`notes`, zamiast dzisiejszej pustej, białej
   pierwszej klatki.

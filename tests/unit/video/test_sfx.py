@@ -112,6 +112,27 @@ def test_build_sfx_bed_length_and_bounded_inputs(tmp_path):
     assert abs(probe_duration(out) - 3.0) < 0.05
 
 
+@pytest.mark.parametrize(("kind", "expected_peak_db"), [("click", -17.0), ("key", -23.0)])
+def test_default_sfx_balance_is_audible_beneath_narration(
+    tmp_path, kind, expected_peak_db
+):
+    from guidebot_recorder.video.sfx import build_sfx_bed
+
+    out = tmp_path / f"{kind}.wav"
+    click, key = _assets()
+    with as_file(click) as cp, as_file(key) as kp:
+        build_sfx_bed(
+            [(kind, 0.2)],
+            total=1.0,
+            out=out,
+            click_path=Path(cp),
+            key_path=Path(kp),
+            gain_db=-12.0,
+        )
+
+    assert _overall_peak_level_db(out) == pytest.approx(expected_peak_db, abs=0.25)
+
+
 def test_build_sfx_bed_click_only_uses_two_inputs(tmp_path):
     # key source omitted entirely when it has zero events (no unconnected pads)
     from guidebot_recorder.video.sfx import build_sfx_bed
