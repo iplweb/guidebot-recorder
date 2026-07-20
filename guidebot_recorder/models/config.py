@@ -19,11 +19,18 @@ CONFIG_HASH_VERSION = 2
 # on the video package, so the value is restated here with FPS named as its
 # source of truth.
 #
-# Below this bound the wall-clock stamp for a step's narration offset can
-# round onto the SAME 25fps frame as the previous step's freeze, which is not
-# merely a visual quirk: the axis mapping then gives that narration a zero
-# shift, so consecutive narrations collapse onto one timestamp instead of
-# playing in sequence. Two frames (80ms) keeps consecutive stamps apart.
+# A settle below one frame is not representable on that grid at all: the
+# renderer would claim to record real time it cannot place, and a zero settle
+# means the picture stops before the step's own entry animation has drawn a
+# single frame of itself. Two frames is the smallest value that leaves the
+# hold something to hold.
+#
+# This bound is NOT what keeps narration offsets from colliding. That was the
+# original (mistaken) rationale: settle separates a step's start from its own
+# freeze, and says nothing about the distance from that freeze to the NEXT
+# step's stamp, which is where the collision actually happened. Monotonic
+# stamping in `recorder.render._stamp_frame` is what fixes it, at every settle
+# value including this floor.
 MIN_HOLD_FRAME_SETTLE = 2 / 25
 
 
@@ -214,7 +221,15 @@ class PopupConfig(BaseModel):
 
 
 class Config(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    # `validate_assignment` because the render CLI's overrides (`--hold-frame`,
+    # `--hold-frame-settle`) are applied by ASSIGNING onto an already-built
+    # Config. Without it those assignments skip every constraint the field
+    # declares: `--hold-frame-settle 0` reached the recorder despite the `ge=`
+    # bound, and a negative value made the held frame LONGER than the narration
+    # asked for, inflating the film past its own audio with no error. Validating
+    # on assignment fixes the whole class at the model instead of at one call
+    # site, so a future override cannot reintroduce it.
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, validate_assignment=True)
     title: str
     viewport: Viewport
     tts: TtsConfig
@@ -236,8 +251,8 @@ class Config(BaseModel):
     # Real seconds recorded before the frame is held, paid OUT OF the narration
     # (not on top of it) so the finished film keeps its length. Gives entry
     # animations triggered by this step time to finish before the picture stops.
-    # Floor is MIN_HOLD_FRAME_SETTLE (two 25fps frames): below it, narration
-    # placement silently collapses (see that constant's comment).
+    # Floor is MIN_HOLD_FRAME_SETTLE (two 25fps frames): below it the settle is
+    # not representable on the frame grid (see that constant's comment).
     hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=MIN_HOLD_FRAME_SETTLE)
 
     @model_validator(mode="after")

@@ -67,6 +67,7 @@ from guidebot_recorder.video.timeline import (
     Timeline,
     apply_time_edits,
     assert_recording_fps,
+    frames_to_seconds,
     probe_frame_count,
     seconds_to_frames,
 )
@@ -506,6 +507,31 @@ def _narration(step: Step) -> str | None:
     return step.narration()
 
 
+def _stamp_frame(anchor: float, *, not_before: int = 0) -> int:
+    """Stamp "now" as a recording frame index, never earlier than *not_before*.
+
+    Every audio placement is a wall-clock reading quantised onto the 25fps grid,
+    and every such reading is later mapped through :meth:`Timeline.to_virtual`,
+    which shifts a stamp past a freeze only when the freeze sits STRICTLY before
+    it — a stamp exactly AT its own freeze point must stay put, because that is
+    where the narration the freeze exists for begins.
+
+    That rule is right, but it makes the grid unforgiving: a freeze recorded at
+    frame ``F`` and a later event whose reading also rounds to ``F`` (the work
+    in between took less than 40ms — a couple of CDP round-trips easily fits)
+    are indistinguishable, so the later event maps to the START of the hold and
+    fires up to a whole narration early. Nothing bounds that gap: ``settle``
+    separates the step's own start from ``F``, not ``F`` from what follows it.
+
+    So stamps are made monotonic against the freezes already emitted: once a
+    freeze exists at ``F``, everything stamped afterwards is at least ``F + 1``
+    and therefore lands after the hold. The cost is at most one frame (40ms) of
+    placement error on an event that genuinely happened within the same frame,
+    which is below the resolution the axis can represent at all.
+    """
+    return max(seconds_to_frames(time.monotonic() - anchor), not_before)
+
+
 async def _pace_narration(
     segments: list[Segment],
     *,
@@ -513,7 +539,8 @@ async def _pace_narration(
     hold_frame: bool,
     settle: float,
     edits: list[TimeEdit],
-) -> None:
+    not_before: int = 0,
+) -> int | None:
     """Pace one shared visual step by its longest configured narration.
 
     With ``hold_frame`` the wall clock only pays ``settle`` seconds — enough for
@@ -521,29 +548,31 @@ async def _pace_narration(
     voice-over becomes a held frame inserted in post. The settle comes *out of*
     the narration, not on top of it, so the finished film keeps the exact pacing
     it had when the renderer slept through the whole thing.
+
+    Returns the recording frame the freeze was stamped at, or ``None`` when no
+    freeze was recorded. *not_before* is the earliest frame this freeze may be
+    stamped at — see :func:`_stamp_frame`; freezes are stamped through the same
+    monotonic rule as everything else so a later freeze can never precede an
+    earlier one on the recording axis.
     """
 
     if not segments:
-        return
+        return None
     duration = max(segment.duration for segment in segments)
 
     if not hold_frame:
         await asyncio.sleep(duration)
-        return
+        return None
 
     real = min(settle, duration)
     await asyncio.sleep(real)
 
     remaining = duration - real
     if remaining <= 0:
-        return
-    edits.append(
-        TimeEdit(
-            at=seconds_to_frames(time.monotonic() - anchor),
-            kind="freeze",
-            frames=seconds_to_frames(remaining),
-        )
-    )
+        return None
+    at = _stamp_frame(anchor, not_before=not_before)
+    edits.append(TimeEdit(at=at, kind="freeze", frames=seconds_to_frames(remaining)))
+    return at
 
 
 def _build_timeline(edits: Iterable[TimeEdit], *, source_frames: int) -> Timeline:
@@ -551,12 +580,16 @@ def _build_timeline(edits: Iterable[TimeEdit], *, source_frames: int) -> Timelin
 
     ``Timeline`` is deliberately strict — it rejects two edits on one frame, and
     anything at or past the end of the recording — because those are nonsense as
-    a *model*. They are not nonsense as *observations*: the pacing loop stamps
-    ``at`` from the wall clock, so even a small legal ``holdFrameSettle`` (as low
-    as ``models.config.MIN_HOLD_FRAME_SETTLE``, two frames) can make consecutive
-    fast steps land on the same frame, and a freeze recorded near the end can
-    round past the 0.1s postroll. Both would otherwise blow up after the entire
+    a *model*. They are not nonsense as *observations*: a freeze recorded near
+    the end can round past the 0.1s postroll and land at or beyond the last
+    frame, and the clamp that pulls it back can then collide with a freeze
+    already sitting there. Either would otherwise blow up after the entire
     recording is finished, losing the render.
+
+    (``_stamp_frame`` now keeps freezes at least a frame apart as they are
+    emitted, so two *unclamped* freezes can no longer share a frame. The merge
+    still has to exist for the clamped case, and is kept general rather than
+    special-cased to it.)
 
     So the collected list is reconciled here, where the observations are:
 
@@ -1110,15 +1143,24 @@ async def run_render(
     await page.wait_for_timeout(100)
     anchor = time.monotonic()
 
-    sfx_events: list[tuple[str, float]] = []
+    # Audio placements are collected as recording-axis FRAMES, not seconds: the
+    # grid is what `Timeline` reasons on, and quantising once at the moment of
+    # observation is what lets `_stamp_frame` keep them monotonic against the
+    # freezes. Seconds reappear only at the very end, when the audio bed is built.
+    sfx_events: list[tuple[str, int]] = []
     # Freezes recorded while rendering, on the *recording* axis. Applied to the
     # video — and used to remap every audio offset — once the loop is done.
     time_edits: list[TimeEdit] = []
+    # Frame of the most recent freeze, or -1 before any. Read by `_stamp_frame`
+    # so nothing is ever stamped inside a hold that was already recorded.
+    last_freeze_frame = -1
 
     def sfx_sink(kind: str) -> None:
-        sfx_events.append((kind, time.monotonic()))
+        sfx_events.append((kind, _stamp_frame(anchor, not_before=last_freeze_frame + 1)))
 
-    placed_by_language: dict[str, list[Placed]] = {tts.lang: [] for tts in audio_configs}
+    placed_by_language: dict[str, list[tuple[Segment, int]]] = {
+        tts.lang: [] for tts in audio_configs
+    }
     popup: _PopupSession | None = None
     popup_open_at_end = False
 
@@ -1186,26 +1228,27 @@ async def run_render(
                 )
 
             step_segments: list[Segment] = []
-            # Raw wall clock: the mapping onto the finished film needs the
+            # Recording-axis frame: the mapping onto the finished film needs the
             # complete edit list, which does not exist until the loop ends.
-            narration_offset = time.monotonic() - anchor
+            narration_frame = _stamp_frame(anchor, not_before=last_freeze_frame + 1)
             for tts in audio_configs:
                 seg = segments[tts.lang].get(index)
                 if seg is not None:
-                    placed_by_language[tts.lang].append(
-                        Placed(segment=seg, offset=narration_offset)
-                    )
+                    placed_by_language[tts.lang].append((seg, narration_frame))
                     step_segments.append(seg)
             if step_segments:
                 # One picture timeline: the action waits for the longest language,
                 # while shorter tracks naturally contain silence before the action.
-                await _pace_narration(
+                emitted = await _pace_narration(
                     step_segments,
                     anchor=anchor,
                     hold_frame=cfg.hold_frame_for_narration,
                     settle=cfg.hold_frame_settle,
                     edits=time_edits,
+                    not_before=narration_frame,
                 )
+                if emitted is not None:
+                    last_freeze_frame = emitted
 
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
@@ -1341,17 +1384,16 @@ async def run_render(
         await asyncio.gather(*prime_tasks, return_exceptions=True)
         await context.close()
 
-    sfx_offsets: list[tuple[str, float]] = []
+    sfx_frames: list[tuple[str, int]] = []
     if cfg.sound.enabled:
-        for kind, t in sfx_events:
+        for kind, frame in sfx_events:
             if kind == "click" and not cfg.sound.click:
                 continue
             if kind == "key" and not cfg.sound.keys:
                 continue
-            off = t - anchor
-            if off < 0:
-                raise RenderError(f"ujemny offset SFX ({off}) — błąd zegara renderu")
-            sfx_offsets.append((kind, off))
+            if frame < 0:
+                raise RenderError(f"ujemna klatka SFX ({frame}) — błąd zegara renderu")
+            sfx_frames.append((kind, frame))
 
     main_webm = Path(await video.path())
     if popup is None:
@@ -1409,18 +1451,22 @@ async def run_render(
     # Taken from the model rather than probed, which is what makes the audio and
     # video axes agree by construction.
     total = timeline.virtual_duration
-    placed_by_language = {
+    # The one place frames become seconds: mapped on the grid, then converted.
+    placed_tracks = {
         lang: [
-            Placed(segment=p.segment, offset=timeline.to_virtual_seconds(p.offset)) for p in placed
+            Placed(segment=seg, offset=frames_to_seconds(timeline.to_virtual(frame)))
+            for seg, frame in placed
         ]
         for lang, placed in placed_by_language.items()
     }
-    sfx_offsets = [(kind, timeline.to_virtual_seconds(off)) for kind, off in sfx_offsets]
+    sfx_offsets = [
+        (kind, frames_to_seconds(timeline.to_virtual(frame))) for kind, frame in sfx_frames
+    ]
 
     await _assemble_audio_tracks(
         source_video,
         audio_configs,
-        placed_by_language,
+        placed_tracks,
         total,
         work,
         out_mp4,

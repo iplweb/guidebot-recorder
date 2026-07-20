@@ -2067,10 +2067,17 @@ def test_zero_settle_is_rejected_at_scenario_load(tmp_path) -> None:
 
     It used to be a legal config value: the pacing loop stamped several steps
     onto the same 25fps frame, and the strict `Timeline` rejected that — but
-    only after the whole recording had already completed. Worse, once that
-    crash was fixed, settle=0 silently rendered a film with narration offsets
-    collapsed onto shared timestamps (see `Config.hold_frame_settle`). The fix
-    is to reject it at config validation, before any recording happens.
+    only after the whole recording had already completed. Rejecting it at
+    config validation moves that failure to before any recording happens.
+
+    Note what this floor does NOT do, despite an earlier claim here: it does
+    not stop narration offsets from collapsing onto each other. Settle bounds
+    the distance from a step's start to its own freeze, not the distance from
+    that freeze to the NEXT step's stamp, which is where the collapse actually
+    occurred — and it occurred at the DEFAULT settle too. The guard against
+    that is monotonic stamping (`_stamp_frame`), asserted by
+    `test_hold_frame_narrations_never_overlap`. This floor stands on its own
+    footing: a sub-frame settle is not representable on the frame grid.
     """
     path = tmp_path / "zero-settle.scenario.yaml"
     path.write_text(
@@ -2095,6 +2102,30 @@ def test_zero_settle_is_rejected_at_scenario_load(tmp_path) -> None:
 
     with pytest.raises(ValidationError):
         load_scenario(path)
+
+
+@pytest.mark.parametrize("value", [0.0, -5.0])
+def test_hold_frame_settle_override_is_validated(value) -> None:
+    """The `--hold-frame-settle` override obeys the same floor as the config field.
+
+    `run_render` applies the CLI overrides by ASSIGNING onto the loaded
+    `Config`. Pydantic skips field constraints on assignment unless the model
+    opts in, so this path used to accept anything: `0` reproduced the very
+    sub-frame settle the field rejects, and a negative value made the held
+    frame LONGER than the narration (`remaining = duration - settle`), quietly
+    inflating the film past its own audio. `validate_assignment` closes it for
+    every field at once.
+    """
+    from guidebot_recorder.models.config import Config
+
+    cfg = Config(
+        title="T",
+        viewport={"width": 640, "height": 480},
+        tts={"provider": "fake", "voice": "v", "lang": "pl-PL"},
+    )
+    with pytest.raises(ValidationError):
+        cfg.hold_frame_settle = value
+    assert cfg.hold_frame_settle == 1.0
 
 
 async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
@@ -2163,6 +2194,81 @@ async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
     # the shape that used to lose a frame in the concat stage — see
     # `test_closely_spaced_freezes_stay_frame_exact`. Two steps did not reach it.
     assert len(timeline.edits) >= 3
+
+
+class TwoSecondTts(FakeTts):
+    duration = 2.0
+
+
+async def test_hold_frame_narrations_never_overlap(tmp_path, monkeypatch):
+    """Consecutive narrations are PLACED in sequence, not merely summed to length.
+
+    Every other hold-frame guard compares LENGTHS — `probe_frame_count ==
+    virtual_frames`, the mux duration tolerance, the narration-overrun check.
+    All of them pass while narration offsets silently collapse onto each other,
+    because a collapsed offset does not change how long the film is.
+
+    This asserts PLACEMENT: with eight consecutive `say` steps at the DEFAULT
+    settle, each narration must start no earlier than the end of the one before
+    it. It fails when a step's raw wall-clock stamp rounds onto the same 25fps
+    frame as the previous step's freeze, since `Timeline.to_virtual` shifts a
+    stamp only when a freeze sits STRICTLY before it — so such a stamp maps to
+    the START of the hold and plays on top of the previous voice-over.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "no-overlap.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Bez nakladek
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              holdFrameForNarration: true
+            steps:
+              - say: "Pierwszy."
+              - say: "Drugi."
+              - say: "Trzeci."
+              - say: "Czwarty."
+              - say: "Piaty."
+              - say: "Szosty."
+              - say: "Siodmy."
+              - say: "Osmy."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    # The offsets actually handed to the audio bed, captured at the boundary
+    # where the frame axis becomes seconds.
+    captured: list[list[Placed]] = []
+    original = R._assemble_audio_tracks
+
+    async def spy(video, configs, placed_by_language, total, *args, **kwargs):
+        captured.extend(placed_by_language.values())
+        return await original(video, configs, placed_by_language, total, *args, **kwargs)
+
+    monkeypatch.setattr(R, "_assemble_audio_tracks", spy)
+
+    out = tmp_path / "out.mp4"
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+        await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert captured, "no narration was placed"
+    for placed in captured:
+        offsets = [round(p.offset, 3) for p in placed]
+        gaps = [round(b - a, 3) for a, b in zip(offsets, offsets[1:], strict=False)]
+        for index, (gap, previous) in enumerate(zip(gaps, placed, strict=False)):
+            assert gap >= previous.segment.duration - 1e-6, (
+                f"narration {index + 1} starts {previous.segment.duration - gap:.2f}s "
+                f"before narration {index} ends — offsets={offsets} gaps={gaps}"
+            )
 
 
 def test_build_timeline_merges_two_freezes_on_the_same_frame() -> None:
