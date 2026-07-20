@@ -118,6 +118,24 @@ def heuristic_expect(url_before: str, url_after: str) -> Expect:
     return "navigation" if url_before != url_after else "none"
 
 
+def _relaxed_exact(target: Target) -> Target | None:
+    """A copy of a name-based target with exact matching relaxed, or ``None``.
+
+    guidebot's accessible-name computation (``collect_candidates``) and
+    Playwright's ``get_by_*`` matcher can disagree by insignificant whitespace —
+    a decorative icon that is not ``aria-hidden`` leaves a leading space, a
+    required-field asterisk is spaced differently — so an exact name the reasoner
+    copied verbatim from a candidate can match nothing under Playwright. Relaxing
+    ``exact`` lets the caller retry; the retry is accepted only when it still
+    resolves *uniquely*, so nothing is loosened silently. Only role/text/label
+    carry ``exact``; a test-id target has nothing to relax and yields ``None``.
+    """
+
+    if getattr(target, "exact", False) is True:
+        return target.model_copy(update={"exact": False})
+    return None
+
+
 async def resolve_step_target(
     root: Page | Frame,
     step: Step,
@@ -161,9 +179,20 @@ async def resolve_step_target(
                 continue
 
         resolution_error = None
-        validation = await validate_compile_time(root, result.target, action)
+        target = result.target
+        validation = await validate_compile_time(root, target, action)
         if not isinstance(validation, ValidationOk):
-            continue
+            # An exact name the reasoner copied from a candidate can miss under
+            # Playwright's matcher over insignificant whitespace. Retry once with
+            # exact matching relaxed, accepting it only if it still resolves
+            # uniquely; persist the relaxed target so render agrees with compile.
+            relaxed = _relaxed_exact(target)
+            if relaxed is not None:
+                relaxed_validation = await validate_compile_time(root, relaxed, action)
+                if isinstance(relaxed_validation, ValidationOk):
+                    target, validation = relaxed, relaxed_validation
+            if not isinstance(validation, ValidationOk):
+                continue
         if infers_text and await is_sensitive_type_target(validation.locator):
             resolution_error = (
                 "pole wygląda na przeznaczone dla wartości wrażliwej; użyj enterText z ENV"
@@ -179,7 +208,7 @@ async def resolve_step_target(
         )
         return ResolvedTarget(
             action=action,
-            target=result.target,
+            target=target,
             locator=validation.locator,
             input_text=input_text,
             state=state,
