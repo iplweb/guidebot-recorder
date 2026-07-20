@@ -22,8 +22,15 @@ CONFIG_HASH_VERSION = 2
 # A settle below one frame is not representable on that grid at all: the
 # renderer would claim to record real time it cannot place, and a zero settle
 # means the picture stops before the step's own entry animation has drawn a
-# single frame of itself. Two frames is the smallest value that leaves the
-# hold something to hold.
+# single frame of itself. That argument only requires a ONE-frame floor —
+# settle = 1/25 has been verified to render correctly (the freeze lands at
+# narr + 1, and `video.timeline._segments` folds it into a run of two frames
+# or more; nothing breaks). The second frame here is a deliberate, extra
+# margin, not something the one-frame argument above demands on its own —
+# kept because "smallest value that still works today" and "smallest value
+# that will keep working as the renderer changes" are different bars, and the
+# cost of the margin is one settle-frame of narration, not one video-frame of
+# render time.
 #
 # This bound is NOT what keeps narration offsets from colliding. That was the
 # original (mistaken) rationale: settle separates a step's start from its own

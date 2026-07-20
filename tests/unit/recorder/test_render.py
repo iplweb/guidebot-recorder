@@ -2271,6 +2271,106 @@ async def test_hold_frame_narrations_never_overlap(tmp_path, monkeypatch):
             )
 
 
+async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypatch):
+    """A sound effect stamped right after a freeze must land AFTER it, not inside it.
+
+    `test_hold_frame_narrations_never_overlap` proves the narration clamp
+    (`not_before=narration_frame` on the NEXT step's own narration stamp); it
+    never looks at SFX. `sfx_sink` (render.py, the `on_sfx` closure passed to
+    `Recorder`) carries the exact same `not_before=last_freeze_frame + 1`
+    clamp, but nothing previously asserted it does anything — the render
+    could clamp narration and NOT sound effects and the whole suite would
+    stay green, since `test_render_with_sound_collects_and_mixes_sfx` only
+    checks the events list is non-empty, never an offset.
+
+    In an ordinary scenario this rarely matters: a click's cursor glide
+    (`cursor.min_duration`, default 320ms) and its settle pause (`cursor.
+    settle`, default 280ms) put well over a frame of real time between a
+    freeze and the click that follows it, so the raw wall-clock stamp is
+    already past the freeze without any help from the clamp. This scenario
+    removes that margin on purpose: the first `click` parks the cursor
+    exactly on the button, so the second `click` — the one carried by the
+    narrated step, right after its freeze — glides ZERO pixels. With
+    `minDuration: 0` that is an instant, zero-duration move, leaving only a
+    couple of CDP round-trips between the freeze being stamped and the click's
+    `on_sfx("click")` firing — the same margin `_stamp_frame`'s own docstring
+    says a raw stamp can lose to.
+
+    Without the clamp, that click's raw stamp can land ON the freeze's own
+    frame, which `Timeline.to_virtual` maps to the START of the hold — right
+    where the narration begins, roughly `hold_frame_settle` seconds into a
+    2-second narration, not at its end. With the clamp it lands one frame
+    past the freeze, which `to_virtual` maps at or after the END of the hold,
+    i.e. at or after the end of the narration it was clamped against.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "sfx-clamp.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: SFX kontra zamrozenie
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              sound: {enabled: true, click: true, keys: true, volume: -12}
+              cursor: {minDuration: 0, settle: 0}
+              holdFrameForNarration: true
+            steps:
+              - navigate: "data:text/html,<button>Zaloguj</button>"
+              - click: "Zaloguj"
+              - click: "Zaloguj"
+                say: "Kliknij ponownie, aby przejsc dalej."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    narrations: list[list[Placed]] = []
+    original_assemble = R._assemble_audio_tracks
+
+    async def spy_assemble(video, configs, placed_by_language, total, *args, **kwargs):
+        narrations.extend(placed_by_language.values())
+        return await original_assemble(video, configs, placed_by_language, total, *args, **kwargs)
+
+    monkeypatch.setattr(R, "_assemble_audio_tracks", spy_assemble)
+
+    sfx_events: list[list[tuple[str, float]]] = []
+    original_build_sfx_bed = R.build_sfx_bed
+
+    def spy_build_sfx_bed(events, *args, **kwargs):
+        sfx_events.append(list(events))
+        return original_build_sfx_bed(events, *args, **kwargs)
+
+    monkeypatch.setattr(R, "build_sfx_bed", spy_build_sfx_bed)
+
+    out = tmp_path / "out.mp4"
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner())
+        await page.context.close()
+        await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert sfx_events, "build_sfx_bed was never called"
+    clicks = [offset for kind, offset in sfx_events[0] if kind == "click"]
+    assert len(clicks) == 2, f"expected two clicks, got {clicks}"
+    # clicks[0] is the first (unnarrated) click; clicks[1] is the one carried
+    # by the narrated step, stamped right after that step's freeze.
+    narrated_click = clicks[1]
+
+    placed = [p for lang_placed in narrations for p in lang_placed]
+    assert placed, "no narration was placed"
+    narration = placed[0]
+    narration_end = narration.offset + narration.segment.duration
+
+    assert narrated_click >= narration_end - 1e-6, (
+        f"click landed {narration_end - narrated_click:.3f}s inside the hold "
+        f"(click={narrated_click}, narration ends at {narration_end})"
+    )
+
+
 def test_build_timeline_merges_two_freezes_on_the_same_frame() -> None:
     # Two edits landing on the same frame index both want the picture held
     # there, so the film holds it for the total of both. `_build_timeline`

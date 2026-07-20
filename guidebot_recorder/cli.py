@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 from playwright.async_api import async_playwright
+from pydantic import ValidationError
 
 from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
@@ -179,6 +180,19 @@ def render_cmd(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # `run_render` applies this override by ASSIGNING onto its own reloaded
+    # Config (see the comment above), which is exactly the same
+    # `validate_assignment` path exercised here — so a value the field
+    # rejects (e.g. `--hold-frame-settle 0`) is caught NOW, before the browser
+    # ever launches, instead of surfacing as an unhandled ValidationError deep
+    # inside `_run()` after Chromium is already up.
+    if hold_frame_settle is not None:
+        try:
+            cfg.hold_frame_settle = hold_frame_settle
+        except ValidationError as exc:
+            typer.echo(f"BŁĄD: nieprawidłowa wartość --hold-frame-settle: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     async def _run() -> None:
         async with async_playwright() as pw:

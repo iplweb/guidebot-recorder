@@ -705,9 +705,14 @@ def test_hold_frame_accepts_camel_case_aliases() -> None:
 def test_hold_frame_settle_rejects_below_the_two_frame_floor(settle: float) -> None:
     """Both negative and sub-frame settle values must be rejected at load time.
 
-    Negative values are nonsensical; sub-frame values silently collapse
-    narration placement (they round onto the same 25fps frame as the
-    previous step's freeze).
+    Negative values are nonsensical; sub-frame values are not representable on
+    the renderer's 25fps grid at all (see `MIN_HOLD_FRAME_SETTLE`'s comment).
+
+    This is NOT what stops narration from colliding with the previous step's
+    freeze — that guard is monotonic stamping in `recorder.render._stamp_frame`,
+    which applies at every settle value, including this floor. Settle only
+    separates a step's own start from its own freeze; the distance from that
+    freeze to the NEXT step's stamp is unrelated to it.
     """
     with pytest.raises(ValidationError):
         Config.model_validate(
