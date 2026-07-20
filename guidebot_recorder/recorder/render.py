@@ -45,7 +45,13 @@ from guidebot_recorder.models.action import (
     PendingAction,
 )
 from guidebot_recorder.models.compiled import CompiledAction
-from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
+from guidebot_recorder.models.config import (
+    ChromeConfig,
+    SoundConfig,
+    TtsConfig,
+    Viewport,
+    config_hash,
+)
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
@@ -75,6 +81,7 @@ from guidebot_recorder.tts.base import (
 )
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
+    FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
@@ -145,6 +152,30 @@ class _PopupSession:
     :attr:`Overlay.pos` is shared by every page, so centring the cursor in the
     popup overwrites the opener's. Restored on close.
     """
+    is_blank_tab: bool = False
+    """Whether this window is a real browser tab rather than a popup window.
+
+    True when the opener never called ``window.open`` at all — the
+    ``target="_blank"`` case. Decided at furnishing time via
+    :func:`_popup_window_opened`, because the crop chain's verdict does not
+    exist until the recording is over.
+
+    Do **not** substitute ``popup_crop is None`` for this. That is a weaker
+    signal: a *featureless* ``window.open`` whose page paints a full-bleed
+    background also declines every crop level, and it is a genuine floating
+    window that must keep the ``float`` presentation (pinned by
+    ``test_full_bleed_featureless_popup_renders_uncropped``).
+    """
+    wants_bar: bool = False
+    """Whether this window shows the legacy in-DOM address bar.
+
+    True only for a real ``target="_blank"`` tab — a browser tab with no address
+    bar reads as a rendering fault. Every other popup stays bare and is framed by
+    the compositor instead. Decided at open time from
+    :func:`_popup_window_opened`, because the crop chain's verdict does not exist
+    until the recording is over, and the bar is painted DOM that would corrupt
+    crop levels 2 and 3.
+    """
     window_size: tuple[int, int] | None = None
     """The popup's real window size in CSS px, or ``None`` when unknown.
 
@@ -191,6 +222,13 @@ class _PopupSession:
 # :func:`_recording_scale` for the conversion and for why headed renders differ.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
+# Set unconditionally the moment ``window.open`` runs, features or not. This is
+# what tells a real ``target="_blank"`` tab (no call at all) apart from a
+# featureless ``window.open(url, name)`` (a call that leaves ``KEY`` at
+# ``null``, exactly like never having been called) — a distinction
+# ``_POPUP_REQUEST_KEY`` alone cannot make. See ``_popup_window_opened``.
+_POPUP_OPENED_KEY = "__guidebot_popup_opened"
+
 # How long the opener's frames get to answer the geometry probe. They read a
 # value the page already wrote synchronously, so a healthy frame answers in
 # milliseconds; the budget exists purely to survive frames that can never
@@ -205,10 +243,12 @@ _POPUP_REQUEST_HARD_TIMEOUT = 5.0
 _POPUP_REQUEST_SCRIPT = f"""
 (() => {{
   const KEY = "{_POPUP_REQUEST_KEY}";
+  const OPENED = "{_POPUP_OPENED_KEY}";
   if (Object.prototype.hasOwnProperty.call(window, KEY)) return;
   const native = window.open;
   if (typeof native !== "function") return;
   window[KEY] = null;
+  window[OPENED] = false;
   // Captured before chrome.js shadows ``top`` (frame-bust neutralization), so
   // this is the *real* top document even from inside the shell's site iframe.
   // Publishing the record there lets the Python side read one frame instead of
@@ -229,6 +269,10 @@ _POPUP_REQUEST_SCRIPT = f"""
     return {{ width: Math.round(width), height: Math.round(height) }};
   }};
   window.open = function (...args) {{
+    window[OPENED] = true;
+    try {{
+      if (realTop && realTop !== window) realTop[OPENED] = true;
+    }} catch (e) {{}}
     const requested = parse(args[2]);
     if (requested) {{
       window[KEY] = requested;
@@ -267,6 +311,10 @@ def _discard_pending(task: asyncio.Future) -> None:
     """
 
     if task.done():
+        # Already settled, so there is nothing to cancel — but a probe that
+        # raised and was never read is orphaned just the same. Read it.
+        if not task.cancelled():
+            task.exception()
         return
     task.cancel()
     task.add_done_callback(lambda done: done.cancelled() or done.exception())
@@ -284,30 +332,59 @@ async def _frame_window_request(frame: Frame) -> tuple[int, int] | None:
 
 
 async def _scan_frames_for_window_request(opener: Page) -> tuple[int, int] | None:
-    """Ask every frame for its record *concurrently*, then take the best answer.
+    """Ask every frame for its record *concurrently* and return the first answer.
 
     Concurrency is the point, not an optimisation. ``Frame.evaluate`` accepts no
     timeout, and an ad-heavy page routinely carries iframes whose document never
     commits an execution context — evaluating on one of those never returns.
     Asking the frames one after another therefore lets a single dead ad iframe
-    block the render forever (and it did). Asking them all at once means a dead
-    frame costs only the frames that answer nothing, and the opener still gets
-    to report its geometry within the budget.
+    block the render forever (and it did).
 
-    Frames are preferred newest-first, with the top document first of all: the
-    init script republishes each record on the real top document, so the top
-    frame holds the answer whenever it is same-origin with the opener frame.
+    Asking them all at once is only half the fix, though: waiting for *all* the
+    probes means a dead frame still costs the whole
+    ``_POPUP_REQUEST_LOOKUP_TIMEOUT`` even when a healthy frame answered in
+    milliseconds — and because this runs on every popup open, that budget shows
+    up in the finished film as a dead pause on the popup. So the scan settles
+    the moment it has a usable answer and abandons the rest. The budget survives
+    unchanged as what it was always meant to be: the ceiling for the case where
+    *nobody* ever answers, after which the caller falls back to the content
+    bounding box (and then to cropdetect).
+
+    Which answer wins when several frames have one: the probes are examined in a
+    fixed priority order — the top document first, then the remaining frames
+    newest-first — and the highest-priority *already-settled* answer is taken.
+    That is safe because the answers are not really independent. The init script
+    republishes every record on the real top document, so a same-origin page has
+    one record read back from several places; a cross-origin opener frame that
+    could not republish is instead the only frame holding one, and the top
+    answers ``None``. Genuinely conflicting records would need two frames to
+    each call ``window.open`` with different sizes before this runs, and the
+    scan runs immediately after the popup opens — newest-first is then exactly
+    the record that opened it. Worst case the crop rect is one popup stale,
+    which the downstream fallbacks already tolerate.
     """
 
     top = opener.main_frame
     frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
     tasks = [asyncio.ensure_future(_frame_window_request(frame)) for frame in frames]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _POPUP_REQUEST_LOOKUP_TIMEOUT
     try:
-        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
-        for task in tasks:
-            if task.done() and not task.cancelled() and task.exception() is None:
-                if (size := task.result()) is not None:
-                    return size
+        pending = set(tasks)
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            # Wake on every settled probe rather than on the slowest one. A
+            # frame that raises simply settles without an answer: it retires
+            # from ``pending`` and the others carry on.
+            _, pending = await asyncio.wait(
+                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in tasks:
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    if (size := task.result()) is not None:
+                        return size
         return None
     finally:
         for task in tasks:
@@ -344,6 +421,110 @@ async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
             file=sys.stderr,
         )
     return size
+
+
+async def _frame_window_opened(frame: Frame) -> bool | None:
+    """Read one frame's "was window.open called" flag, or ``None`` if it cannot answer."""
+
+    try:
+        return bool(await frame.evaluate(f"() => window.{_POPUP_OPENED_KEY} === true"))
+    except PlaywrightError:
+        # The frame navigated away, detached, or never ran the init script.
+        return None
+
+
+async def _scan_frames_for_window_opened(opener: Page) -> bool | None:
+    """Ask every frame, concurrently, whether it recorded a ``window.open`` call.
+
+    Mirrors ``_scan_frames_for_window_request``: the ``OPENED`` flag is mirrored
+    to the real top document only as a same-origin optimisation (see
+    ``_POPUP_REQUEST_SCRIPT``), so a call made from a genuinely cross-origin
+    frame — routine for the shell's site iframe — never reaches that mirror,
+    and the top frame alone cannot be trusted to answer. Every frame is asked
+    directly instead, concurrently and for the same reason as the geometry
+    scan: a dead ad iframe whose document never commits an execution context
+    must not block the others, or the render, forever.
+
+    Returns ``True`` the moment any frame reports the flag set, ``False`` if
+    every frame answered and none did, or ``None`` if no frame could answer at
+    all (the opener navigated away or died) — callers must treat ``None`` as
+    unknown, not as "no popup".
+    """
+
+    top = opener.main_frame
+    frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
+    tasks = [asyncio.ensure_future(_frame_window_opened(frame)) for frame in frames]
+    try:
+        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
+        answered = False
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                result = task.result()
+                if result is True:
+                    return True
+                if result is False:
+                    answered = True
+        return False if answered else None
+    finally:
+        for task in tasks:
+            _discard_pending(task)
+
+
+async def _popup_window_opened(page: Page) -> bool:
+    """Whether this document called ``window.open`` at all, features or not.
+
+    ``_popup_window_request`` answers "what geometry did the site ask for", and
+    returns ``None`` both for a featureless ``window.open(url, name)`` and for a
+    window this document never opened. Only the second is a ``target="_blank"``
+    tab, and telling them apart is possible *while the popup is alive* — unlike
+    the crop chain, whose verdict arrives after the recording is finished.
+
+    Read per frame, not just the top document: the init script's mirror onto
+    the real top document (``realTop[OPENED] = true``) is only a same-origin
+    optimisation — it throws and is swallowed for a genuinely cross-origin
+    frame, which is routine for the shell's site iframe. Reading only the top
+    frame therefore misses exactly that call and misreports a real popup as a
+    ``target="_blank"`` tab. ``_scan_frames_for_window_opened`` asks every
+    frame instead, exactly as ``_popup_window_request`` already does for the
+    geometry record.
+
+    Bounded twice over, exactly like ``_popup_window_request``: this runs at
+    the same worst possible moment — right after a popup opens, while the
+    opener is at its busiest — and a render that hangs here is just as
+    unrecoverable. An unknown answer is by contrast harmless: it means
+    "assume a popup", i.e. the fail-safe direction that never mounts an
+    address bar on uncertainty. So the lookup always terminates, and says so
+    when it gives up.
+    """
+
+    def _assume_opened() -> bool:
+        tqdm.write(
+            "OSTRZEŻENIE: żadna ramka strony otwierającej nie potwierdziła wywołania "
+            "window.open() — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
+
+    lookup = asyncio.ensure_future(_scan_frames_for_window_opened(page))
+    try:
+        opened = await asyncio.wait_for(asyncio.shield(lookup), _POPUP_REQUEST_HARD_TIMEOUT)
+    except TimeoutError:
+        # ``shield`` means the timeout does not itself cancel the lookup, so it
+        # is still ours to dispose of cleanly.
+        _discard_pending(lookup)
+        tqdm.write(
+            "OSTRZEŻENIE: sprawdzenie wywołania window.open() nie zakończyło się w "
+            f"{_POPUP_REQUEST_HARD_TIMEOUT:g}s — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
+    except PlaywrightError:
+        # An opener that navigated or died reports nothing; treat it as "unknown",
+        # which keeps today's bare-popup behaviour rather than mounting a bar.
+        return _assume_opened()
+    if opened is None:
+        return _assume_opened()
+    return opened
 
 
 #: A content bounding box at least this fraction of the viewport in *both*
@@ -730,6 +911,31 @@ def _resolve_popup_crop(
         return crop, "bbox"
     _log_popup_crop("cropdetect", measured, verbose)
     return (measured, "cropdetect") if measured is not None else (None, "none")
+
+
+def _popup_fills_canvas(popup_crop: tuple[int, int, int, int] | None, viewport: Viewport) -> bool:
+    """Whether the popup window occupies the entire recording canvas.
+
+    ``None`` is the ``_blank`` tab case: every crop level declined, so no witness
+    could name a window smaller than the recording. An explicit rect covering the
+    canvas at the origin says the same thing positively — a ``window.open`` that
+    asked for the full viewport.
+
+    The distinction matters because ``float`` insets the popup at
+    :attr:`PopupConfig.scale`; applied to a full viewport that reads as a shrunken
+    clone of the page rather than as a separate window.
+
+    ``viewport`` here is *not* CSS pixels despite the name: ``cfg.viewport``'s
+    width/height are passed verbatim as ``record_video_size`` when the browser
+    context is created (see ``render.py`` around the ``browser.new_context`` call),
+    so it already is the canvas measured in recording pixels — the same unit
+    ``popup_crop`` is in. No CSS-to-recording-pixel conversion belongs here.
+    """
+
+    if popup_crop is None:
+        return True
+    width, height, x, y = popup_crop
+    return (x, y) == (0, 0) and (width, height) == (viewport.width, viewport.height)
 
 
 @dataclass(slots=True)
@@ -1395,6 +1601,7 @@ async def _assemble_audio_tracks(
     preencoded: bool = False,
     sound: SoundConfig | None = None,
     sfx_offsets: list[tuple[str, float]] | None = None,
+    fade: FadeSpec | None = None,
 ) -> None:
     """Stage a complete bed set, mux atomically, then publish durable WAVs.
 
@@ -1434,6 +1641,7 @@ async def _assemble_audio_tracks(
             staged_mp4,
             preencoded=preencoded,
             video_duration=total,
+            fade=fade,
         )
         _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
 
@@ -2009,10 +2217,16 @@ async def run_render(
                     active_page,
                     overlay,
                     chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                 )
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
+            if kind == "closeWindow" and popup is None:
+                raise RenderError(f"krok {index}: closeWindow bez otwartego okna")
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
             recorder = Recorder(
@@ -2039,7 +2253,11 @@ async def run_render(
                     anchor,
                     observed_pages,
                     _ensure_card,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                     resolved=resolved,
                     optional=optional,
                     scenario_hash=scenario_hash,
@@ -2048,11 +2266,14 @@ async def run_render(
                 if opened is not None:
                     popup = opened
                     popup.page.set_default_timeout(timeout * 1000)
+                    popup.is_blank_tab = not await _popup_window_opened(page)
+                    popup.wants_bar = chrome is not None and popup.is_blank_tab
                     prepared = await _prepare_popup(
                         popup.page,
                         overlay,
                         chrome,
-                        expect_chrome=_expect_chrome(chrome, bare_popups),
+                        expect_chrome=_expect_chrome(chrome, bare_popups) or popup.wants_bar,
+                        mount_bar=popup.wants_bar,
                     )
                     _sync_popup_close(popup, observed_pages, anchor)
                     if not prepared:
@@ -2167,6 +2388,23 @@ async def run_render(
             viewport=popup.viewport,
             canvas=(cfg.viewport.width, cfg.viewport.height),
         )
+        # A real browser TAB that fills the canvas is not a floating popup:
+        # `slide` is the full-frame presentation by design and ignores
+        # `popup_crop`, while `float` would inset a whole viewport and read as a
+        # shrunken clone of the page. Gated on `is_blank_tab`, not on the crop
+        # alone — a featureless `window.open` painting a full-bleed background
+        # also declines every crop level, yet is a genuine floating window that
+        # must keep `float`. Only `float` is overridden: an author who asked for
+        # `cut` gets the hard cut they asked for.
+        transition = cfg.popup.effective_transition
+        if (
+            transition == "float"
+            and popup.is_blank_tab
+            and _popup_fills_canvas(popup_crop, cfg.viewport)
+        ):
+            transition = "slide"
+            if verbose:
+                tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
         closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
         assert closed_at is not None
         composite = work / f"{out_mp4.stem}.composite.mp4"
@@ -2177,7 +2415,7 @@ async def run_render(
             popup.opened_at,
             closed_at,
             visual_ready_delay=popup.visual_ready_delay,
-            transition=cfg.popup.effective_transition,
+            transition=transition,
             slide_ms=cfg.popup.slide_ms,
             scale=cfg.popup.scale,
             corner_radius=cfg.popup.corner_radius,
@@ -2231,6 +2469,16 @@ async def run_render(
         preencoded=preencoded,
         sound=cfg.sound,
         sfx_offsets=sfx_offsets,
+        fade=(
+            FadeSpec(
+                fade_in=cfg.fade.fade_in,
+                fade_out=cfg.fade.fade_out,
+                color=cfg.fade.color,
+                audio=cfg.fade.audio,
+            )
+            if cfg.fade.enabled
+            else None
+        ),
     )
 
 
@@ -2297,6 +2545,13 @@ async def _render_step(
             if remaining <= 0:
                 return None
             await asyncio.sleep(min(0.1, remaining))
+    if kind == "closeWindow":
+        # The loop's popup-lifecycle check sees the closed page next and runs
+        # `_prepare_main_after_popup_close` with the saved cursor position. Do not
+        # duplicate that here: calling the funnel without `restore_cursor_to`
+        # leaves the main window's cursor at the popup's centre.
+        await page.close()
+        return None
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()
@@ -2472,12 +2727,17 @@ async def _prepare_popup(
     chrome: Chrome | None,
     *,
     expect_chrome: bool | None = None,
+    mount_bar: bool = False,
 ) -> bool:
     """Prepare a new page; translate close races into lifecycle state.
 
     ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
     bare (floating) popup so the chrome bar is not mounted on it (the cursor is
     still ensured).
+
+    ``mount_bar`` forces the legacy bar onto this one page even when the
+    context-wide script is bare — a real ``target="_blank"`` tab is a browser
+    tab and reads as a rendering fault without an address bar.
     """
 
     if expect_chrome is None:
@@ -2488,7 +2748,9 @@ async def _prepare_popup(
         await page.bring_to_front()
         await page.wait_for_load_state()
         await overlay.ensure(page)
-        if chrome is not None and expect_chrome:
+        if chrome is not None and mount_bar:
+            await chrome.install_bar(page)
+        elif chrome is not None and expect_chrome:
             await chrome.ensure(page)
     except PlaywrightError:
         if page.is_closed():

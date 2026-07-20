@@ -1,0 +1,59 @@
+# Nowe okno — otwarcie strony w osobnym oknie i powrót przez `closeWindow`.
+#
+# Guidebot nie otwiera okna sam: nowe okno powstaje wyłącznie wtedy, gdy
+# kliknięcie na stronie je otworzy (`window.open` albo link `target="_blank"`).
+# Dlatego przykład niesie własną stronę-wyzwalacz `launcher.html` z prawdziwym
+# linkiem `target="_blank"` do lokalnej „skrzynki" `inbox.html`. To ten sam
+# mechanizm, którego użyjesz na dowolnej realnej stronie mającej taki link.
+#
+# ┌─ URUCHOMIENIE ──────────────────────────────────────────────────────────┐
+# │ Ustaw `baseUrl` niżej na BEZWZGLĘDNĄ ścieżkę do TEGO katalogu na Twojej   │
+# │ maszynie (Guidebot nie rozwiązuje ścieżek względem pliku scenariusza).   │
+# │ Wskaż katalog, nie plik, i zostaw końcowy ukośnik. Przykład:             │
+# │   baseUrl: "file:///Users/ty/guidebot-recorder/examples/newwindow/"      │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+#   uv run guidebot validate examples/newwindow/newwindow.scenario.yaml
+#   uv run guidebot compile  examples/newwindow/newwindow.scenario.yaml   # faza AI (Codex CLI)
+#   uv run guidebot render   examples/newwindow/newwindow.scenario.yaml --out out/newwindow.mp4
+#
+# Uwagi:
+# - NIE dodawaj `rel="noopener"` do linku w launcher.html: zeruje ono opener()
+#   nowego okna, po którym Guidebot rozpoznaje otwarcie — kliknięcie zostałoby
+#   zapisane jako nieotwierające okna i `closeWindow` zgłosiłby brak okna.
+# - Strony, które przy otwarciu długo przekierowują (np. na ekran logowania),
+#   bywają zawodne: nowe okno musi pojawić się w krótkim oknie obserwacji
+#   kliknięcia. Lokalny fixture pojawia się natychmiast i jest deterministyczny.
+config:
+  title: Praca w dwóch oknach
+  # ↓↓↓ USTAW NA SWÓJ CHECKOUT (katalog tego przykładu, z końcowym ukośnikiem) ↓↓↓
+  baseUrl: "file:///ŚCIEŻKA/DO/guidebot-recorder/examples/newwindow/"
+  viewport: {width: 1376, height: 800}
+  locale: pl-PL
+  tts: {provider: edge, voice: pl-PL-MarekNeural, lang: pl-PL}
+  chrome:
+    enabled: true
+    showUrl: true
+    typeOnNavigate: true
+steps:
+  - slide:
+      title: Praca w dwóch oknach
+      subtitle: Strona i skrzynka obok siebie
+      notes: Materiał szkoleniowy
+    say: Witaj. Pokażę, jak przeskoczyć do poczty w osobnym oknie.
+
+  - say: Zaczynamy od wyszukiwarki Google.
+  - navigate: https://www.google.com
+
+  - say: Teraz przechodzimy do strony, z której otworzymy pocztę.
+  - navigate: launcher.html
+
+  - teach: Klikamy przycisk Otwórz pocztę, który otwiera skrzynkę w nowym oknie
+  - say: Skrzynka otworzyła się w osobnym oknie i to w nim teraz jesteśmy.
+
+  - closeWindow: true
+  - say: Zamknęliśmy okno skrzynki i wróciliśmy do poprzedniego.
+
+  - slide:
+      title: Dziękujemy
+      hold: 3.0

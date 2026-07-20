@@ -254,6 +254,33 @@ biały start.
 
 Plansza powstaje z `config.title` oraz `intro.subtitle` i `intro.notes`.
 
+### `fade`
+
+Render-only, płynne wejście i wyjście gotowego filmu. Wyłączone domyślnie: włączenie
+wymusza przekodowanie obrazu w finalnym muksie (filtra nie da się nałożyć na
+kopiowany strumień), więc scenariusz, który o fade nie prosi, daje bajt w bajt to
+samo wyjście co dotąd.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `enabled` | `false` | Włącza fade. |
+| `in` | `0.6` | Sekundy wejścia z koloru na starcie. |
+| `out` | `0.8` | Sekundy wyjścia w kolor na końcu. |
+| `color` | `black` | Kolor, z/do którego przechodzi obraz (nazwa lub `0xRRGGBB`). |
+| `audio` | `true` | Ścisza też lektora równolegle z obrazem. |
+
+`in` i `out` mogą być zerem — wtedy dana strona filmu nie ma przejścia. Suma obu nie
+może przekroczyć długości filmu. Nie wchodzi do `config_hash`, więc włączenie
+lub zmiana fade nie wymaga ponownego `compile`.
+
+```yaml
+config:
+  fade:
+    enabled: true
+    in: 0.6
+    out: 1.0
+```
+
 ### `holdFrameForNarration` i `holdFrameSettle`
 
 Sterowanie tempem renderu, wyłącznie podczas renderu, **domyślnie włączone**, i —
@@ -275,15 +302,15 @@ nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `wait` i `slide`. `say` może być jedyną treścią kroku albo towarzyszyć
-jednej akcji. Pusty krok i dwie akcje główne są błędem.
+`enterText`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
+towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
 blokiem `when` zamiast kroku — patrz [Gałęzie opcjonalne](#galezie-opcjonalne).
 
 Narracją domyślną jest `say`, a gdy go nie ma — `teach`. Same `click`, `hover`,
-`enterText`, `navigate`, `wait` i `slide` nie są czytane — tekst planszy `slide` jest
-wyświetlany, nie wypowiadany.
+`enterText`, `navigate`, `wait`, `slide` i `closeWindow` nie są czytane — tekst planszy
+`slide` jest wyświetlany, nie wypowiadany.
 
 ### `say`
 
@@ -382,8 +409,31 @@ planszę *po* wypowiedzi, dodaj drugą, cichą planszę `slide` (ten sam tekst, 
 bez `say`).
 
 Dodanie, usunięcie lub zmiana kolejności kroku `slide` zmienia liczbę kroków, więc
-jako jedyny rodzaj kroku **wymaga `guidebot compile`**; render sprawdza liczbę
-kroków przed startem i kończy się błędem przy nieaktualnym sidecarze.
+**wymaga `guidebot compile`**; render sprawdza liczbę kroków przed startem i kończy się
+błędem przy nieaktualnym sidecarze. To samo dotyczy `closeWindow` (patrz niżej).
+
+### `closeWindow`
+
+```yaml
+- teach: "Klikamy odnośnik, który otwiera się w nowej karcie"
+- say: "Przeczytaliśmy zawartość, wracamy."
+- closeWindow: true
+```
+
+Zamyka **aktywne** okno i wraca do tego, które je otworzyło. Przyjmuje wyłącznie
+wartość `true`; `closeWindow: false` jest błędem walidacji, nie cichym brakiem
+działania. Bez otwartego okna krok kończy się błędem.
+
+Nowe okno powstaje samo, gdy kliknięcie na stronie je otworzy — przez `window.open`
+albo link `target="_blank"`. Guidebot rozpoznaje je po `opener()`, więc link
+z `rel="noopener"` (który zeruje `opener()`) **nie** zostanie rozpoznany jako
+otwierający okno. Okno wypełniające cały kadr (np. karta `target="_blank"`, która nie
+poprosiła o rozmiar) jest pokazywane pełnoekranowo z własnym paskiem adresu; mniejsze
+okno `window.open` zachowuje pływającą prezentację. Sam scenariusz nie otwiera okna —
+nie ma komendy „otwórz okno".
+
+Jak `slide`, `closeWindow` zmienia liczbę kroków, więc **wymaga `guidebot compile`**.
+Pełny przykład: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
 
 ### `expect`
 

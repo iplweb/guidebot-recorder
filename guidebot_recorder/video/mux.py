@@ -1118,6 +1118,43 @@ def mux(video: Path, audio: Path, out: Path) -> None:
     )
 
 
+@dataclass(frozen=True)
+class FadeSpec:
+    """A fade from/to a flat colour at the two ends of the finished film.
+
+    Durations are seconds and either may be zero. ``audio`` fades every narration
+    bed in step with the picture, which is almost always what a fade to black
+    wants — see :class:`~guidebot_recorder.models.config.FadeConfig`.
+    """
+
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    color: str = "black"
+    audio: bool = True
+
+    def is_noop(self) -> bool:
+        return self.fade_in <= 0 and self.fade_out <= 0
+
+
+def _fade_filters(fade: FadeSpec, duration: float) -> tuple[str, str | None]:
+    """Build the ``(video, audio)`` filter chains for *fade* over *duration*.
+
+    The out-fade is anchored to the film's end here rather than by the caller, so
+    it lands correctly whatever the composite turned out to be. The audio chain
+    is ``None`` when the fade is picture-only.
+    """
+    video_parts: list[str] = []
+    audio_parts: list[str] = []
+    if fade.fade_in > 0:
+        video_parts.append(f"fade=t=in:st=0:d={fade.fade_in:.6f}:c={fade.color}")
+        audio_parts.append(f"afade=t=in:st=0:d={fade.fade_in:.6f}")
+    if fade.fade_out > 0:
+        start = max(0.0, duration - fade.fade_out)
+        video_parts.append(f"fade=t=out:st={start:.6f}:d={fade.fade_out:.6f}:c={fade.color}")
+        audio_parts.append(f"afade=t=out:st={start:.6f}:d={fade.fade_out:.6f}")
+    return ",".join(video_parts), (",".join(audio_parts) if fade.audio and audio_parts else None)
+
+
 def mux_audio_tracks(
     video: Path,
     tracks: list[MuxAudioTrack],
@@ -1125,6 +1162,7 @@ def mux_audio_tracks(
     *,
     preencoded: bool = False,
     video_duration: float | None = None,
+    fade: FadeSpec | None = None,
 ) -> None:
     """Attach one or more language-tagged audio tracks to a single MP4 video.
 
@@ -1135,6 +1173,10 @@ def mux_audio_tracks(
     compositor path); otherwise Playwright's WebM picture is encoded to H.264.
     Callers that just probed an immutable staged video may pass ``video_duration``
     to avoid launching ffprobe for the same artifact again.
+
+    ``fade`` ramps the picture (and, unless opted out, every audio bed) at both
+    ends. A filter cannot be applied to a copied stream, so requesting one forces
+    the encode even on the ``preencoded`` path — the reason fades are opt-in.
     """
 
     video, out = Path(video), Path(out)
@@ -1178,7 +1220,22 @@ def mux_audio_tracks(
     cmd += ["-map", "0:v:0"]
     for input_index in range(1, len(tracks) + 1):
         cmd += ["-map", f"{input_index}:a:0"]
-    if preencoded:
+    fade_active = fade is not None and not fade.is_noop()
+    if fade_active:
+        assert fade is not None
+        if fade.fade_in + fade.fade_out > video_duration:
+            raise ValueError(
+                f"fade ({fade.fade_in} + {fade.fade_out}) is longer than the film "
+                f"({video_duration})"
+            )
+        video_chain, audio_chain = _fade_filters(fade, video_duration)
+        # A filtered stream cannot also be copied, so `preencoded` is overridden
+        # rather than silently dropping the fade the scenario asked for.
+        cmd += ["-vf", video_chain, "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+        if audio_chain is not None:
+            for stream_index in range(len(tracks)):
+                cmd += [f"-filter:a:{stream_index}", audio_chain]
+    elif preencoded:
         cmd += ["-c:v", "copy"]
     else:
         cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
