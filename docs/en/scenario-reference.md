@@ -212,7 +212,7 @@ chrome:
 | `minimizeColor` | `#febc2e` | Minimize-dot CSS color. |
 | `maximizeColor` | `#28c840` | Maximize-dot CSS color. |
 | `interactOnNavigate` | `true` | On a navigate step the cursor glides to the address pill, clicks, the pill takes a focused look, then the URL is typed. |
-| `charDelayMs` | `110` | Base per-character typing delay in milliseconds. |
+| `charDelayMs` | `60` | Base per-character typing delay in milliseconds. |
 | `charJitterMs` | `55` | Random jitter added to each character delay, in milliseconds. |
 | `segmentPauseMs` | `180` | Pause between URL segments, in milliseconds. |
 | `preNavigatePauseMs` | `400` | Pause after typing completes and before the load, in milliseconds. |
@@ -243,27 +243,31 @@ color strings are passed through as CSS values without validating CSS syntax.
 
 ### `typing`
 
-Render-only character-by-character input animation. Compilation always uses instant
-fill; only `render` can animate typing.
+Render-only character-by-character input animation, **on by default**. Form fields
+are typed with the same natural feel as the address bar — a base per-character delay
+plus jitter. Compilation always uses instant fill; only `render` animates typing.
 
 | YAML field | Default | Meaning |
 |---|---:|---|
-| `animate` | `false` | When `true`, type each character in the render instead of pasting the value instantly. |
-| `speed` | `60` | Milliseconds **per character** — a delay; higher is slower. Unrelated to `cursor.speed`, which is a pixels-per-millisecond rate; the two are not interchangeable. |
+| `animate` | `true` | Type each character in the render instead of pasting the value instantly. Set `false` per scenario to keep the instant fill. |
+| `speed` | `60` | Base milliseconds **per character** — a delay; higher is slower. Unrelated to `cursor.speed`, which is a pixels-per-millisecond rate; the two are not interchangeable. |
+| `jitterMs` | `40` | ± random jitter (ms) around `speed`, so typing is natural, not metronomic. |
 
-Keep `animate: false` for masked, formatted, or autocomplete-driven fields, where a
-character-by-character render could misrepresent the final value.
+Set `animate: false` for masked, formatted, or autocomplete-driven fields, where a
+character-by-character render could misrepresent the final value (the final value is
+corrected regardless).
 
 ### `sound`
 
-Render-only, opt-in built-in sound effects mixed under the narration on every
-language track. Sounds are bundled with Guidebot; there is no author-supplied file.
+Render-only built-in sound effects mixed under the narration on every language
+track, **on by default**. Sounds are bundled with Guidebot; there is no
+author-supplied file.
 
 | YAML field | Default | Meaning |
 |---|---:|---|
-| `enabled` | `false` | Turn on the sound effects bed. |
-| `click` | `true` | Play a soft click sound on each click. |
-| `keys` | `true` | Play a subtle key-tick sound per typed character. Only audible when `typing.animate` is also `true`. |
+| `enabled` | `true` | The sound effects bed. Set `false` for a silent film (narration only). |
+| `click` | `true` | Play a soft click sound on each click (and the address-bar pill click). |
+| `keys` | `true` | Play a subtle key-tick per typed character — both in form fields (when `typing.animate`) and while the **address bar** is typed. |
 | `volume` | `-12.0` | dB attenuation applied to the effects bed; must be `0` or lower. |
 
 ### `intro`
