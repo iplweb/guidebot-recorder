@@ -2601,3 +2601,22 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
         await browser.close()
 
     assert seen == ["slide"], f"expected the full-canvas tab to force slide, got {seen}"
+
+
+async def test_window_open_call_is_recorded_even_without_size_features():
+    # A featureless `window.open` must be distinguishable from no call at all:
+    # only the latter is a `target=_blank` tab.
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.add_init_script(script=render_module._POPUP_REQUEST_SCRIPT)
+        page = await context.new_page()
+        await page.goto("data:text/html,<p>opener</p>")
+
+        assert await render_module._popup_window_opened(page) is False
+
+        await page.evaluate("window.open('about:blank', 'named')")
+        assert await render_module._popup_window_opened(page) is True
+        assert await render_module._popup_window_request(page) is None
+
+        await browser.close()

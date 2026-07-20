@@ -188,6 +188,13 @@ class _PopupSession:
 # :func:`_recording_scale` for the conversion and for why headed renders differ.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
+# Set unconditionally the moment ``window.open`` runs, features or not. This is
+# what tells a real ``target="_blank"`` tab (no call at all) apart from a
+# featureless ``window.open(url, name)`` (a call that leaves ``KEY`` at
+# ``null``, exactly like never having been called) — a distinction
+# ``_POPUP_REQUEST_KEY`` alone cannot make. See ``_popup_window_opened``.
+_POPUP_OPENED_KEY = "__guidebot_popup_opened"
+
 # How long the opener's frames get to answer the geometry probe. They read a
 # value the page already wrote synchronously, so a healthy frame answers in
 # milliseconds; the budget exists purely to survive frames that can never
@@ -202,10 +209,12 @@ _POPUP_REQUEST_HARD_TIMEOUT = 5.0
 _POPUP_REQUEST_SCRIPT = f"""
 (() => {{
   const KEY = "{_POPUP_REQUEST_KEY}";
+  const OPENED = "{_POPUP_OPENED_KEY}";
   if (Object.prototype.hasOwnProperty.call(window, KEY)) return;
   const native = window.open;
   if (typeof native !== "function") return;
   window[KEY] = null;
+  window[OPENED] = false;
   // Captured before chrome.js shadows ``top`` (frame-bust neutralization), so
   // this is the *real* top document even from inside the shell's site iframe.
   // Publishing the record there lets the Python side read one frame instead of
@@ -226,6 +235,10 @@ _POPUP_REQUEST_SCRIPT = f"""
     return {{ width: Math.round(width), height: Math.round(height) }};
   }};
   window.open = function (...args) {{
+    window[OPENED] = true;
+    try {{
+      if (realTop && realTop !== window) realTop[OPENED] = true;
+    }} catch (e) {{}}
     const requested = parse(args[2]);
     if (requested) {{
       window[KEY] = requested;
@@ -341,6 +354,24 @@ async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
             file=sys.stderr,
         )
     return size
+
+
+async def _popup_window_opened(page: Page) -> bool:
+    """Whether this document called ``window.open`` at all, features or not.
+
+    ``_popup_window_request`` answers "what geometry did the site ask for", and
+    returns ``None`` both for a featureless ``window.open(url, name)`` and for a
+    window this document never opened. Only the second is a ``target="_blank"``
+    tab, and telling them apart is possible *while the popup is alive* — unlike
+    the crop chain, whose verdict arrives after the recording is finished.
+    """
+
+    try:
+        return bool(await page.evaluate(f"window['{_POPUP_OPENED_KEY}'] === true"))
+    except PlaywrightError:
+        # An opener that navigated or died reports nothing; treat it as "unknown",
+        # which keeps today's bare-popup behaviour rather than mounting a bar.
+        return True
 
 
 #: A content bounding box at least this fraction of the viewport in *both*
