@@ -5,6 +5,7 @@ from guidebot_recorder.models.config import (
     MIN_HOLD_FRAME_SETTLE,
     ChromeConfig,
     Config,
+    DesktopConfig,
     PopupConfig,
     TtsConfig,
     Viewport,
@@ -747,3 +748,22 @@ def test_hold_frame_is_not_part_of_config_hash() -> None:
     a = Config.model_validate(base)
     b = Config.model_validate({**base, "holdFrameForNarration": False, "holdFrameSettle": 3.0})
     assert config_hash(a) == config_hash(b)
+
+
+def test_desktop_config_default_is_navy_and_render_only():
+    assert Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "voice": "v", "lang": "pl-PL"},
+        }
+    ).desktop.color.startswith("#")
+
+
+def test_desktop_config_does_not_change_the_config_hash():
+    # The desktop step compiles to nothing, so its colour must not invalidate a
+    # compiled sidecar.
+    plain = _cfg()
+    tinted = _cfg()
+    tinted.desktop = DesktopConfig(color="#ff0000")
+    assert config_hash(plain) == config_hash(tinted)

@@ -151,6 +151,19 @@ class IntroConfig(BaseModel):
     notes: str | None = None
 
 
+class DesktopConfig(BaseModel):
+    """Render-only appearance for the ``desktop`` opener step.
+
+    Only the background colour lives here — it is a film-wide look, so every
+    desktop step matches without repeating it. The icon and its caption are
+    per-step (they can differ) and live on the step model. Not part of
+    :func:`config_hash`: the desktop step compiles to nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    color: str = "#1f3a63"  # granatowy — a calm desktop navy
+
+
 class SoundConfig(BaseModel):
     """Render-only built-in SFX mixed under the narration (on by default)."""
 
@@ -248,6 +261,7 @@ class Config(BaseModel):
     typing: TypingConfig = Field(default_factory=TypingConfig)
     sound: SoundConfig = Field(default_factory=SoundConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
+    desktop: DesktopConfig = Field(default_factory=DesktopConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
 
     # --- Render pacing (render-only; deliberately absent from config_hash) ---

@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import (
+    Desktop,
     FlatStep,
     NavigateConfig,
     Scenario,
@@ -57,9 +58,7 @@ def test_navigate_string_keeps_backwards_compatible_value_and_helpers():
 
 @pytest.mark.parametrize("animate", [True, False])
 def test_navigate_object_exposes_url_and_type_override(animate):
-    s = Step.model_validate(
-        {"navigate": {"url": "https://example.com", "type": animate}}
-    )
+    s = Step.model_validate({"navigate": {"url": "https://example.com", "type": animate}})
 
     assert s.navigate == NavigateConfig(url="https://example.com", type=animate)
     assert s.navigate_url() == "https://example.com"
@@ -361,3 +360,28 @@ def test_flat_steps_branch_index_is_the_top_level_block_index():
 def test_flat_step_is_a_named_tuple():
     flat = FlatStep(step=Step(say="x"), branch=None, is_gate=False)
     assert tuple(flat) == (flat.step, None, False)
+
+
+def test_desktop_is_a_visual_only_command():
+    s = Step.model_validate({"desktop": {"icon": "firefox", "label": "FF"}, "say": "otwieram"})
+    assert s.command_kind() == "desktop"
+    assert not s.requires_target()
+    assert s.desktop is not None and s.desktop.icon == "firefox"
+
+
+def test_desktop_defaults():
+    d = Desktop()
+    assert d.icon == "chrome"
+    assert d.is_builtin_icon()
+    assert d.hold == 1.0
+
+
+def test_desktop_and_another_command_is_rejected():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"desktop": {"icon": "chrome"}, "navigate": "https://x"})
+
+
+def test_optional_is_refused_on_a_desktop_step():
+    # No target to be absent, so `optional` promises tolerance we cannot deliver.
+    with pytest.raises(ValidationError):
+        Step.model_validate({"desktop": {"icon": "chrome"}, "optional": True})

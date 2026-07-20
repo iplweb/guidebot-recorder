@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Przeglądarka">
+  <circle cx="32" cy="32" r="28" fill="#3d8bcd"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.4">
+    <circle cx="32" cy="32" r="28"/>
+    <ellipse cx="32" cy="32" rx="12" ry="28"/>
+    <path d="M6 24h52M6 40h52"/>
+  </g>
+</svg>

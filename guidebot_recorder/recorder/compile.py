@@ -92,6 +92,8 @@ def _short(step: Step, limit: int = 60) -> str:
             return text if len(text) <= limit else text[: limit - 1] + "…"
     if step.slide is not None:
         return step.slide.title or step.slide.subtitle or "slide"
+    if step.desktop is not None:
+        return f"desktop: {step.desktop.icon}"
     if step.enter_text is not None:
         return f"→ {step.enter_text.into}"
     if step.wait is not None:
@@ -597,6 +599,8 @@ async def _compile_step(
     if kind == "say":
         return None
     if kind == "slide":
+        return None
+    if kind == "desktop":
         return None
     if kind == "navigate":
         url = step.navigate_url()
