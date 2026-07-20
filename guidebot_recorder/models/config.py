@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from guidebot_recorder.languages import is_iso_639_2
 
@@ -227,6 +227,19 @@ class PopupConfig(BaseModel):
         return self.effective_transition in ("float", "slide")
 
 
+class VerifyLoggedIn(BaseModel):
+    """Post-setup login check: the recorded session is considered authenticated
+    when ``contains_text`` is present on the page (optionally after visiting
+    ``url``). A bare string in YAML is shorthand for ``{containsText: <str>}``.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    contains_text: str = Field(alias="containsText")
+    url: str | None = None
+    timeout: float = 8
+
+
 class Config(BaseModel):
     # `validate_assignment` because the render CLI's overrides (`--hold-frame`,
     # `--hold-frame-settle`) are applied by ASSIGNING onto an already-built
@@ -242,6 +255,17 @@ class Config(BaseModel):
     tts: TtsConfig
     base_url: str | None = Field(default=None, alias="baseUrl")
     locale: str | None = None
+
+    # --- Pre-recording setup (Phase A1) ---
+    # Path to a setup scenario run once to establish an authenticated session
+    # before the main recording. Only `setup` affects compiled references, so it
+    # is the only one of these three folded into config_hash (and only when set,
+    # keeping legacy scenarios at their current hash).
+    setup: str | None = None
+    verify_user_logged_in: VerifyLoggedIn | None = Field(
+        default=None, alias="verifyUserLoggedIn"
+    )
+    max_age_hours: float | None = Field(default=None, alias="maxAgeHours")
     audio_tracks: list[TtsConfig] = Field(default_factory=list, alias="audioTracks")
     cursor: CursorConfig = Field(default_factory=CursorConfig)
     chrome: ChromeConfig = Field(default_factory=ChromeConfig)
@@ -261,6 +285,14 @@ class Config(BaseModel):
     # Floor is MIN_HOLD_FRAME_SETTLE (two 25fps frames): below it the settle is
     # not representable on the frame grid (see that constant's comment).
     hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=MIN_HOLD_FRAME_SETTLE)
+
+    @field_validator("verify_user_logged_in", mode="before")
+    @classmethod
+    def _wrap_verify_shorthand(cls, value: object) -> object:
+        """Accept a bare string as ``{containsText: <str>}`` shorthand."""
+        if isinstance(value, str):
+            return {"containsText": value}
+        return value
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:
@@ -325,5 +357,11 @@ def config_hash(cfg: Config) -> str:
         "tts_lang": cfg.tts.lang,
         "chrome": {"enabled": cfg.chrome.enabled, "height": cfg.chrome.height},
     }
+    # A configured setup scenario changes the authenticated state the site is
+    # compiled against, so it belongs in the hash — but only when set, so legacy
+    # scenarios (setup unset) keep their pre-existing hash. `verify_user_logged_in`
+    # and `max_age_hours` are run-time gating only and never enter the projection.
+    if cfg.setup is not None:
+        projection["setup"] = cfg.setup
     payload = json.dumps(projection, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
