@@ -287,5 +287,32 @@ def render_set_cmd(
         typer.echo(f"zrenderowano: {output}")
 
 
+@app.command("guide")
+def guide_cmd(
+    path: Path,
+    out: Path = typer.Option(..., "--out", "-o", help="Ścieżka wyjściowa .pdf"),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp"),
+) -> None:
+    """Zbuduj przewodnik PDF krok-po-kroku ze skompilowanego scenariusza (0×LLM)."""
+    from guidebot_recorder.guide.guide import run_guide
+    from guidebot_recorder.guide.prolog import GuideError
+
+    async def _run() -> int:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)  # page.pdf() needs headless
+            try:
+                return await run_guide(path, out, browser, timeout=timeout, verbose=verbose)
+            finally:
+                await browser.close()
+
+    try:
+        count = asyncio.run(_run())
+    except GuideError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"zbudowano przewodnik: {out} ({count} stron)")
+
+
 if __name__ == "__main__":
     app()
