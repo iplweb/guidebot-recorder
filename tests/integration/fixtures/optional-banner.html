@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="pl">
+  <head><meta charset="utf-8"><title>Sklep</title></head>
+  <body data-banner="0" data-banner-delay="0">
+    <h1>Sklep</h1>
+    <button id="account" onclick="this.textContent='Konto otwarte'">Moje konto</button>
+    <div id="banner" hidden>
+      <h2>Zgoda na ciasteczka</h2>
+      <button id="accept">Akceptuję ciasteczka</button>
+    </div>
+    <script>
+      document.getElementById("accept").addEventListener("click", () => {
+        document.getElementById("banner").remove();
+      });
+      if (document.body.dataset.banner === "1") {
+        const delay = Number(document.body.dataset.bannerDelay || "0");
+        setTimeout(() => {
+          const banner = document.getElementById("banner");
+          if (banner) banner.hidden = false;
+        }, delay);
+      }
+    </script>
+  </body>
+</html>
