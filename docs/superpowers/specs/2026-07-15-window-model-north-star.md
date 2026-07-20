@@ -127,9 +127,16 @@ cross-window arrangement and motion in Layer 2 (post-process stage), one shared
   main → popup) is blocked by **Layer 1 orchestration, not the compositor**:
   `_active_page` (`render.py`) routes every step to the open popup, and the "v1 one
   popup" invariant fails a second popup. Post-composition could concat N segments
-  fine. Spec C, if it takes this on, fixes the orchestration, not `mux.py`. (Note: a
-  backgrounded page may emit no frames under VFR, so any dimmed-backdrop/interleave
-  plan relies on "decode the last frame" behavior — currently implicit.)
+  fine. Spec C, if it takes this on, fixes the orchestration, not `mux.py`.
+  (Measured 2026-07-20, superseding an earlier worry that a backgrounded page might
+  emit no frames under VFR: Playwright's recordings are **not** VFR. They are CFR
+  25 fps and never go dark — a page painting nothing, and a page frozen outright via
+  CDP `Page.setWebLifecycleState`, both kept recording a flat 25 fps padded with
+  duplicates of the last painted frame; the largest inter-frame gap observed was one
+  frame interval. So no interleave plan depends on "decode the last frame". The real
+  alignment hazard is that each recording's PTS 0 is its own page's creation moment,
+  which the compositor must offset. See
+  `2026-07-20-multi-window-switching-design.md`.)
 - Sites that inspect `window.top` or otherwise require being top-level may behave
   differently inside the iframe even with frame-busting neutralized (see Spec A
   risks).
