@@ -307,9 +307,7 @@ async def check_logged_in(
         page = await context.new_page()
         await page.goto(goto_url)
         try:
-            await page.wait_for_function(
-                _CONTAINS_TEXT, arg=contains_text, timeout=timeout * 1000
-            )
+            await page.wait_for_function(_CONTAINS_TEXT, arg=contains_text, timeout=timeout * 1000)
         except PlaywrightTimeoutError:
             return False
         return True
@@ -338,9 +336,7 @@ def _health_url(target_cfg: Config, setup_cfg: Config, verify) -> str | None:
     return origin
 
 
-def _build_check_kwargs(
-    cfg: Config, goto_url: str | None, verify: VerifyLoggedIn
-) -> dict:
+def _build_check_kwargs(cfg: Config, goto_url: str | None, verify: VerifyLoggedIn) -> dict:
     """The keyword arguments :func:`check_logged_in` is called with.
 
     Shared by :func:`ensure_session` (target-driven) and
@@ -414,8 +410,7 @@ async def ensure_session(
     # Host guard: cross-origin session reuse is not sound in v1.
     if _hosts_differ(target.config.base_url, setup.config.base_url):
         raise SetupSessionError(
-            "setup and target base_url hosts differ — cross-origin session reuse "
-            "is not supported"
+            "setup and target base_url hosts differ — cross-origin session reuse is not supported"
         )
 
     verify = setup.config.verify_user_logged_in
@@ -562,9 +557,7 @@ async def establish_session(
     ):
         if not manual:
             _raise_health_failed(storage_state)
-        storage_state = await _manual_finish(
-            browser, setup.config, goto_url, storage_state, prompt
-        )
+        storage_state = await _manual_finish(browser, setup.config, goto_url, storage_state, prompt)
         save_session(sessions_dir, key, storage_state, key_inputs)
         if not await check_logged_in(
             browser, storage_state, **_build_check_kwargs(setup.config, goto_url, verify)

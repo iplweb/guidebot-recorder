@@ -25,9 +25,7 @@ USERNAME = "Jan Kowalski"
 LOGGED_IN_TEXT = "Wyloguj"
 
 _LOGIN_PAGE = (
-    "<!doctype html><html lang='pl'><body>"
-    "<h1>Logowanie</h1><p>Nie zalogowano</p>"
-    "</body></html>"
+    "<!doctype html><html lang='pl'><body><h1>Logowanie</h1><p>Nie zalogowano</p></body></html>"
 )
 
 

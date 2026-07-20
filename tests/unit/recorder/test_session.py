@@ -72,9 +72,7 @@ def _write_setup(
     if nested_setup is not None:
         extra += f"  setup: {nested_setup}\n"
     path = tmp_path / name
-    path.write_text(
-        _SETUP_TEMPLATE.format(base_url=base_url, extra=extra), encoding="utf-8"
-    )
+    path.write_text(_SETUP_TEMPLATE.format(base_url=base_url, extra=extra), encoding="utf-8")
     return path
 
 
@@ -305,9 +303,7 @@ async def test_present_and_verify_pass_reuses_without_replay(tmp_path, monkeypat
     cached = {"cookies": [{"name": "c"}], "origins": []}
     _patch(monkeypatch, rec, cached=cached, check_returns=True, replay_state={})
 
-    out = await ensure_session(
-        object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-    )
+    out = await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert out == cached
     assert rec.replayed == 0
     assert rec.saved == 0
@@ -343,9 +339,7 @@ async def test_present_and_verify_fail_replays(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(session_mod, "load_session", fake_load)
     monkeypatch.setattr(session_mod, "save_session", fake_save)
 
-    out = await ensure_session(
-        object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-    )
+    out = await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert out == fresh
     assert rec.replayed == 1
     assert rec.saved == 1
@@ -358,9 +352,7 @@ async def test_absent_replays(tmp_path, monkeypatch) -> None:
     fresh = {"cookies": [{"name": "new"}], "origins": []}
     _patch(monkeypatch, rec, cached=None, check_returns=True, replay_state=fresh)
 
-    out = await ensure_session(
-        object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-    )
+    out = await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert out == fresh
     assert rec.replayed == 1
     assert rec.saved == 1
@@ -373,9 +365,7 @@ async def test_no_verify_present_reuses_and_warns(tmp_path, monkeypatch) -> None
     cached = {"cookies": [{"name": "c"}], "origins": []}
     _patch(monkeypatch, rec, cached=cached, check_returns=True, replay_state={})
 
-    out = await ensure_session(
-        object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-    )
+    out = await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert out == cached
     assert rec.replayed == 0
     # verify is None → no health-check performed at all.
@@ -391,18 +381,14 @@ async def test_no_verify_no_maxage_warns_on_replay(tmp_path, monkeypatch) -> Non
     fresh = {"cookies": [{"name": "new"}], "origins": []}
     _patch(monkeypatch, rec, cached=None, check_returns=True, replay_state=fresh)
 
-    out = await ensure_session(
-        object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-    )
+    out = await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert out == fresh
     assert rec.replayed == 1
     assert rec.checks == []
     assert rec.warnings
 
 
-async def test_replay_then_verify_fail_raises_empty_state_diagnostic(
-    tmp_path, monkeypatch
-) -> None:
+async def test_replay_then_verify_fail_raises_empty_state_diagnostic(tmp_path, monkeypatch) -> None:
     _write_setup(tmp_path)
     target = _write_target(tmp_path)
     rec = _Recorder()
@@ -410,9 +396,7 @@ async def test_replay_then_verify_fail_raises_empty_state_diagnostic(
     _patch(monkeypatch, rec, cached=None, check_returns=False, replay_state=empty)
 
     with pytest.raises(SetupSessionError, match="sessionStorage|IndexedDB|outside"):
-        await ensure_session(
-            object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-        )
+        await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert rec.replayed == 1
     assert rec.saved == 1
 
@@ -425,7 +409,5 @@ async def test_replay_then_verify_fail_raises_text_diagnostic(tmp_path, monkeypa
     _patch(monkeypatch, rec, cached=None, check_returns=False, replay_state=nonempty)
 
     with pytest.raises(SetupSessionError, match="verifyUserLoggedIn|--headed|not found"):
-        await ensure_session(
-            object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-        )
+        await ensure_session(object(), target, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert rec.replayed == 1

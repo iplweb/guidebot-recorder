@@ -187,9 +187,7 @@ async def test_verify_fail_empty_state_raises_diagnostic(tmp_path, monkeypatch) 
     _patch(monkeypatch, rec, cached=None, check_returns=False, replay_state=empty)
 
     with pytest.raises(SetupSessionError, match="sessionStorage|IndexedDB|outside"):
-        await establish_session(
-            object(), setup, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-        )
+        await establish_session(object(), setup, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert rec.replayed == 1
     assert rec.saved == 1
 
@@ -201,9 +199,7 @@ async def test_verify_fail_text_not_found_raises_diagnostic(tmp_path, monkeypatc
     _patch(monkeypatch, rec, cached=None, check_returns=False, replay_state=nonempty)
 
     with pytest.raises(SetupSessionError, match="verifyUserLoggedIn|--headed|not found"):
-        await establish_session(
-            object(), setup, tmp_path / "s", _ENV, timeout=5, warn=rec.warn
-        )
+        await establish_session(object(), setup, tmp_path / "s", _ENV, timeout=5, warn=rec.warn)
     assert rec.replayed == 1
 
 

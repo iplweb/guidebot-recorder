@@ -95,9 +95,7 @@ class _LoginReasoner:
     """Deterministic: resolves the single teach step to a click on the button."""
 
     async def resolve(self, instruction, candidates):
-        return ReasonerResult(
-            "click", RoleTarget(role="button", name=LOGIN_BUTTON, exact=True)
-        )
+        return ReasonerResult("click", RoleTarget(role="button", name=LOGIN_BUTTON, exact=True))
 
 
 _SETUP_TEMPLATE = """\

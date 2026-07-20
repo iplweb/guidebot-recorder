@@ -262,9 +262,7 @@ class Config(BaseModel):
     # is the only one of these three folded into config_hash (and only when set,
     # keeping legacy scenarios at their current hash).
     setup: str | None = None
-    verify_user_logged_in: VerifyLoggedIn | None = Field(
-        default=None, alias="verifyUserLoggedIn"
-    )
+    verify_user_logged_in: VerifyLoggedIn | None = Field(default=None, alias="verifyUserLoggedIn")
     max_age_hours: float | None = Field(default=None, alias="maxAgeHours")
     audio_tracks: list[TtsConfig] = Field(default_factory=list, alias="audioTracks")
     cursor: CursorConfig = Field(default_factory=CursorConfig)

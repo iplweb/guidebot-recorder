@@ -130,9 +130,7 @@ class SetupReasoner:
             return ReasonerResult("type", LabelTarget(label="Login"))
         if instruction == "pole hasło":
             return ReasonerResult("type", LabelTarget(label="Hasło"))
-        return ReasonerResult(
-            "click", RoleTarget(role="button", name=LOGIN_BUTTON, exact=True)
-        )
+        return ReasonerResult("click", RoleTarget(role="button", name=LOGIN_BUTTON, exact=True))
 
 
 class TargetReasoner:
@@ -146,9 +144,7 @@ class TargetReasoner:
         names = {(c.role, c.name) for c in candidates}
         if ("button", PANEL_BUTTON) not in names:
             return ReasonerError("no_handle", "brak przycisku panelu — wylogowany")
-        return ReasonerResult(
-            "click", RoleTarget(role="button", name=PANEL_BUTTON, exact=True)
-        )
+        return ReasonerResult("click", RoleTarget(role="button", name=PANEL_BUTTON, exact=True))
 
 
 class FakeTts:

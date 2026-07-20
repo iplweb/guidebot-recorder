@@ -1710,9 +1710,7 @@ async def run_render(
     # non-recording contexts *before* this line, so the login can never reach the
     # film (spec: "Target render").
     setup_state = (
-        await ensure_session(
-            browser, Path(path), Path(".guidebot/sessions"), env, timeout=timeout
-        )
+        await ensure_session(browser, Path(path), Path(".guidebot/sessions"), env, timeout=timeout)
         if cfg.setup is not None
         else None
     )

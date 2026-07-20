@@ -60,9 +60,7 @@ def test_verify_user_logged_in_object_form():
         }
     )
 
-    assert cfg.verify_user_logged_in == VerifyLoggedIn(
-        contains_text="X", url="/d", timeout=3
-    )
+    assert cfg.verify_user_logged_in == VerifyLoggedIn(contains_text="X", url="/d", timeout=3)
 
 
 def test_verify_user_logged_in_defaults_to_none():

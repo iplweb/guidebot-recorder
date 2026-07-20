@@ -12,11 +12,6 @@ from pydantic import ValidationError
 
 from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
-from guidebot_recorder.recorder.session import (
-    SetupNeedsCompile,
-    SetupSessionError,
-    establish_session,
-)
 from guidebot_recorder.recorder.render_set import (
     RenderSetError,
     ensure_render_set_compiled,
@@ -24,6 +19,11 @@ from guidebot_recorder.recorder.render_set import (
     render_set_up_to_date,
     run_compile_set,
     run_render_set,
+)
+from guidebot_recorder.recorder.session import (
+    SetupNeedsCompile,
+    SetupSessionError,
+    establish_session,
 )
 from guidebot_recorder.resolver.reasoner import CodexReasoner
 from guidebot_recorder.scenario.loader import load_scenario
