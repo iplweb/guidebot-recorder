@@ -134,7 +134,9 @@
     setImportant(cursor, "pointer-events", "none");
     setImportant(cursor, "z-index", MAX_Z_INDEX);
     setImportant(cursor, "box-sizing", "border-box");
-    setImportant(cursor, "contain", "layout style paint");
+    // No `paint`: it clips painting to the host's border box, cutting the
+    // drop-shadow glow (which spreads ~14px past the 34x46 box).
+    setImportant(cursor, "contain", "layout style");
     setImportant(cursor, "will-change", "left, top");
     if (isNew) {
       setImportant(cursor, "transition", "none");

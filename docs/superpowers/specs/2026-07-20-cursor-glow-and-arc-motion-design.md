@@ -48,9 +48,19 @@ contributed nothing beyond the clip. No other change is needed.
 
 ### Test
 
-Mount the cursor, read `getComputedStyle(host).contain`, assert it does not
-contain `paint`. Playwright + real Chromium, matching the existing style of
-`tests/unit/overlay/test_cursor_js.py`.
+Mount the cursor, read `getComputedStyle(host).contain`, assert `paint` is not
+among the active containment keywords. Playwright + real Chromium, matching the
+existing style of `tests/unit/overlay/test_cursor_js.py`.
+
+**Chrome serializes the computed value as a shorthand.** `layout style paint`
+comes back as the single keyword `content`, so a naive substring search for
+`"paint"` passes against the *unfixed* code and tests nothing. The assertion
+must expand the shorthands first (`content` → `layout paint style`,
+`strict` → `layout paint size style`) and check membership in the expanded set.
+
+Also assert `layout` and `style` remain present, so a future edit cannot
+"fix" the glow by dropping containment altogether — isolation is why the
+declaration exists.
 
 ---
 

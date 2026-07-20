@@ -61,6 +61,34 @@ async def test_ripple_flash_draws_filled_disc_only_when_configured_and_requested
     assert n2 == 0
 
 
+# Chrome serializes computed `contain` using the shorthand keywords, so
+# `layout style paint` comes back as `content`. Expand before asserting.
+_CONTAIN_SHORTHANDS = {
+    "content": {"layout", "paint", "style"},
+    "strict": {"layout", "paint", "size", "style"},
+}
+
+
+def _contain_keywords(computed: str) -> set[str]:
+    out: set[str] = set()
+    for token in computed.split():
+        out |= _CONTAIN_SHORTHANDS.get(token, {token})
+    return out
+
+
+async def test_cursor_host_does_not_paint_contain(page: Page) -> None:
+    """`contain: paint` clips the drop-shadow glow to the 34x46 host box."""
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    contain = await page.evaluate(
+        "getComputedStyle(document.querySelector('[data-guidebot-cursor]')).contain"
+    )
+    keywords = _contain_keywords(contain)
+    assert "paint" not in keywords, f"glow is clipped by contain: {contain!r}"
+    # layout/style isolation is what the declaration is there for; keep it.
+    assert {"layout", "style"} <= keywords, f"lost isolation: {contain!r}"
+
+
 async def test_hidden_flag_survives_ensure(page: Page) -> None:
     await page.set_content("<div></div>")
     await _inject(page, {})
