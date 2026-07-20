@@ -975,6 +975,199 @@ def test_compose_popup_video_transition_float_matches_floating(tmp_path: Path) -
     _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
 
 
+# --- popup crop (the recorded popup canvas is the *main* viewport) -----------
+# Playwright's record_video_size is context-level, so the popup records onto a
+# full-viewport canvas: its real window sits top-left and the rest is filler.
+# ``popup_crop`` trims that filler *before* the scale, so the rounded corners,
+# fade and shadow are all computed on the real window.
+
+# A region that lands inside the framed popup only once the filler is cropped
+# away. Uncropped, the 320x240 popup scales to 230x172 centred at x=45..275 and
+# the filler (source x>160 -> screen x>=160) covers this strip.
+_CROPPED_RIGHT = "16:16:186:112"
+
+
+def _make_popup_with_filler(path: Path, seconds: float) -> None:
+    """Write a 320x240 popup whose real window is only the top-left 160x120.
+
+    Mimics a popup recorded onto the main window's canvas: yellow content in the
+    top-left corner, grey filler everywhere else.
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=0x808080:duration={seconds}:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=yellow:duration={seconds}:size=160x120:rate=25",
+            "-filter_complex",
+            "[0:v][1:v]overlay=x=0:y=0,format=yuv420p[outv]",
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _popup_chain(filters: str) -> str:
+    """Return the ``[popup_cut]`` consumer link of a filtergraph."""
+    (chain,) = [part for part in filters.split(";") if part.startswith("[popup_cut]")]
+    return chain
+
+
+def _capture_filtergraph(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the ``-filter_complex`` of every ffmpeg run, then run it for real.
+
+    Running it too keeps the assertions honest: a filtergraph that matches the
+    expected string but that ffmpeg rejects still fails the test.
+    """
+    seen: list[str] = []
+    real_run = mux_module._run_to_output
+
+    def spy_run(cmd: list[str], out: Path) -> None:
+        seen.append(cmd[cmd.index("-filter_complex") + 1])
+        real_run(cmd, out)
+
+    monkeypatch.setattr(mux_module, "_run_to_output", spy_run)
+    return seen
+
+
+def test_compose_popup_video_float_crops_popup_to_its_content(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(160, 120, 0, 0)
+    )
+
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+    # The framed window is now wall-to-wall content: no grey filler inside it.
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CENTER))
+    _assert_yellow(_sample_region_rgb(out, 1.5, _CROPPED_RIGHT))
+    # Outside the (now smaller) window the dimmed main page still shows.
+    _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
+
+
+def test_compose_popup_video_float_without_crop_keeps_the_filler(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+
+    # Back-compat: no geometry supplied -> today's full-canvas scaling, filler and all.
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, floating=True)
+
+    rgb = _sample_region_rgb(out, 1.5, _CROPPED_RIGHT)
+    red, green, blue = rgb
+    assert not (red > 170 and green > 170 and blue < 90), f"expected grey filler: {rgb}"
+
+
+def test_compose_popup_video_float_crop_precedes_scale_and_is_even(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+    seen = _capture_filtergraph(monkeypatch)
+
+    # Odd numbers everywhere: yuv420p needs even dimensions, so they must snap down.
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(161, 121, 3, 5)
+    )
+
+    chain = _popup_chain(seen[0])
+    assert "crop=160:120:2:4," in chain
+    assert chain.index("crop=") < chain.index("scale=")
+
+
+def test_compose_popup_video_float_without_crop_emits_no_crop_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+    seen = _capture_filtergraph(monkeypatch)
+
+    compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, floating=True)
+
+    assert "crop=" not in _popup_chain(seen[0])
+
+
+def test_compose_popup_video_float_full_frame_crop_is_a_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+    seen = _capture_filtergraph(monkeypatch)
+
+    # A popup whose requested window is at least the whole canvas must not gain a
+    # redundant crop filter.
+    compose_popup_video(
+        main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(400, 300, 0, 0)
+    )
+
+    assert "crop=" not in _popup_chain(seen[0])
+
+
+def test_compose_popup_video_cut_ignores_popup_crop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+    seen = _capture_filtergraph(monkeypatch)
+
+    # cut/slide show the popup full-frame; cropping is a float-only cosmetic.
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        opened_at=1.0,
+        closed_at=2.0,
+        transition="cut",
+        popup_crop=(160, 120, 0, 0),
+    )
+
+    assert "crop=" not in seen[0]
+
+
+def test_compose_popup_video_rejects_out_of_frame_crop(tmp_path: Path) -> None:
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_popup_with_filler(popup, 1.0)
+
+    with pytest.raises(ValueError, match="popup_crop"):
+        compose_popup_video(
+            main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(0, 120, 0, 0)
+        )
+
+
 def test_compose_popup_video_explicit_transition_overrides_floating(tmp_path: Path) -> None:
     main = tmp_path / "main.mp4"
     popup = tmp_path / "popup.mp4"

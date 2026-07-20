@@ -96,6 +96,83 @@ class _PopupSession:
     visual_ready_delay: float = 0.0
     closed_at: float | None = None
     close_handled: bool = False
+    window_size: tuple[int, int] | None = None
+    """The popup's real window size in CSS px, or ``None`` when unknown.
+
+    Playwright gives every page in the context the *same* recording canvas (see
+    ``record_video_size`` below), so the popup's MP4 is main-viewport sized no
+    matter how small a window the site asked for. This is the geometry the
+    compositor crops that canvas back down to.
+    """
+
+
+# The site's own ``window.open(url, name, "width=...,height=...")`` request is
+# the only deterministic statement of how big the popup window really is: the
+# page itself cannot tell us, because its layout viewport is the context's
+# (shared with the main window). Record the request on the *opener* frame; the
+# popup is matched to it right after it opens.
+_POPUP_REQUEST_KEY = "__guidebot_popup_request"
+
+_POPUP_REQUEST_SCRIPT = f"""
+(() => {{
+  const KEY = "{_POPUP_REQUEST_KEY}";
+  if (Object.prototype.hasOwnProperty.call(window, KEY)) return;
+  const native = window.open;
+  if (typeof native !== "function") return;
+  window[KEY] = null;
+  const parse = (features) => {{
+    if (typeof features !== "string") return null;
+    const sizes = {{}};
+    for (const part of features.split(",")) {{
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      const value = Number(part.slice(eq + 1).trim());
+      if (Number.isFinite(value)) sizes[part.slice(0, eq).trim().toLowerCase()] = value;
+    }}
+    const width = sizes.width !== undefined ? sizes.width : sizes.innerwidth;
+    const height = sizes.height !== undefined ? sizes.height : sizes.innerheight;
+    if (!(width > 0) || !(height > 0)) return null;
+    return {{ width: Math.round(width), height: Math.round(height) }};
+  }};
+  window.open = function (...args) {{
+    const requested = parse(args[2]);
+    if (requested) window[KEY] = requested;
+    return native.apply(this, args);
+  }};
+}})();
+"""
+
+
+def _parse_window_request(requested: object) -> tuple[int, int] | None:
+    """Validate one ``window.open`` geometry record read back from the page."""
+    if not isinstance(requested, dict):
+        return None
+    width, height = requested.get("width"), requested.get("height")
+    if not isinstance(width, int | float) or not isinstance(height, int | float):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return int(width), int(height)
+
+
+async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
+    """Return the window size the *opener* asked ``window.open`` for, if any.
+
+    Scans every frame because the click that opens the popup usually happens
+    inside the shell's site iframe, not the top document. Frames that have
+    navigated away (or that never ran the init script) are skipped rather than
+    failing the render: an unknown size simply means no crop, i.e. the previous
+    full-canvas behaviour.
+    """
+    for frame in reversed(opener.frames):
+        try:
+            requested = await frame.evaluate(f"() => window.{_POPUP_REQUEST_KEY} || null")
+        except PlaywrightError:
+            continue
+        size = _parse_window_request(requested)
+        if size is not None:
+            return size
+    return None
 
 
 @dataclass(slots=True)
@@ -788,6 +865,10 @@ async def run_render(
     # The context viewport and video size stay at the configured dimensions so the
     # output MP4 keeps its size and popups are geometrically untouched; the shell
     # shrinks only the site iframe interior (see compile / site_viewport).
+    # Both settings are context-level, so a popup also records onto a
+    # main-viewport-sized canvas with filler around its real window. That is
+    # corrected in post (``compose_popup_video(popup_crop=...)``), never here:
+    # shrinking the recording would also shrink the main window's frame.
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
         locale=cfg.locale,
@@ -795,6 +876,9 @@ async def run_render(
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
         **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
+    # Independent of the role-gating order below (it only wraps ``window.open``),
+    # but registered first so it wraps the *native* function on every document.
+    await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
     overlay = Overlay(cfg.cursor, cfg.viewport)
     # Role-gating contract: cursor.js and slide.js MUST be registered before
     # chrome.js. Inside the site iframe, both rely on reading the real
@@ -1189,6 +1273,14 @@ async def run_render(
         open_ms=cfg.popup.open_ms,
         close_ms=cfg.popup.close_ms,
         hold_open_at_end=popup_open_at_end,
+        # The popup recorded onto the main window's canvas; crop it back to the
+        # window the site actually asked for so the float mode frames that and
+        # not a viewport-sized rectangle of filler. Unknown size -> no crop.
+        popup_crop=(
+            (popup.window_size[0], popup.window_size[1], 0, 0)
+            if popup.window_size is not None
+            else None
+        ),
     )
     total = probe_duration(composite)
     await _assemble_audio_tracks(
@@ -1363,6 +1455,9 @@ async def _render_step(
                     else 0.0
                 ),
                 closed_at=closed_at,
+                # Read from the opener while it is still alive; the popup's own
+                # viewport is the context's and so cannot report this.
+                window_size=await _popup_window_request(page),
             )
     elif cached.action == "hover":
         await recorder.hover(cached.target)

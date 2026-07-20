@@ -18,9 +18,12 @@ from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import (
+    _POPUP_REQUEST_SCRIPT,
     RenderError,
     _assemble_audio_tracks,
     _mux_tracks_for_timeline,
+    _parse_window_request,
+    _popup_window_request,
     _prime_visuals,
     _publish_render_artifacts,
     _wait_for_step_narration,
@@ -1753,3 +1756,84 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
     # Hidden on handover to the popup, revealed again once the popup is gone.
     assert events.index(("hide", "main")) < events.index(("show", "main")), events
     assert events.count(("hide", "main")) == events.count(("show", "main")), events
+
+
+# --- popup window geometry ---------------------------------------------------
+# The context's viewport (and therefore record_video_size) is shared by every
+# page, so a popup records onto a main-viewport-sized canvas. The site's own
+# window.open features are the deterministic statement of the real window size.
+
+
+@pytest.mark.parametrize(
+    "requested, expected",
+    [
+        ({"width": 640, "height": 480}, (640, 480)),
+        ({"width": 640.4, "height": 480.6}, (640, 480)),
+        (None, None),
+        ({"width": 0, "height": 480}, None),
+        ({"width": -640, "height": 480}, None),
+        ({"width": "640", "height": 480}, None),
+        ({"width": 640}, None),
+    ],
+)
+def test_parse_window_request(requested, expected):
+    assert _parse_window_request(requested) == expected
+
+
+async def test_popup_window_request_reads_window_open_features(tmp_path):
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(viewport={"width": 640, "height": 480})
+        await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
+        page = await context.new_page()
+        await page.set_content(
+            "<button onclick=\"window.open('about:blank','p','width=420,height=300')\">go</button>"
+        )
+
+        # Nothing opened yet: no geometry, so the compositor must not crop.
+        assert await _popup_window_request(page) is None
+
+        async with context.expect_page():
+            await page.click("button")
+
+        assert await _popup_window_request(page) == (420, 300)
+        await context.close()
+        await browser.close()
+
+
+async def test_popup_window_request_none_without_size_features(tmp_path):
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(viewport={"width": 640, "height": 480})
+        await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
+        page = await context.new_page()
+        # A featureless window.open states no size; degrade to today's no-crop path.
+        await page.set_content("<button onclick=\"window.open('about:blank','p')\">go</button>")
+
+        async with context.expect_page():
+            await page.click("button")
+
+        assert await _popup_window_request(page) is None
+        await context.close()
+        await browser.close()
+
+
+async def test_popup_window_request_finds_the_opener_iframe(tmp_path):
+    """The click that opens the popup happens inside the shell's site iframe."""
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(viewport={"width": 640, "height": 480})
+        await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
+        page = await context.new_page()
+        await page.set_content("<iframe id='site' srcdoc=\"<button>go</button>\"></iframe>")
+        frame = page.frame_locator("#site")
+        await frame.locator("button").evaluate(
+            "el => el.onclick = () => window.open('about:blank','p','width=500,height=360')"
+        )
+
+        async with context.expect_page():
+            await frame.locator("button").click()
+
+        assert await _popup_window_request(page) == (500, 360)
+        await context.close()
+        await browser.close()

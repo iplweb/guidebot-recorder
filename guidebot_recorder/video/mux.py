@@ -196,6 +196,44 @@ def _probe_size(path: Path) -> tuple[int, int]:
     return size
 
 
+def _normalise_popup_crop(
+    crop: tuple[int, int, int, int] | None,
+    source: tuple[int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """Clamp a popup crop rect into *source* and snap it to even pixels.
+
+    *crop* is ``(width, height, x, y)`` in the popup recording's own pixels, as
+    reported by the popup page itself. Returns ``None`` when there is nothing to
+    crop — no rect given, or a rect that already covers the whole recording — so
+    callers emit today's filtergraph verbatim.
+
+    Dimensions snap *down* to even numbers because the composite is encoded as
+    yuv420p (chroma is subsampled 2x2), the same reason the scale below uses
+    ``trunc(.../2)*2``. The origin snaps down too, so the crop never loses a
+    pixel of real content off the top-left.
+    """
+    if crop is None:
+        return None
+    width, height, x, y = (int(round(float(value))) for value in crop)
+    if width <= 0 or height <= 0 or x < 0 or y < 0:
+        raise ValueError(f"popup_crop must be a positive in-frame rect, got {crop}")
+    if source is not None:
+        source_width, source_height = source
+        if x >= source_width or y >= source_height:
+            raise ValueError(f"popup_crop origin is outside the popup recording {source}: {crop}")
+        width = min(width, source_width - x)
+        height = min(height, source_height - y)
+    x -= x % 2
+    y -= y % 2
+    width -= width % 2
+    height -= height % 2
+    if width <= 0 or height <= 0:
+        raise ValueError(f"popup_crop is smaller than one 2x2 chroma block: {crop}")
+    if source is not None and (x, y) == (0, 0) and (width, height) == source:
+        return None
+    return width, height, x, y
+
+
 def compose_popup_video(
     main: Path,
     popup: Path,
@@ -215,6 +253,7 @@ def compose_popup_video(
     close_ms: int = 240,
     hold_open_at_end: bool = False,
     slide_ms: int = 400,
+    popup_crop: tuple[int, int, int, int] | None = None,
 ) -> None:
     """Cut between the main-page and popup recordings on one timeline.
 
@@ -246,6 +285,14 @@ def compose_popup_video(
     span. When ``hold_open_at_end`` is true the close fade / un-dim (float) or the
     push-out (slide) is skipped and the popup is held to the last frame. All
     cosmetics have defaults, so existing ``floating=False`` callers are unaffected.
+
+    ``popup_crop`` is ``(width, height, x, y)`` in the popup recording's pixels:
+    the popup's *real* window inside the recorded frame. Playwright's
+    ``record_video_size`` is context-level, so a popup records onto a canvas the
+    size of the main viewport with filler around its actual window; without a
+    crop the ``float`` mode would frame that whole canvas. It applies to
+    ``float`` only (``cut``/``slide`` show the popup full-frame by design) and is
+    optional — omit it and the filtergraph is byte-identical to before.
     """
     main, popup, out = Path(main), Path(popup), Path(out)
     _check_sources(main, popup)
@@ -325,6 +372,7 @@ def compose_popup_video(
 
     if mode == "float":
         _compose_floating(
+            popup_crop=_normalise_popup_crop(popup_crop, _probe_all(popup).size),
             main=main,
             popup=popup,
             out=out,
@@ -447,6 +495,7 @@ def _compose_floating(
     close_ms: int,
     hold_open_at_end: bool,
     rate: float,
+    popup_crop: tuple[int, int, int, int] | None = None,
 ) -> None:
     """Assemble and run the floating-popup composite filtergraph.
 
@@ -504,7 +553,14 @@ def _compose_floating(
     # --- the reused popup cut -------------------------------------------------
     filters.append(popup_filter)
 
-    # --- framed popup: scale, rounded-corner alpha mask, fade in/out ----------
+    # --- framed popup: crop, scale, rounded-corner alpha mask, fade in/out ----
+    # The crop must precede the scale so every downstream cosmetic (the alpha
+    # mask's W/H, the fade, the blurred shadow) is computed on the popup's real
+    # window rather than on the full-viewport canvas it was recorded onto.
+    crop_filter = ""
+    if popup_crop is not None:
+        crop_width, crop_height, crop_x, crop_y = popup_crop
+        crop_filter = f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y},"
     r = corner_radius
     # Fully opaque except inside the four corner circles (radius r).
     alpha_expr = (
@@ -513,7 +569,8 @@ def _compose_floating(
         "255)"
     )
     framed = (
-        f"[popup_cut]scale=trunc(iw*{scale:.6f}/2)*2:trunc(ih*{scale:.6f}/2)*2,"
+        f"[popup_cut]{crop_filter}"
+        f"scale=trunc(iw*{scale:.6f}/2)*2:trunc(ih*{scale:.6f}/2)*2,"
         "format=rgba,"
         f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{alpha_expr}'"
     )
