@@ -19,6 +19,7 @@ from guidebot_recorder.video.mux import (
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
+    detect_teardown_tail,
     mux,
     mux_audio_tracks,
     mux_preencoded,
@@ -1386,3 +1387,113 @@ def test_mux_preencoded_adds_audio_without_changing_video_codec(tmp_path: Path) 
     assert _video_codec(out) == "h264"
     assert _stream_types(out) == ["video", "audio"]
     assert probe_duration(out) == pytest.approx(2.0, abs=0.4)
+
+
+def _make_popup_with_teardown_tail(
+    path: Path,
+    *,
+    good_seconds: float = 0.8,
+    tail_seconds: float = 0.2,
+    window: tuple[int, int] = (200, 150),
+    shrunk: tuple[int, int] | None = (150, 110),
+) -> None:
+    """Write a popup recording whose window shrinks for its final frames.
+
+    Mimics a headed render's teardown: the page content is unchanged but Chromium
+    stops rasterising the window at the screen's backing scale, so Playwright's
+    mid-grey padding grows and a crop sized from the stable part starts exposing
+    filler. ``shrunk=None`` writes a recording that never shrinks.
+    """
+    inputs: list[str] = []
+    parts: list[str] = []
+    sizes = [(window, good_seconds)]
+    if shrunk is not None:
+        sizes.append((shrunk, tail_seconds))
+    for index, ((width, height), seconds) in enumerate(sizes):
+        inputs += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:duration={seconds}:size={width}x{height}:rate=25",
+        ]
+        # 0x808080 is the mid-grey Chromium pads a popup's canvas with.
+        parts.append(f"[{index}:v]pad=320:240:0:0:0x808080[p{index}]")
+    concat = "".join(f"[p{i}]" for i in range(len(sizes)))
+    parts.append(f"{concat}concat=n={len(sizes)}:v=1:a=0,format=yuv420p[outv]")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(parts),
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_detect_teardown_tail_measures_the_trailing_shrunken_frames(tmp_path):
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == pytest.approx(0.2, abs=0.05)
+
+
+def test_detect_teardown_tail_reports_nothing_for_a_stable_recording(tmp_path):
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=1.0, shrunk=None)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_declines_when_the_crop_covers_the_canvas(tmp_path):
+    # No padding anywhere means no filler to recognise a shrunken window against.
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    assert detect_teardown_tail(popup, (320, 240, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_refuses_an_implausibly_long_run(tmp_path):
+    # Almost the whole recording reads as filler: the sampled corner is not
+    # reporting a window at all, so the measurement is discarded rather than
+    # trimming the popup away.
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.1, tail_seconds=0.9)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_degrades_on_an_unreadable_file(tmp_path):
+    missing = tmp_path / "nope.webm"
+
+    assert detect_teardown_tail(missing, (200, 150, 0, 0)) == 0.0
+
+
+def test_compose_popup_holds_the_last_good_frame_instead_of_the_teardown_tail(tmp_path):
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(main, "blue", 3.0)
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        1.0,
+        2.0,
+        transition="float",
+        popup_crop=(200, 150, 0, 0),
+    )
+
+    # The composite keeps its full length — the tail is replaced, not dropped.
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
