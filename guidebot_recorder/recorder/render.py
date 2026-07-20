@@ -356,6 +356,53 @@ async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
     return size
 
 
+async def _frame_window_opened(frame: Frame) -> bool | None:
+    """Read one frame's "was window.open called" flag, or ``None`` if it cannot answer."""
+
+    try:
+        return bool(await frame.evaluate(f"() => window.{_POPUP_OPENED_KEY} === true"))
+    except PlaywrightError:
+        # The frame navigated away, detached, or never ran the init script.
+        return None
+
+
+async def _scan_frames_for_window_opened(opener: Page) -> bool | None:
+    """Ask every frame, concurrently, whether it recorded a ``window.open`` call.
+
+    Mirrors ``_scan_frames_for_window_request``: the ``OPENED`` flag is mirrored
+    to the real top document only as a same-origin optimisation (see
+    ``_POPUP_REQUEST_SCRIPT``), so a call made from a genuinely cross-origin
+    frame — routine for the shell's site iframe — never reaches that mirror,
+    and the top frame alone cannot be trusted to answer. Every frame is asked
+    directly instead, concurrently and for the same reason as the geometry
+    scan: a dead ad iframe whose document never commits an execution context
+    must not block the others, or the render, forever.
+
+    Returns ``True`` the moment any frame reports the flag set, ``False`` if
+    every frame answered and none did, or ``None`` if no frame could answer at
+    all (the opener navigated away or died) — callers must treat ``None`` as
+    unknown, not as "no popup".
+    """
+
+    top = opener.main_frame
+    frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
+    tasks = [asyncio.ensure_future(_frame_window_opened(frame)) for frame in frames]
+    try:
+        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
+        answered = False
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                result = task.result()
+                if result is True:
+                    return True
+                if result is False:
+                    answered = True
+        return False if answered else None
+    finally:
+        for task in tasks:
+            _discard_pending(task)
+
+
 async def _popup_window_opened(page: Page) -> bool:
     """Whether this document called ``window.open`` at all, features or not.
 
@@ -364,14 +411,34 @@ async def _popup_window_opened(page: Page) -> bool:
     window this document never opened. Only the second is a ``target="_blank"``
     tab, and telling them apart is possible *while the popup is alive* — unlike
     the crop chain, whose verdict arrives after the recording is finished.
+
+    Read per frame, not just the top document: the init script's mirror onto
+    the real top document (``realTop[OPENED] = true``) is only a same-origin
+    optimisation — it throws and is swallowed for a genuinely cross-origin
+    frame, which is routine for the shell's site iframe. Reading only the top
+    frame therefore misses exactly that call and misreports a real popup as a
+    ``target="_blank"`` tab. ``_scan_frames_for_window_opened`` asks every
+    frame instead, exactly as ``_popup_window_request`` already does for the
+    geometry record.
     """
 
+    def _assume_opened() -> bool:
+        tqdm.write(
+            "OSTRZEŻENIE: żadna ramka strony otwierającej nie potwierdziła wywołania "
+            "window.open() — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
+
     try:
-        return bool(await page.evaluate(f"window['{_POPUP_OPENED_KEY}'] === true"))
+        opened = await _scan_frames_for_window_opened(page)
     except PlaywrightError:
         # An opener that navigated or died reports nothing; treat it as "unknown",
         # which keeps today's bare-popup behaviour rather than mounting a bar.
-        return True
+        return _assume_opened()
+    if opened is None:
+        return _assume_opened()
+    return opened
 
 
 #: A content bounding box at least this fraction of the viewport in *both*

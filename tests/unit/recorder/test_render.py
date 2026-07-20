@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import textwrap
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -2620,3 +2622,73 @@ async def test_window_open_call_is_recorded_even_without_size_features():
         assert await render_module._popup_window_request(page) is None
 
         await browser.close()
+
+
+def _start_static_http_server(body: bytes) -> tuple[ThreadingHTTPServer, threading.Thread, str]:
+    """Serve ``body`` at ``/`` on an ephemeral 127.0.0.1 port; return (server, thread, origin)."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:  # silence the test server
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+async def test_popup_window_opened_is_true_from_a_cross_origin_opener_iframe():
+    """The click that opens the popup happens inside a genuinely cross-origin
+    site iframe — unlike ``test_popup_window_request_finds_the_opener_iframe``,
+    which uses ``srcdoc`` and is therefore same-origin with the opener's top
+    document. Here the iframe's ``realTop[OPENED] = true`` mirror write throws
+    a real cross-origin ``SecurityError`` (swallowed by the init script's own
+    ``catch``), so only a per-frame scan — not a top-frame-only read — can see
+    that ``window.open`` was called at all.
+    """
+
+    inner_body = (
+        b"<!doctype html><body>"
+        b"<button id='go' onclick=\"window.open('about:blank','p','width=500,height=400')\">"
+        b"go</button></body>"
+    )
+    inner_server, inner_thread, inner_origin = _start_static_http_server(inner_body)
+    outer_body = (
+        f"<!doctype html><body><iframe id='site' src='{inner_origin}/'></iframe></body>"
+    ).encode()
+    outer_server, outer_thread, outer_origin = _start_static_http_server(outer_body)
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(viewport={"width": 640, "height": 480})
+            await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
+            page = await context.new_page()
+            await page.goto(outer_origin)
+            frame = page.frame_locator("#site")
+
+            # Nothing opened yet, and the two documents are on distinct origins.
+            assert await render_module._popup_window_opened(page) is False
+
+            async with context.expect_page():
+                await frame.locator("#go").click()
+
+            assert await render_module._popup_window_opened(page) is True
+            # The sibling geometry lookup already handled this correctly; must
+            # keep doing so unchanged.
+            assert await _popup_window_request(page) == (500, 400)
+
+            await context.close()
+            await browser.close()
+    finally:
+        inner_server.shutdown()
+        inner_thread.join()
+        outer_server.shutdown()
+        outer_thread.join()
