@@ -28,7 +28,8 @@ from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment
-from tests.unit.recorder.test_render import FakeTts
+from guidebot_recorder.video.audiobed import Placed
+from tests.unit.recorder.test_render import FakeTts, TwoSecondTts
 
 pytestmark = [
     pytest.mark.ffmpeg,
@@ -63,8 +64,9 @@ def _branch_scenario(url: str) -> str:
 
 def _optional_step_scenario(*, optional: bool) -> str:
     marker = "    optional: true\n" if optional else ""
-    return textwrap.dedent(
-        f"""\
+    return (
+        textwrap.dedent(
+            f"""\
         config:
           title: Krok opcjonalny
           viewport: {{width: 640, height: 480}}
@@ -73,7 +75,10 @@ def _optional_step_scenario(*, optional: bool) -> str:
           - navigate: "{PLAIN_PAGE}"
           - teach: "kliknij Akceptuje"
         """
-    ) + marker + '  - teach: "kliknij Zaloguj"\n'
+        )
+        + marker
+        + '  - teach: "kliknij Zaloguj"\n'
+    )
 
 
 def _identity(tag: str) -> Identity:
@@ -147,11 +152,14 @@ def narration_spy(monkeypatch):
 
     waited: list[float] = []
 
-    async def observe(segments: list[Segment]) -> None:
+    async def observe(segments: list[Segment], **kwargs) -> int | None:
         if segments:
             waited.append(max(segment.duration for segment in segments))
+        # Pacing itself is stubbed out (these tests care only about *which*
+        # steps narrate, not how long they hold), so no freeze is emitted.
+        return None
 
-    monkeypatch.setattr("guidebot_recorder.recorder.render._wait_for_step_narration", observe)
+    monkeypatch.setattr("guidebot_recorder.recorder.render._pace_narration", observe)
     return waited
 
 
@@ -409,3 +417,87 @@ async def test_pending_entry_on_a_required_step_demands_a_recompile(tmp_path, br
 
     with pytest.raises(RenderError, match="krok 1"):
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+
+
+# --- hold-frame pacing inside a taken branch --------------------------------------
+
+
+def _branch_narration_scenario(url: str, count: int) -> str:
+    """A `when:` branch whose gate is entered, holding ``count`` `say` children."""
+
+    header = textwrap.dedent(
+        f"""\
+        config:
+          title: Bramka bez nakladek
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+          holdFrameForNarration: true
+        steps:
+          - navigate: "{url}"
+          - when: "baner cookies"
+            timeout: 1
+            steps:
+        """
+    )
+    body = "".join(f'      - say: "Krok {n}."\n' for n in range(1, count + 1))
+    return header + body
+
+
+async def test_hold_frame_narrations_inside_taken_branch_never_overlap(
+    tmp_path, browser, monkeypatch
+):
+    """The freeze clamp that stops overlapping narrations must hold on a branch path too.
+
+    `test_hold_frame_narrations_never_overlap` (`test_render.py`) proves the
+    `_stamp_frame(anchor, not_before=last_freeze_frame + 1)` clamp for TOP-LEVEL
+    `say` steps. Every other test in THIS module uses the `narration_spy`
+    fixture, which stubs `_pace_narration` to return `None` — so
+    `last_freeze_frame` never advances and the clamp is never exercised for a
+    branch child. `Scenario.flat_steps()` folds a branch's gate and children
+    into the very same render loop as top-level steps (see its docstring), so
+    nothing here is expected to behave differently — proving that is the
+    point: a future edit that special-cases branch children and drops or moves
+    the `not_before` clamp on that path would leave every other test in this
+    file green (they never engage real pacing) and only show up as an
+    overlapping voice-over here, or in a rendered video.
+
+    Eight consecutive `say` steps INSIDE a taken `when:` branch, at the
+    default settle with hold-frame pacing genuinely engaged, must still be
+    placed so that no narration starts before its predecessor ends — the same
+    placement invariant as the main-path test, captured the same way: the
+    offsets actually handed to the audio bed.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    path = tmp_path / "branch-no-overlap.scenario.yaml"
+    path.write_text(_branch_narration_scenario(BANNER_PAGE, 8), encoding="utf-8")
+    chash = _chash(path)
+    _write(path, [None, _gate(chash), *([None] * 8)])
+
+    # The offsets actually handed to the audio bed, captured at the boundary
+    # where the frame axis becomes seconds — same capture point as
+    # `test_hold_frame_narrations_never_overlap`.
+    captured: list[list[Placed]] = []
+    original = R._assemble_audio_tracks
+
+    async def spy(video, configs, placed_by_language, total, *args, **kwargs):
+        captured.extend(placed_by_language.values())
+        return await original(video, configs, placed_by_language, total, *args, **kwargs)
+
+    monkeypatch.setattr(R, "_assemble_audio_tracks", spy)
+
+    out = tmp_path / "out.mp4"
+    await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)
+
+    assert captured, "no narration was placed"
+    placed = captured[0]
+    assert len(placed) == 8, (
+        f"expected all 8 branch narrations, the gate must have been taken: {placed}"
+    )
+    offsets = [round(p.offset, 3) for p in placed]
+    gaps = [round(b - a, 3) for a, b in zip(offsets, offsets[1:], strict=False)]
+    for index, (gap, previous) in enumerate(zip(gaps, placed, strict=False)):
+        assert gap >= previous.segment.duration - 1e-6, (
+            f"narration {index + 1} starts {previous.segment.duration - gap:.2f}s "
+            f"before narration {index} ends — offsets={offsets} gaps={gaps}"
+        )

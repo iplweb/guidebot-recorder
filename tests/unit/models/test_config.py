@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from guidebot_recorder.models.config import (
+    MIN_HOLD_FRAME_SETTLE,
     ChromeConfig,
     Config,
     PopupConfig,
@@ -418,7 +419,7 @@ def test_sound_config_defaults_and_bounds():
     s = SoundConfig()
     assert (s.enabled, s.click, s.keys, s.volume) == (True, True, True, -12.0)
     with pytest.raises(ValidationError):
-        SoundConfig(volume=3.0)   # positive gain rejected (le=0)
+        SoundConfig(volume=3.0)  # positive gain rejected (le=0)
     with pytest.raises(ValidationError):
         SoundConfig(bogus=1)
 
@@ -443,18 +444,24 @@ def test_new_render_only_blocks_do_not_change_config_hash():
         TypingConfig,
         Viewport,
     )
+
     base = Config(
-        title="t", viewport=Viewport(width=800, height=600),
+        title="t",
+        viewport=Viewport(width=800, height=600),
         tts=TtsConfig(provider="edge", voice="v", lang="pl-PL"),
     )
     h0 = config_hash(base)
-    mutated = base.model_copy(update={
-        "cursor": CursorConfig(click=CursorClick(flash=True, scale=4.5)),
-        "typing": TypingConfig(animate=True, speed=40),
-        "sound": SoundConfig(enabled=True, volume=-6.0),
-        "intro": IntroConfig(enabled=True, subtitle="s"),
-    })
+    mutated = base.model_copy(
+        update={
+            "cursor": CursorConfig(click=CursorClick(flash=True, scale=4.5)),
+            "typing": TypingConfig(animate=True, speed=40),
+            "sound": SoundConfig(enabled=True, volume=-6.0),
+            "intro": IntroConfig(enabled=True, subtitle="s"),
+        }
+    )
     assert config_hash(mutated) == h0
+
+
 def test_popup_defaults():
     popup = PopupConfig()
 
@@ -661,3 +668,82 @@ def test_config_hash_unchanged_when_slide_ms_changes():
     changed = _cfg(popup=PopupConfig(slide_ms=900))
 
     assert config_hash(changed) == config_hash(baseline)
+
+
+def test_hold_frame_defaults_to_on() -> None:
+    cfg = Config(
+        title="t",
+        viewport=Viewport(width=1280, height=720),
+        tts=TtsConfig(provider="edge", lang="pl", voice="pl-PL-ZofiaNeural"),
+    )
+    assert cfg.hold_frame_for_narration is True
+    assert cfg.hold_frame_settle == 1.0
+
+
+def test_hold_frame_accepts_camel_case_aliases() -> None:
+    cfg = Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+            "holdFrameForNarration": False,
+            "holdFrameSettle": 0.5,
+        }
+    )
+    assert cfg.hold_frame_for_narration is False
+    assert cfg.hold_frame_settle == 0.5
+
+
+@pytest.mark.parametrize(
+    "settle",
+    [
+        -1.0,
+        0.0,
+        MIN_HOLD_FRAME_SETTLE / 2,  # sub-frame: half the two-frame floor
+    ],
+)
+def test_hold_frame_settle_rejects_below_the_two_frame_floor(settle: float) -> None:
+    """Both negative and sub-frame settle values must be rejected at load time.
+
+    Negative values are nonsensical; sub-frame values are not representable on
+    the renderer's 25fps grid at all (see `MIN_HOLD_FRAME_SETTLE`'s comment).
+
+    This is NOT what stops narration from colliding with the previous step's
+    freeze — that guard is monotonic stamping in `recorder.render._stamp_frame`,
+    which applies at every settle value, including this floor. Settle only
+    separates a step's own start from its own freeze; the distance from that
+    freeze to the NEXT step's stamp is unrelated to it.
+    """
+    with pytest.raises(ValidationError):
+        Config.model_validate(
+            {
+                "title": "t",
+                "viewport": {"width": 1280, "height": 720},
+                "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+                "holdFrameSettle": settle,
+            }
+        )
+
+
+def test_hold_frame_settle_accepts_the_two_frame_floor() -> None:
+    cfg = Config.model_validate(
+        {
+            "title": "t",
+            "viewport": {"width": 1280, "height": 720},
+            "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+            "holdFrameSettle": MIN_HOLD_FRAME_SETTLE,
+        }
+    )
+    assert cfg.hold_frame_settle == MIN_HOLD_FRAME_SETTLE
+
+
+def test_hold_frame_is_not_part_of_config_hash() -> None:
+    """Render-only pacing must never invalidate compiled references."""
+    base = {
+        "title": "t",
+        "viewport": {"width": 1280, "height": 720},
+        "tts": {"provider": "edge", "lang": "pl", "voice": "pl-PL-ZofiaNeural"},
+    }
+    a = Config.model_validate(base)
+    b = Config.model_validate({**base, "holdFrameForNarration": False, "holdFrameSettle": 3.0})
+    assert config_hash(a) == config_hash(b)

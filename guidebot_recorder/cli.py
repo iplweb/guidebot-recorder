@@ -8,6 +8,7 @@ from pathlib import Path
 
 import typer
 from playwright.async_api import async_playwright
+from pydantic import ValidationError
 
 from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
 from guidebot_recorder.recorder.render import run_render
@@ -154,6 +155,24 @@ def render_cmd(
     timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
     auto_heal: bool = typer.Option(False, "--auto-heal", help="(niezaimplementowane w v1)"),
+    hold_frame: bool | None = typer.Option(
+        None,
+        "--hold-frame/--no-hold-frame",
+        help=(
+            "Zamroź klatkę na czas narracji zamiast czekać w czasie rzeczywistym "
+            "(domyślnie z konfiguracji)."
+        ),
+    ),
+    hold_frame_settle: float | None = typer.Option(
+        None,
+        "--hold-frame-settle",
+        help="Sekundy realnego czasu przed zamrożeniem klatki (domyślnie z konfiguracji).",
+    ),
+    dump_timeline: bool = typer.Option(
+        False,
+        "--dump-timeline",
+        help="Zapisz wyliczoną oś czasu obok pliku wideo (diagnostyka).",
+    ),
 ) -> None:
     """Zrenderuj `.mp4` z jedną lub wieloma ścieżkami lektora (0×LLM)."""
     if auto_heal:
@@ -161,7 +180,11 @@ def render_cmd(
         raise typer.Exit(code=2)
 
     scenario = load_scenario(path)
-    providers = {track.provider for track in [scenario.config.tts, *scenario.config.audio_tracks]}
+    cfg = scenario.config
+    # `run_render` reloads the scenario from `path` itself, so the hold-frame
+    # flags are passed to it as explicit overrides rather than mutated onto this
+    # Config (which the renderer never sees). `None` keeps the scenario's value.
+    providers = {track.provider for track in [cfg.tts, *cfg.audio_tracks]}
     if providers != {"edge"}:
         configured = ", ".join(sorted(providers))
         typer.echo(
@@ -170,6 +193,19 @@ def render_cmd(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # `run_render` applies this override by ASSIGNING onto its own reloaded
+    # Config (see the comment above), which is exactly the same
+    # `validate_assignment` path exercised here — so a value the field
+    # rejects (e.g. `--hold-frame-settle 0`) is caught NOW, before the browser
+    # ever launches, instead of surfacing as an unhandled ValidationError deep
+    # inside `_run()` after Chromium is already up.
+    if hold_frame_settle is not None:
+        try:
+            cfg.hold_frame_settle = hold_frame_settle
+        except ValidationError as exc:
+            typer.echo(f"BŁĄD: nieprawidłowa wartość --hold-frame-settle: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     async def _run() -> None:
         async with async_playwright() as pw:
@@ -184,6 +220,9 @@ def render_cmd(
                     timeout=timeout,
                     pause_on_error=pause_on_error,
                     verbose=verbose,
+                    hold_frame=hold_frame,
+                    hold_frame_settle=hold_frame_settle,
+                    dump_timeline=dump_timeline,
                     reasoner=_render_reasoner(),
                 )
             finally:

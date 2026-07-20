@@ -16,7 +16,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -82,6 +82,15 @@ from guidebot_recorder.video.mux import (
     probe_duration,
 )
 from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
+from guidebot_recorder.video.timeline import (
+    TimeEdit,
+    Timeline,
+    apply_time_edits,
+    assert_recording_fps,
+    frames_to_seconds,
+    probe_frame_count,
+    seconds_to_frames,
+)
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
@@ -1075,11 +1084,130 @@ def _narration(step: Step) -> str | None:
     return step.narration()
 
 
-async def _wait_for_step_narration(segments: list[Segment]) -> None:
-    """Pace one shared visual step by its longest configured narration."""
+def _stamp_frame(anchor: float, *, not_before: int = 0) -> int:
+    """Stamp "now" as a recording frame index, never earlier than *not_before*.
 
-    if segments:
-        await asyncio.sleep(max(segment.duration for segment in segments))
+    Every audio placement is a wall-clock reading quantised onto the 25fps grid,
+    and every such reading is later mapped through :meth:`Timeline.to_virtual`,
+    which shifts a stamp past a freeze only when the freeze sits STRICTLY before
+    it — a stamp exactly AT its own freeze point must stay put, because that is
+    where the narration the freeze exists for begins.
+
+    That rule is right, but it makes the grid unforgiving: a freeze recorded at
+    frame ``F`` and a later event whose reading also rounds to ``F`` (the work
+    in between took less than 40ms — a couple of CDP round-trips easily fits)
+    are indistinguishable, so the later event maps to the START of the hold and
+    fires up to a whole narration early. Nothing bounds that gap: ``settle``
+    separates the step's own start from ``F``, not ``F`` from what follows it.
+
+    So stamps are made monotonic against the freezes already emitted: once a
+    freeze exists at ``F``, everything stamped afterwards is at least ``F + 1``
+    and therefore lands after the hold. The cost is at most one frame (40ms) of
+    placement error on an event that genuinely happened within the same frame,
+    which is below the resolution the axis can represent at all.
+    """
+    return max(seconds_to_frames(time.monotonic() - anchor), not_before)
+
+
+async def _pace_narration(
+    segments: list[Segment],
+    *,
+    anchor: float,
+    hold_frame: bool,
+    settle: float,
+    edits: list[TimeEdit],
+    not_before: int = 0,
+) -> int | None:
+    """Pace one shared visual step by its longest configured narration.
+
+    With ``hold_frame`` the wall clock only pays ``settle`` seconds — enough for
+    entry animations triggered by this step to finish — and the rest of the
+    voice-over becomes a held frame inserted in post. The settle comes *out of*
+    the narration, not on top of it, so the finished film keeps the exact pacing
+    it had when the renderer slept through the whole thing.
+
+    Returns the recording frame the freeze was stamped at, or ``None`` when no
+    freeze was recorded. *not_before* is the earliest frame this freeze may be
+    stamped at — see :func:`_stamp_frame`; freezes are stamped through the same
+    monotonic rule as everything else so a later freeze can never precede an
+    earlier one on the recording axis.
+    """
+
+    if not segments:
+        return None
+    duration = max(segment.duration for segment in segments)
+
+    if not hold_frame:
+        await asyncio.sleep(duration)
+        return None
+
+    real = min(settle, duration)
+    await asyncio.sleep(real)
+
+    remaining = duration - real
+    if remaining <= 0:
+        return None
+    at = _stamp_frame(anchor, not_before=not_before)
+    edits.append(TimeEdit(at=at, kind="freeze", frames=seconds_to_frames(remaining)))
+    return at
+
+
+def _build_timeline(edits: Iterable[TimeEdit], *, source_frames: int) -> Timeline:
+    """Coalesce collected edits onto the frame grid, then validate them.
+
+    ``Timeline`` is deliberately strict — it rejects two edits on one frame, and
+    anything at or past the end of the recording — because those are nonsense as
+    a *model*. They are not nonsense as *observations*: a freeze recorded near
+    the end can round past the 0.1s postroll and land at or beyond the last
+    frame, and the clamp that pulls it back can then collide with a freeze
+    already sitting there. Either would otherwise blow up after the entire
+    recording is finished, losing the render.
+
+    (``_stamp_frame`` now keeps freezes at least a frame apart as they are
+    emitted, so two *unclamped* freezes can no longer share a frame. The merge
+    still has to exist for the clamped case, and is kept general rather than
+    special-cased to it.)
+
+    So the collected list is reconciled here, where the observations are:
+
+    * an ``at`` at or beyond the end clamps to the last real frame — there is no
+      later frame to hold, and the film must still gain those frames;
+    * freezes sharing a frame merge by SUMMING their lengths, because two steps
+      that both want the picture held at frame N mean the film holds frame N for
+      the total of both. The film comes out exactly as long as the narration
+      asked for, which is the invariant that matters.
+    """
+    merged: dict[int, TimeEdit] = {}
+    passthrough: list[TimeEdit] = []
+    for edit in edits:
+        if edit.kind != "freeze":
+            passthrough.append(edit)
+            continue
+        at = min(edit.at, source_frames - 1)
+        previous = merged.get(at)
+        frames = edit.frames + (previous.frames if previous else 0)
+        merged[at] = TimeEdit(at=at, kind="freeze", frames=frames)
+    return Timeline.build([*merged.values(), *passthrough], source_frames=source_frames)
+
+
+def _apply_timeline_edits(source: Path, timeline: Timeline, dest: Path) -> None:
+    """Apply *timeline* to *source*, then verify the result against the model.
+
+    Everything downstream trusts ``Timeline.virtual_duration``: the audio beds
+    are built to that length and ``mux_audio_tracks`` is handed the same number
+    as its ``video_duration``, so its duration guard compares the model against
+    itself and can never catch a model/file disagreement. This is the one place
+    the model meets the file, so the check is exact — both sides are integer
+    frame counts, and a difference of even one frame means the filtergraph did
+    something other than what was modelled.
+    """
+    apply_time_edits(source, timeline, dest)
+    produced = probe_frame_count(dest)
+    if produced != timeline.virtual_frames:
+        raise RenderError(
+            f"time-edit stage produced {produced} frames but the timeline models "
+            f"{timeline.virtual_frames} — audio would be written at the wrong length"
+        )
 
 
 async def _presynthesize_narration(
@@ -1452,6 +1580,9 @@ async def run_render(
     timeout: float = 30.0,
     pause_on_error: bool = False,
     verbose: bool = False,
+    hold_frame: bool | None = None,
+    hold_frame_settle: float | None = None,
+    dump_timeline: bool = False,
     reasoner: Reasoner | None = None,
 ) -> None:
     path = Path(path)
@@ -1461,6 +1592,13 @@ async def run_render(
     scenario = load_scenario(path, env)
     sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cfg = scenario.config
+    # Caller-side overrides (the CLI flags). ``None`` means "use whatever the
+    # scenario configured" — the scenario is loaded here, so an override applied
+    # to a Config built by the caller would be discarded.
+    if hold_frame is not None:
+        cfg.hold_frame_for_narration = hold_frame
+    if hold_frame_settle is not None:
+        cfg.hold_frame_settle = hold_frame_settle
     audio_configs = [cfg.tts, *cfg.audio_tracks]
     providers = {tts.provider for tts in audio_configs}
     if len(providers) != 1:
@@ -1667,12 +1805,24 @@ async def run_render(
     await page.wait_for_timeout(100)
     anchor = time.monotonic()
 
-    sfx_events: list[tuple[str, float]] = []
+    # Audio placements are collected as recording-axis FRAMES, not seconds: the
+    # grid is what `Timeline` reasons on, and quantising once at the moment of
+    # observation is what lets `_stamp_frame` keep them monotonic against the
+    # freezes. Seconds reappear only at the very end, when the audio bed is built.
+    sfx_events: list[tuple[str, int]] = []
+    # Freezes recorded while rendering, on the *recording* axis. Applied to the
+    # video — and used to remap every audio offset — once the loop is done.
+    time_edits: list[TimeEdit] = []
+    # Frame of the most recent freeze, or -1 before any. Read by `_stamp_frame`
+    # so nothing is ever stamped inside a hold that was already recorded.
+    last_freeze_frame = -1
 
     def sfx_sink(kind: str) -> None:
-        sfx_events.append((kind, time.monotonic()))
+        sfx_events.append((kind, _stamp_frame(anchor, not_before=last_freeze_frame + 1)))
 
-    placed_by_language: dict[str, list[Placed]] = {tts.lang: [] for tts in audio_configs}
+    placed_by_language: dict[str, list[tuple[Segment, int]]] = {
+        tts.lang: [] for tts in audio_configs
+    }
     popup: _PopupSession | None = None
     popup_open_at_end = False
 
@@ -1817,18 +1967,27 @@ async def run_render(
                     raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
 
             step_segments: list[Segment] = []
-            narration_offset = time.monotonic() - anchor
+            # Recording-axis frame: the mapping onto the finished film needs the
+            # complete edit list, which does not exist until the loop ends.
+            narration_frame = _stamp_frame(anchor, not_before=last_freeze_frame + 1)
             for tts in audio_configs:
                 seg = segments[tts.lang].get(index)
                 if seg is not None:
-                    placed_by_language[tts.lang].append(
-                        Placed(segment=seg, offset=narration_offset)
-                    )
+                    placed_by_language[tts.lang].append((seg, narration_frame))
                     step_segments.append(seg)
             if step_segments:
                 # One picture timeline: the action waits for the longest language,
                 # while shorter tracks naturally contain silence before the action.
-                await _wait_for_step_narration(step_segments)
+                emitted = await _pace_narration(
+                    step_segments,
+                    anchor=anchor,
+                    hold_frame=cfg.hold_frame_for_narration,
+                    settle=cfg.hold_frame_settle,
+                    edits=time_edits,
+                    not_before=narration_frame,
+                )
+                if emitted is not None:
+                    last_freeze_frame = emitted
 
             _sync_popup_close(popup, observed_pages, anchor)
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
@@ -1979,76 +2138,97 @@ async def run_render(
         await asyncio.gather(*prime_tasks, return_exceptions=True)
         await context.close()
 
-    sfx_offsets: list[tuple[str, float]] = []
+    sfx_frames: list[tuple[str, int]] = []
     if cfg.sound.enabled:
-        for kind, t in sfx_events:
+        for kind, frame in sfx_events:
             if kind == "click" and not cfg.sound.click:
                 continue
             if kind == "key" and not cfg.sound.keys:
                 continue
-            off = t - anchor
-            if off < 0:
-                raise RenderError(f"ujemny offset SFX ({off}) — błąd zegara renderu")
-            sfx_offsets.append((kind, off))
+            if frame < 0:
+                raise RenderError(f"ujemna klatka SFX ({frame}) — błąd zegara renderu")
+            sfx_frames.append((kind, frame))
 
     main_webm = Path(await video.path())
     if popup is None:
-        total = probe_duration(main_webm)
-        await _assemble_audio_tracks(
-            main_webm,
-            audio_configs,
-            placed_by_language,
-            total,
-            work,
-            out_mp4,
-            sound=cfg.sound,
-            sfx_offsets=sfx_offsets,
+        source_video = main_webm
+        preencoded = False
+    else:
+        popup_webm = Path(await popup.video.path())
+        # The popup recorded onto the main window's canvas; crop it back to its
+        # real window so float frames that and not a viewport-sized rectangle of
+        # filler. Three levels, best evidence first; all declining -> today's
+        # full canvas.
+        popup_crop, _crop_level = _resolve_popup_crop(
+            window_size=popup.window_size,
+            content_box=popup.content_box,
+            popup_video=popup_webm,
+            verbose=verbose,
+            viewport=popup.viewport,
+            canvas=(cfg.viewport.width, cfg.viewport.height),
         )
-        return
+        closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
+        assert closed_at is not None
+        composite = work / f"{out_mp4.stem}.composite.mp4"
+        compose_popup_video(
+            main_webm,
+            popup_webm,
+            composite,
+            popup.opened_at,
+            closed_at,
+            visual_ready_delay=popup.visual_ready_delay,
+            transition=cfg.popup.effective_transition,
+            slide_ms=cfg.popup.slide_ms,
+            scale=cfg.popup.scale,
+            corner_radius=cfg.popup.corner_radius,
+            shadow=cfg.popup.shadow,
+            backdrop_dim=cfg.popup.backdrop_dim,
+            backdrop_blur=cfg.popup.backdrop_blur,
+            open_ms=cfg.popup.open_ms,
+            close_ms=cfg.popup.close_ms,
+            hold_open_at_end=popup_open_at_end,
+            popup_crop=popup_crop,
+        )
+        source_video = composite
+        preencoded = True
 
-    popup_webm = Path(await popup.video.path())
-    # The popup recorded onto the main window's canvas; crop it back to its real
-    # window so float frames that and not a viewport-sized rectangle of filler.
-    # Three levels, best evidence first; all declining -> today's full canvas.
-    popup_crop, _crop_level = _resolve_popup_crop(
-        window_size=popup.window_size,
-        content_box=popup.content_box,
-        popup_video=popup_webm,
-        verbose=verbose,
-        viewport=popup.viewport,
-        canvas=(cfg.viewport.width, cfg.viewport.height),
-    )
-    closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
-    assert closed_at is not None
-    composite = work / f"{out_mp4.stem}.composite.mp4"
-    compose_popup_video(
-        main_webm,
-        popup_webm,
-        composite,
-        popup.opened_at,
-        closed_at,
-        visual_ready_delay=popup.visual_ready_delay,
-        transition=cfg.popup.effective_transition,
-        slide_ms=cfg.popup.slide_ms,
-        scale=cfg.popup.scale,
-        corner_radius=cfg.popup.corner_radius,
-        shadow=cfg.popup.shadow,
-        backdrop_dim=cfg.popup.backdrop_dim,
-        backdrop_blur=cfg.popup.backdrop_blur,
-        open_ms=cfg.popup.open_ms,
-        close_ms=cfg.popup.close_ms,
-        hold_open_at_end=popup_open_at_end,
-        popup_crop=popup_crop,
-    )
-    total = probe_duration(composite)
+    # Time editing runs AFTER popup composition: popups are composed on the
+    # recording axis (their opened_at/closed_at are raw wall clock) and must stay
+    # there. Only what is consumed downstream — narration and SFX — moves onto
+    # the virtual axis.
+    timeline = _build_timeline(time_edits, source_frames=probe_frame_count(source_video))
+    if dump_timeline:
+        out_mp4.with_suffix(".timeline.json").write_text(timeline.to_json(), encoding="utf-8")
+    if not timeline.is_empty:
+        assert_recording_fps(source_video)
+        edited = work / f"{out_mp4.stem}.timeline.mp4"
+        _apply_timeline_edits(source_video, timeline, edited)
+        source_video = edited
+        preencoded = True
+
+    # Taken from the model rather than probed, which is what makes the audio and
+    # video axes agree by construction.
+    total = timeline.virtual_duration
+    # The one place frames become seconds: mapped on the grid, then converted.
+    placed_tracks = {
+        lang: [
+            Placed(segment=seg, offset=frames_to_seconds(timeline.to_virtual(frame)))
+            for seg, frame in placed
+        ]
+        for lang, placed in placed_by_language.items()
+    }
+    sfx_offsets = [
+        (kind, frames_to_seconds(timeline.to_virtual(frame))) for kind, frame in sfx_frames
+    ]
+
     await _assemble_audio_tracks(
-        composite,
+        source_video,
         audio_configs,
-        placed_by_language,
+        placed_tracks,
         total,
         work,
         out_mp4,
-        preencoded=True,
+        preencoded=preencoded,
         sound=cfg.sound,
         sfx_offsets=sfx_offsets,
     )

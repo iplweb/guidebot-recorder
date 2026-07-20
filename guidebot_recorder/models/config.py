@@ -13,6 +13,33 @@ from guidebot_recorder.languages import is_iso_639_2
 #: version of the canonical config projection used for the hash
 CONFIG_HASH_VERSION = 2
 
+# Lower bound for `Config.hold_frame_settle`, in seconds: two frames at the
+# renderer's frame rate (guidebot_recorder.video.timeline.FPS = 25). Not
+# imported from there — this model module should stay free of a dependency
+# on the video package, so the value is restated here with FPS named as its
+# source of truth.
+#
+# A settle below one frame is not representable on that grid at all: the
+# renderer would claim to record real time it cannot place, and a zero settle
+# means the picture stops before the step's own entry animation has drawn a
+# single frame of itself. That argument only requires a ONE-frame floor —
+# settle = 1/25 has been verified to render correctly (the freeze lands at
+# narr + 1, and `video.timeline._segments` folds it into a run of two frames
+# or more; nothing breaks). The second frame here is a deliberate, extra
+# margin, not something the one-frame argument above demands on its own —
+# kept because "smallest value that still works today" and "smallest value
+# that will keep working as the renderer changes" are different bars, and the
+# cost of the margin is one settle-frame of narration, not one video-frame of
+# render time.
+#
+# This bound is NOT what keeps narration offsets from colliding. That was the
+# original (mistaken) rationale: settle separates a step's start from its own
+# freeze, and says nothing about the distance from that freeze to the NEXT
+# step's stamp, which is where the collision actually happened. Monotonic
+# stamping in `recorder.render._stamp_frame` is what fixes it, at every settle
+# value including this floor.
+MIN_HOLD_FRAME_SETTLE = 2 / 25
+
 
 class Viewport(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -201,7 +228,15 @@ class PopupConfig(BaseModel):
 
 
 class Config(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    # `validate_assignment` because the render CLI's overrides (`--hold-frame`,
+    # `--hold-frame-settle`) are applied by ASSIGNING onto an already-built
+    # Config. Without it those assignments skip every constraint the field
+    # declares: `--hold-frame-settle 0` reached the recorder despite the `ge=`
+    # bound, and a negative value made the held frame LONGER than the narration
+    # asked for, inflating the film past its own audio with no error. Validating
+    # on assignment fixes the whole class at the model instead of at one call
+    # site, so a future override cannot reintroduce it.
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, validate_assignment=True)
     title: str
     viewport: Viewport
     tts: TtsConfig
@@ -214,6 +249,18 @@ class Config(BaseModel):
     sound: SoundConfig = Field(default_factory=SoundConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
+
+    # --- Render pacing (render-only; deliberately absent from config_hash) ---
+    # Holding a still frame instead of waiting out the voice-over. The narration
+    # still plays in full; it is the picture that stops. `hold` matches the sense
+    # it already carries in `step.slide.hold`.
+    hold_frame_for_narration: bool = Field(default=True, alias="holdFrameForNarration")
+    # Real seconds recorded before the frame is held, paid OUT OF the narration
+    # (not on top of it) so the finished film keeps its length. Gives entry
+    # animations triggered by this step time to finish before the picture stops.
+    # Floor is MIN_HOLD_FRAME_SETTLE (two 25fps frames): below it the settle is
+    # not representable on the frame grid (see that constant's comment).
+    hold_frame_settle: float = Field(default=1.0, alias="holdFrameSettle", ge=MIN_HOLD_FRAME_SETTLE)
 
     @model_validator(mode="after")
     def _unique_audio_languages(self) -> Config:
