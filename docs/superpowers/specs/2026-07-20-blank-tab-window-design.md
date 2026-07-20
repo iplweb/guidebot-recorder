@@ -33,37 +33,37 @@ not write a second transition.
 
 ### 1. Presentation collapses to the wrong branch
 
-`_resolve_popup_crop` (`render.py:563-592`) is a three-level fallback. A `_blank` tab
+`_resolve_popup_crop` (`render.py:573-602`) is a three-level fallback. A `_blank` tab
 fails all three:
 
-- **`window.open` features** — the init script at `render.py:174-214` monkey-patches
+- **`window.open` features** — the init script at `render.py:184-224` monkey-patches
   `window.open` to record `width=`/`height=`. A `_blank` link never calls
-  `window.open`, so the patch never fires and the warning at `render.py:310-314`
+  `window.open`, so the patch never fires and the warning at `render.py:320-324`
   reports that no frame supplied a size. That warning blames the site for an omission
   the site never made.
-- **content bbox** — declined at `render.py:364` (`paintsPage`): any real site paints
+- **content bbox** — declined at `render.py:374` (`paintsPage`): any real site paints
   a background on `html` or `body`. Even an unstyled tab is then declined by the
-  degenerate gate (`render.py:479-483`, ratio `0.98`) because it genuinely fills the
+  degenerate gate (`render.py:489-493`, ratio `0.98`) because it genuinely fills the
   viewport.
 - **cropdetect** — declined at `mux.py:356-357`: the detected rect *is* the full
   frame, so there is nothing to trim.
 
 Result: `popup_crop = (None, "none")`. That is arithmetically correct — a tab really
 is viewport-sized — but `transition: float` then scales a full viewport to
-`scale: 0.72` and insets it, which reads as a shrunken copy of the page rather than a
+`scale: 0.85` (`config.py:174`) and insets it, which reads as a shrunken copy of the page rather than a
 new window.
 
 ### 2. There is no way out
 
 `PRIMARY_COMMANDS` (`scenario.py:17`) has no close or switch command;
-`docs/en/scenario-reference.md:646` states this outright. Control returns to the main
+`docs/en/scenario-reference.md:645` states this outright. Control returns to the main
 window **only** when the popup closes as a side effect of an action performed on it
-(`render.py:1749-1761`, `compile.py:400-414`); any other close raises
+(`render.py:1788-1801`, `compile.py:400-414`); any other close raises
 *"popup zamknął się asynchronicznie poza obsługiwaną akcją"*.
 
 A `_blank` tab typically has no in-page close button — a real user presses Cmd+W. So
 for the common case there is **no authorable way back at all**. The tab is then held
-open to the end (`render.py:1804-1806`, `hold_open_at_end=True`) and every subsequent
+open to the end (`render.py:1844-1846`, `hold_open_at_end=True`) and every subsequent
 step is filmed on it.
 
 ### 3. No coverage
@@ -110,7 +110,15 @@ if the popup lifecycle turns out to need a compiled marker, the bump is in scope
   second *authorised* close path alongside the action-driven one; the rule at
   `compile.py:400-414` is not relaxed for anything else.
 - **render** — closes the window, plays the Spec C push-right, and hands the cursor
-  back through the existing `_prepare_main_after_popup_close` (`render.py:861-887`).
+  back through the existing `_prepare_main_after_popup_close` (`render.py:871-904`).
+  **That funnel must be called with `restore_cursor_to`.** PR#20 gave it a
+  `restore_cursor_to: tuple[float, float] | None = None` parameter (`render.py:876`)
+  and its sole current call site passes `restore_cursor_to=popup.main_cursor_pos`
+  (`render.py:1800`). Because the parameter defaults to `None`, a `closeWindow` path
+  that merely "reuses the funnel" compiles, runs, and silently leaves the main
+  window's cursor parked where the popup left it — reintroducing the bug PR#20 fixed,
+  through a new door. The saved main-window position must be threaded through the
+  close path explicitly; a test must pin it.
 - `closeWindow` with no window open is a compile-time error, not a silent no-op.
 
 ### C. Presentation of a full-frame tab
@@ -122,7 +130,7 @@ viewport." When that holds:
 1. the transition is forced to `slide` regardless of `config.popup.transition`,
    because `float` would inset a full viewport;
 2. the address bar is **enabled** on that window;
-3. the forcing is logged, and the warning at `render.py:310-314` no longer implicates
+3. the forcing is logged, and the warning at `render.py:320-324` no longer implicates
    the site when the popup did not originate from `window.open` at all.
 
 **Which address bar.** The north star names *popup → shell conversion* as an open
@@ -134,7 +142,7 @@ guarantee is heuristic, not structural — a site can paint into the bar's pixel
 Structural safety arrives only with the shell, in a later spec.
 
 **Main implementation risk.** `bare_popups` is context-wide today
-(`config.py:197-200`, `chrome.py:137-141`), and the comment at `render.py:612-616`
+(`config.py:197-200`, `chrome.py:137-141`), and the comment at `render.py:620-632`
 states the bar cannot be suppressed per-window because the init script is
 context-level. This design needs that decision moved to per-window granularity.
 **Plan this as a timeboxed spike first.** If per-window chrome proves materially more
@@ -161,11 +169,11 @@ unchanged, matching Spec C's acceptance discipline.
 ## Out of scope
 
 - More than one popup per session — the invariant at `compile.py:373-385` and
-  `render.py:1697-1698` stays.
+  `render.py:1736-1737` stays.
 - `switchWindow` / addressing windows by name — see Follow-up.
 - Closing by emulating Cmd+W at the browser level.
 - `_blank` inside a `when` branch — already unsupported and documented
-  (`render.py:1264-1265`, `docs/en/scenario-reference.md:631-634`).
+  (`render.py:1303-1305`, `docs/en/scenario-reference.md:631-634`).
 - Popup → shell conversion (structural address bar).
 
 ## Follow-up
