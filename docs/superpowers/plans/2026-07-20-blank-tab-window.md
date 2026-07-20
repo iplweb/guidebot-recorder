@@ -18,6 +18,12 @@
 - **`cut` and `float` output for sized `window.open` popups must stay byte-for-byte unchanged.** Every task that touches render or mux must leave those paths alone.
 - Never call `_prepare_main_after_popup_close` from new code — see Task 3.
 - Run the suite with `uv run pytest -q -m "not network"` from the worktree root.
+- **Chromium blocks `data:` -> `data:` new-window navigation**, for both `target="_blank"`
+  and `window.open`. Every fixture in this plan that opens a tab therefore needs a real
+  `file://` destination: write the second document into `tmp_path` and link to
+  `second.resolve().as_uri()`. Task 2 established the pattern at
+  `tests/unit/recorder/test_compile.py:883-889` — copy it. The plan's inline scenario
+  strings still show the nested `data:` form; they are wrong and must be adapted.
 
 ---
 
@@ -31,7 +37,7 @@
 - Consumes: nothing.
 - Produces: `Step.close_window: Literal[True] | None` (YAML alias `closeWindow`); `Step.command_kind()` returns the string `"closeWindow"` for such a step; `Step.requires_target()` returns `False` for it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/unit/models/test_scenario.py`:
 
@@ -68,12 +74,12 @@ def test_close_window_rejects_optional():
         Step.model_validate({"closeWindow": True, "optional": True})
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/unit/models/test_scenario.py -k close_window -q`
 Expected: FAIL — pydantic rejects the unknown key `closeWindow` (the model is `extra="forbid"`).
 
-- [ ] **Step 3: Add the field and the kind mapping**
+- [x] **Step 3: Add the field and the kind mapping**
 
 In `guidebot_recorder/models/scenario.py`, extend the typing import on line 9:
 
@@ -120,12 +126,12 @@ Replace `command_kind()` (lines 101-105):
 
 `requires_target()` needs no change: `"closeWindow"` is in neither branch, so it falls through to `False`.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/unit/models/test_scenario.py -q`
 Expected: PASS, including the pre-existing slide tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add guidebot_recorder/models/scenario.py tests/unit/models/test_scenario.py
@@ -146,7 +152,7 @@ git commit -m "feat(scenario): add the closeWindow step command"
 
 Read first: `compile.py:398-414` today admits a popup close **only** when `close_was_action_driven`, which requires `isinstance(compiled_action, CachedAction)`. A `closeWindow` step returns `None`, so without this task it raises `"popup zamknął się asynchronicznie poza obsługiwaną akcją"`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/unit/recorder/test_compile.py`:
 
@@ -218,12 +224,12 @@ def test_compile_short_description_for_close_window():
 
 and pass `LinkReasoner()` to `run_compile`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/unit/recorder/test_compile.py -k close_window -q`
 Expected: FAIL — the first with `RuntimeError: popup zamknął się asynchronicznie poza obsługiwaną akcją`, the second with no error raised at all.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `compile.py`, add the loop guard immediately after `kind = step.command_kind()` (line 311), beside the existing `teach` validation:
 
@@ -260,12 +266,12 @@ In `_short` (lines 86-99), add a branch before the fallthrough so verbose logs r
         return "closeWindow"
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/unit/recorder/test_compile.py -q`
 Expected: PASS, including every pre-existing popup test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add guidebot_recorder/recorder/compile.py tests/unit/recorder/test_compile.py
@@ -277,14 +283,14 @@ git commit -m "feat(compile): close the active window on a closeWindow step"
 ### Task 3: `closeWindow` in render
 
 **Files:**
-- Modify: `guidebot_recorder/recorder/render.py:1736` (loop guard), `:1978+` (`_render_step` dispatch)
+- Modify: `guidebot_recorder/recorder/render.py:1856` (loop guard), `:2101-2119` (`_render_step` dispatch)
 - Test: `tests/unit/recorder/test_render.py`
 
 **Interfaces:**
 - Consumes: Task 1's kind, Task 2's compile output.
 - Produces: `_render_step` returns `None` for `"closeWindow"` after closing the active page.
 
-**The load-bearing rule of this task.** Do **not** write a close-and-restore path. `render.py:1788-1801` already handles "the popup is gone": it raises only when `opened is not None` or `kind in {"say", "navigate", "wait", "slide"}`, and otherwise sets `close_handled` and calls
+**The load-bearing rule of this task.** Do **not** write a close-and-restore path. `render.py:1907-1920` already handles "the popup is gone": it raises only when `opened is not None` or `kind in {"say", "navigate", "wait", "slide"}`, and otherwise sets `close_handled` and calls
 
 ```python
                         await _prepare_main_after_popup_close(
@@ -376,14 +382,14 @@ Expected: FAIL — `_render_step` falls through its dispatch to the target path 
 
 - [ ] **Step 3: Implement**
 
-In `render.py`, add the loop guard immediately after the one-popup check at line 1736-1737:
+In `render.py`, add the loop guard immediately after the one-popup check at line 1855-1856:
 
 ```python
             if kind == "closeWindow" and popup is None:
                 raise RenderError(f"krok {index}: closeWindow bez otwartego okna")
 ```
 
-In `_render_step`, add the branch immediately after the `slide` branch (which ends at line 1998), i.e. before the `navigate` branch:
+In `_render_step`, add the branch immediately after the `slide` branch (which ends at line 2119), i.e. before the `navigate` branch at line 2120:
 
 ```python
     if kind == "closeWindow":
@@ -412,7 +418,7 @@ git commit -m "feat(render): close the active window on a closeWindow step"
 ### Task 4: A window that fills the canvas is presented full-frame
 
 **Files:**
-- Modify: `guidebot_recorder/recorder/render.py` (new helper beside `_resolve_popup_crop` at :573-602; the compose call at :1894-1920)
+- Modify: `guidebot_recorder/recorder/render.py` (new helper beside `_resolve_popup_crop` at :671-723; the compose call at :2013-2031)
 - Test: `tests/unit/recorder/test_render.py`
 
 **Interfaces:**
@@ -459,7 +465,7 @@ Expected: FAIL with `ImportError` / `NameError: _popup_fills_canvas`.
 
 - [ ] **Step 3: Implement the helper**
 
-Add to `render.py` immediately after `_resolve_popup_crop` (after line 602). Import `Viewport` from `guidebot_recorder.models.config` if it is not already imported in this module:
+Add to `render.py` immediately after `_resolve_popup_crop` (after line 723). Import `Viewport` from `guidebot_recorder.models.config` if it is not already imported in this module:
 
 ```python
 def _popup_fills_canvas(
@@ -490,7 +496,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Wire it into the compose call**
 
-In `render.py`, immediately after the `_resolve_popup_crop(...)` call (which ends at line 1899) insert:
+In `render.py`, immediately after the `_resolve_popup_crop(...)` call (which ends at line 2020) insert:
 
 ```python
     # A window that fills the canvas is not a floating popup. `slide` is the
@@ -504,7 +510,7 @@ In `render.py`, immediately after the `_resolve_popup_crop(...)` call (which end
             tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
 ```
 
-and change the compose argument (line 1907) from `transition=cfg.popup.effective_transition,` to:
+and change the compose argument (line 2031) from `transition=cfg.popup.effective_transition,` to:
 
 ```python
         transition=transition,
@@ -560,13 +566,13 @@ git commit -m "feat(render): present a canvas-filling popup full-frame instead o
 ### Task 5: Tell a `_blank` tab apart from a featureless `window.open`
 
 **Files:**
-- Modify: `guidebot_recorder/recorder/render.py:184-224` (`_POPUP_REQUEST_SCRIPT`), and the reader near `:296-330`
+- Modify: `guidebot_recorder/recorder/render.py:196-236` (`_POPUP_REQUEST_SCRIPT`), and the reader near `:308-337`
 - Test: `tests/unit/recorder/test_render.py`
 
 **Interfaces:**
 - Produces: a way to ask, **at popup-open time**, whether `window.open` was called at all — independent of whether it carried size features.
 
-**Why this task exists.** Task 6 must mount the address bar while the popup is *being recorded*, but the crop chain's verdict only exists after recording ends. Worse, the bar is painted DOM: mounting it would corrupt crop levels 2 (content bbox) and 3 (cropdetect), which is the fallback chain added in `43989a5`. So Task 6 needs an early, sound signal — and today there is none, because `_POPUP_REQUEST_SCRIPT` writes `window[KEY]` **only when `parse(args[2])` succeeds** (`render.py:210-220`). A featureless `window.open(url, name)` therefore looks exactly like "`window.open` was never called".
+**Why this task exists.** Task 6 must mount the address bar while the popup is *being recorded*, but the crop chain's verdict only exists after recording ends. Worse, the bar is painted DOM: mounting it would corrupt crop levels 2 (content bbox) and 3 (cropdetect), which is the fallback chain added in `43989a5`. So Task 6 needs an early, sound signal — and today there is none, because `_POPUP_REQUEST_SCRIPT` writes `window[KEY]` **only when `parse(args[2])` succeeds** (`render.py:222-232`). A featureless `window.open(url, name)` therefore looks exactly like "`window.open` was never called".
 
 Recording the call itself separates the two: no call at all means a real `target="_blank"` tab.
 
@@ -601,19 +607,19 @@ Expected: FAIL with `AttributeError: module ... has no attribute '_popup_window_
 
 - [ ] **Step 3: Record the call in the init script**
 
-In `_POPUP_REQUEST_SCRIPT` (`render.py:184-224`), add a second key beside `KEY`. Introduce the constant next to `_POPUP_REQUEST_KEY` and reference it in the f-string:
+In `_POPUP_REQUEST_SCRIPT` (`render.py:196-236`), add a second key beside `KEY`. Introduce the constant next to `_POPUP_REQUEST_KEY` and reference it in the f-string:
 
 ```python
 _POPUP_OPENED_KEY = "__guidebot_popup_opened"
 ```
 
-Then inside the script, initialise it beside `window[KEY] = null;` (line 190):
+Then inside the script, initialise it beside `window[KEY] = null;` (line 202):
 
 ```javascript
   window[OPENED] = false;
 ```
 
-and set it unconditionally at the top of the patched function, before the geometry branch (line 210-212):
+and set it unconditionally at the top of the patched function, before the geometry branch (line 222-224):
 
 ```javascript
   window.open = function (...args) {
@@ -630,11 +636,11 @@ Declare `OPENED` beside `KEY` at the top of the IIFE:
   const OPENED = "{_POPUP_OPENED_KEY}";
 ```
 
-Note the guard on line 187 (`if (Object.prototype.hasOwnProperty.call(window, KEY)) return;`) keeps the whole script idempotent, so both keys are initialised together exactly once.
+Note the guard on line 199 (`if (Object.prototype.hasOwnProperty.call(window, KEY)) return;`) keeps the whole script idempotent, so both keys are initialised together exactly once.
 
 - [ ] **Step 4: Add the Python reader**
 
-Beside `_popup_window_request` (around `render.py:296-330`), add:
+Beside `_popup_window_request` (around `render.py:308-337`), add:
 
 ```python
 async def _popup_window_opened(page: Page) -> bool:
@@ -678,14 +684,14 @@ git commit -m "feat(render): record that window.open was called, not just its ge
 
 **Files:**
 - Modify: `guidebot_recorder/chrome/chrome.py:122-161` (retain a non-bare script), `:163-178` (a per-page mount)
-- Modify: `guidebot_recorder/recorder/render.py:124-158` (`_PopupSession` field), `:620-632` (`_expect_chrome`), `:2164-2192` (`_prepare_popup`), and the six `_expect_chrome(chrome, bare_popups)` call sites at `:1492, 1634, 1641, 1734, 1764, 1777`
+- Modify: `guidebot_recorder/recorder/render.py:125-167` (`_PopupSession` field), `:741-753` (`_expect_chrome`), `:2289-2317` (`_prepare_popup`), and the six `_expect_chrome(chrome, bare_popups)` call sites at `:1611, 1753, 1760, 1853, 1883, 1896`
 - Test: `tests/unit/chrome/test_chrome.py`, `tests/unit/recorder/test_render_chrome.py`
 
 **Interfaces:**
 - Consumes: `_popup_window_opened(page) -> bool` from Task 5.
 - Produces: `Chrome.install_bar(page)`; `_PopupSession.wants_bar: bool`.
 
-Three facts make this cheap. `chrome.js:42` reads `window.__guidebot_chrome_config` at *execution* time with an `|| {}` fallback, not as a baked constant. The bare bail at `chrome.js:46` returns **before** `window.__guidebot_chrome` is assigned, so a bare popup is left in a clean state that a re-run recovers. And `_prepare_popup` already takes a per-call `expect_chrome` that gates a per-page `chrome.ensure(page)`. The blocker is only that `Chrome.__init__` keeps a single opaque `self._script`. The precedent for per-page work is stated in the codebase itself, at `render.py:917-918`: *"``hide`` is a per-page call on purpose — a context-wide init-script flag (like ``barePopups``) cannot target one window."*
+Three facts make this cheap. `chrome.js:42` reads `window.__guidebot_chrome_config` at *execution* time with an `|| {}` fallback, not as a baked constant. The bare bail at `chrome.js:46` returns **before** `window.__guidebot_chrome` is assigned, so a bare popup is left in a clean state that a re-run recovers. And `_prepare_popup` already takes a per-call `expect_chrome` that gates a per-page `chrome.ensure(page)`. The blocker is only that `Chrome.__init__` keeps a single opaque `self._script`. The precedent for per-page work is stated in the codebase itself, at `render.py:1038-1039`: *"``hide`` is a per-page call on purpose — a context-wide init-script flag (like ``barePopups``) cannot target one window."*
 
 - [ ] **Step 1: Write the failing chrome test**
 
@@ -750,7 +756,7 @@ Expected: PASS.
 
 - [ ] **Step 5: Carry the per-window decision on the popup session**
 
-In `render.py`, add a field to `_PopupSession` (the dataclass at `:124-158`; it is `slots=True`, so the field must be declared, not attached):
+In `render.py`, add a field to `_PopupSession` (the dataclass at `:125-167`; it is `slots=True`, so the field must be declared, not attached):
 
 ```python
     wants_bar: bool = False
@@ -765,7 +771,7 @@ In `render.py`, add a field to `_PopupSession` (the dataclass at `:124-158`; it 
     """
 ```
 
-Set it where the popup is furnished, at the `_prepare_popup` call (`render.py:1773-1778`). Replace that block with:
+Set it where the popup is furnished, at the `_prepare_popup` call (`render.py:1892-1897`). Replace that block with:
 
 ```python
                     popup.wants_bar = chrome is not None and not await _popup_window_opened(page)
@@ -780,7 +786,7 @@ Set it where the popup is furnished, at the `_prepare_popup` call (`render.py:17
 
 - [ ] **Step 6: Mount the bar in `_prepare_popup`**
 
-Extend `_prepare_popup` (`render.py:2164-2192`) with a `mount_bar` keyword and use it:
+Extend `_prepare_popup` (`render.py:2289-2317`) with a `mount_bar` keyword and use it:
 
 ```python
 async def _prepare_popup(
@@ -804,7 +810,7 @@ and replace the chrome line inside the `try`:
 
 - [ ] **Step 7: Make the visual validators per-window**
 
-`_expect_chrome(chrome, bare_popups)` is a context-wide constant asserted at six sites. Five of them concern the main window or a page that is not the bar-bearing tab and are correct as they stand; the one that runs against the **active** page must account for a bar-bearing tab. At `render.py:1734` (inside `_ensure_visuals` after narration) and `render.py:1764` (the `_render_step` argument), replace
+`_expect_chrome(chrome, bare_popups)` is a context-wide constant asserted at six sites. Five of them concern the main window or a page that is not the bar-bearing tab and are correct as they stand; the one that runs against the **active** page must account for a bar-bearing tab. At `render.py:1853` (inside `_ensure_visuals` after narration) and `render.py:1883` (the `_render_step` argument), replace
 
 ```python
                     expect_chrome=_expect_chrome(chrome, bare_popups),
@@ -820,7 +826,7 @@ with
                     ),
 ```
 
-Leave `:1492`, `:1634`, `:1641` and `:1777` unchanged — `:1777` is superseded by Step 5, and the other three run before any popup exists.
+Leave `:1611`, `:1753`, `:1760` and `:1896` unchanged — `:1777` is superseded by Step 5, and the other three run before any popup exists.
 
 - [ ] **Step 8: Add the render-level test**
 
@@ -860,7 +866,7 @@ If observing the live popup proves awkward from the outside, assert instead on a
 - [ ] **Step 9: Run the full suite**
 
 Run: `uv run pytest -q -m "not network"`
-Expected: PASS. Any failure in `tests/unit/chrome/` or `test_render_chrome.py` means the per-window seam leaked into the main window's shell — re-read `_expect_chrome`'s docstring at `render.py:620-632` before changing anything else.
+Expected: PASS. Any failure in `tests/unit/chrome/` or `test_render_chrome.py` means the per-window seam leaked into the main window's shell — re-read `_expect_chrome`'s docstring at `render.py:741-753` before changing anything else.
 
 - [ ] **Step 10: Commit**
 
