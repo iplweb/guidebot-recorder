@@ -41,62 +41,130 @@ więc i przechwytywanie, i renderowanie PDF idzie przez Chromium.
 
 Nowy pakiet `guidebot_recorder/guide/`:
 
-- `capture.py` — przebieg przechwytywania: otwiera Chromium, odtwarza
-  skompilowany scenariusz, dla każdego kroku ustawia kursor przez `Recorder`,
-  robi `page.screenshot()` i produkuje `GuidePage` z geometrią adnotacji.
+- `capture.py` — przebieg przechwytywania: buduje kontekst jak renderer,
+  odtwarza skompilowany scenariusz, dla każdego kroku ustawia kursor przez
+  `Recorder`, robi `page.screenshot()` i produkuje `GuidePage` z geometrią
+  adnotacji.
 - `annotate.py` — czysta geometria adnotacji: z bounding-boxów i pozycji
   kursora liczy współrzędne strzałki / kółka / ramki (bez I/O, testowalne
   jednostkowo).
 - `layout.py` — składa listę `GuidePage` w jeden dokument HTML (CSS grid:
   panel zrzutu z warstwą SVG po lewej, tekst po prawej; jedna strona
   landscape na krok).
-- `pdf.py` — renderuje HTML do PDF przez Chromium `page.pdf({landscape: true})`.
+- `pdf.py` — renderuje HTML do PDF przez Chromium `page.pdf(...)` (zawsze
+  headless, `landscape=True`, `print_background=True`).
 - `guide.py` — publiczne wejście `run_guide(...)`, spina powyższe; wywoływane
   z CLI.
+
+### Wymagana zmiana w `Recorder` (blocker B1)
+
+`_point_and_prepare` jest prywatne, nie zwraca geometrii, a wołanie go i
+potem `recorder.click(...)` uruchamia glide/ripple dwukrotnie. Dodajemy
+publiczne API i przebudowujemy prywatne na nim:
+
+```python
+class PointResult(NamedTuple):
+    locator: Locator
+    box: dict | None            # bounding_box() celu (x,y,width,height) lub None
+    center: tuple[float, float] | None
+
+async def point(self, target, *, ripple: bool = True) -> PointResult: ...
+```
+
+`guide` woła `point(target, ripple=False)` (bez pierścienia — S2), robi zrzut,
+a następnie odpala surową akcję na `result.locator` (`locator.click()` /
+`locator.fill(...)`), a nie ponownie przez `recorder.click`. Gdy `box is None`
+(brak bounding-boxa) — pomiń adnotacje celu z ostrzeżeniem, nie wywracaj się.
 
 Model danych (wewnętrzny, nie serializowany na dysk):
 
 ```python
-class Annotation(NamedTuple):
+@dataclass
+class Annotation:
     kind: Literal["arrow", "click", "typed", "hover"]
-    # współrzędne w pikselach zrzutu (układ CSS strony)
-    ...  # np. arrow: (x1,y1,x2,y2); click/hover: (cx,cy,r); typed: (x,y,w,h)
+    # jawne, opcjonalne pola per rodzaj (łatwiejsze do sprawdzania typów niż
+    # jeden NamedTuple z payloadem zależnym od kind):
+    x1: float | None = None; y1: float | None = None    # arrow: początek
+    x2: float | None = None; y2: float | None = None    # arrow: koniec (grot)
+    cx: float | None = None; cy: float | None = None; r: float | None = None  # click
+    x: float | None = None; y: float | None = None; w: float | None = None; h: float | None = None  # typed/hover
 
-class GuidePage(NamedTuple):
-    kind: Literal["step", "navigate", "slide"]
-    screenshot: Path | None      # None dla strony-przekładki slide
+@dataclass
+class GuidePage:
+    kind: Literal["step", "navigate", "slide", "text"]
+    screenshot: Path | None      # None dla slide i text (przekładka / sam say)
     text: str                    # opis po prawej
     heading: str | None          # np. "Otwórz adres X", tytuł slajdu
     annotations: list[Annotation]
-    screenshot_size: tuple[int, int]  # do skalowania warstwy SVG
+    screenshot_size: tuple[int, int] | None  # do viewBox SVG; None bez zrzutu
 ```
 
-## Przepływ danych
+## Przepływ danych i sterowanie (parzystość z rendererem)
 
-1. `run_guide(path, out_pdf, browser, ...)` ładuje `Scenario` i
-   `CompiledScenario` (jak `run_render`: `flat = scenario.flat_steps()`
-   zipowane 1:1 z `compiled.actions`).
-2. `capture.py` iteruje `flat`. Utrzymuje `prev_cursor: (x,y) | None`.
-   Per krok, wg `step.command_kind()`:
-   - `click`/`hover`/`enter_text`/`teach`: `Recorder._point_and_prepare`
-     ustawia kursor na środku celu (`bounding_box()`); zapamiętujemy
-     `target_center` i `target_box`. Dla `enter_text`/`teach` wpisujemy tekst,
-     a potem robimy zrzut (ramka wokół pola). Adnotacje:
-     - `arrow` od `prev_cursor` do `target_center` (jeśli `prev_cursor`),
-     - `click` (kółko) dla click, `hover` (poświata) dla hover,
-     - `typed` (ramka) dla wpisywania.
-     `prev_cursor := target_center`.
-   - `navigate`: wykonaj nawigację (jak renderer), zrzut świeżo załadowanej
-     strony, `heading = "Otwórz adres: <url>"`, brak adnotacji celu;
-     `prev_cursor := None` (nowy widok).
-   - `slide`: brak zrzutu; `GuidePage(kind="slide")` z tytułem/podtytułem/
+1. `run_guide(path, out_pdf, browser, *, env, timeout, verbose)` ładuje
+   `Scenario` i `CompiledScenario` i buduje `flat = scenario.flat_steps()`
+   zipowane **`strict=True`** z `compiled.actions` (jak `run_render`,
+   render.py:1655-1667). Prolog: `PendingAction` na kroku **obowiązkowym,
+   spoza gałęzi** → twardy błąd „uruchom `compile` / `compile --force`”
+   (render.py:1668-1673). Pending na bramce/`optional` jest legalne i
+   obsługiwane niżej (B3).
+2. `capture.py` iteruje `flat`, utrzymując `prev_cursor: (x,y)|None` oraz
+   `skipped_branch: int|None`. Dyspozycja akcji idzie po **`cached.action`**
+   (`click`/`hover`/`type`/`waitFor`), **nie** po `step.command_kind()` —
+   `teach` zamraża się jako click/hover/type (B2; resolution.py:95-99,
+   render.py:2391-2471). Per `FlatStep(step, branch, is_gate)`:
+   - Jeśli `skipped_branch is not None` i `branch == skipped_branch` → pomiń
+     (żadnej strony); reset `skipped_branch` gdy wracamy poza gałąź (B4;
+     render.py:1862-1884, 2120-2122).
+   - **gate** (`is_gate`): wykonaj `waitFor`; jeśli element nieobecny
+     (timeout) lub akcja pozostała `PendingAction` bez reasonera → ustaw
+     `skipped_branch = branch`, pomiń całą gałąź (B4). Bramka nie tworzy
+     strony.
+   - **navigate**: wykonaj nawigację (`_resolve_url`, render.py:1474-1478),
+     zrzut świeżo załadowanej strony; `heading = "Otwórz adres: <resolved>"`;
+     brak adnotacji celu; `prev_cursor := None`.
+   - **slide**: bez zrzutu; `GuidePage(kind="slide")` z tytułem/podtytułem/
      notatkami.
-   - `wait` / bramka `when` (gate): wykonaj oczekiwanie dla poprawności
-     stanu strony, ale **nie** twórz strony PDF — chyba że krok niesie `say`,
-     wtedy krótka strona tekstowa bez zrzutu.
-3. Tekst po prawej: `page_text(step)` = `step.caption` jeśli ustawione, w
-   przeciwnym razie `step.narration()` (`say`/`teach`).
+   - **akcja z celem** (`click`/`hover`/`type`): dla obowiązkowego kroku
+     sprawdź tożsamość jak renderer (`reuse_is_valid`, render.py:2384-2385);
+     niezgodność → błąd „uruchom `compile --force`” (S5). Krok `optional`,
+     którego celu brak → pomiń stronę z ostrzeżeniem (B3/optional).
+     `res = await recorder.point(target, ripple=False)`. Kolejność ma
+     znaczenie (S3):
+     - `click`/`hover`: **najpierw zrzut**, potem `res.locator.click()` /
+       `.hover()` (po klliknięciu strona może nawigować, cel znika).
+     - `type`: `res.locator.fill(text)` (natychmiast, `type_delay_ms=None`),
+       **potem zrzut** (ramka wokół wpisanego pola).
+     Po akcji: `recorder.apply_readiness(cached.expect)` jak renderer
+     (render.py:2483-2498), by następny locator nie ścigał się z nawigacją.
+     Adnotacje z `res`: `arrow` `prev_cursor → res.center` (jeśli
+     `prev_cursor` i `res.center`); `click` (kółko) dla click; `hover`
+     (poświata) dla hover; `typed` (ramka=`res.box`) dla type.
+     `prev_cursor := res.center`.
+   - **`say`-only** (brak komendy, jest `say`) oraz **`wait` z `say`**:
+     `GuidePage(kind="text")` — strona tekstowa bez zrzutu (B5).
+   - **`wait` bez `say`**: wykonaj oczekiwanie, żadnej strony.
+   - **popup** (`cached.opens_popup`): w v1 **twardy błąd** na starcie
+     (prolog skanuje akcje) — „scenariusze z popupem nieobsługiwane w
+     `guide` v1” (B6; render.py:2387-2464). Bez cichego wejścia w złe okno.
+3. Tekst po prawej: `page_text(step)` = `step.caption` jeśli ustawione, inaczej
+   `step.narration()` (`say`/`teach`).
 4. `layout.py` buduje HTML; `pdf.py` drukuje do PDF.
+
+## Kontekst przechwytywania (S1)
+
+`guide` buduje kontekst **tak jak renderer** (render.py:1705-1734), bo geometria
+i `reuse_is_valid` zależą od tego samego układu, w jakim kompilowano:
+`viewport`/`locale` z `Config`, a przy `chrome.enabled` — powłoka macOS-bar i
+sterowanie stroną przez `Recorder(frame=site_frame)`. To znaczy, że dla
+scenariuszy z chrome PDF pokaże pasek przeglądarki (akceptowane, spójne z
+wideo). `bounding_box()` jest względem viewportu głównej ramki, więc
+współrzędne adnotacji pozostają poprawne w obu trybach. Jeśli da się to zrobić
+czysto, wspólną budowę kontekstu wydzielamy do helpera używanego i przez
+render, i przez guide; jeśli nie — replikujemy wiernie w `capture.py`.
+
+Faza PDF (`pdf.py`) **zawsze** działa w headless (bo `page.pdf()` rzuca w
+trybie headed, cli.py:212) — niezależnie od ewentualnej flagi debug w capture.
 
 ## Adnotacje (szczegóły geometrii)
 
@@ -104,10 +172,10 @@ Liczone w `annotate.py` z danych zebranych na żywej stronie, w pikselach
 zrzutu (uwzględniając `deviceScaleFactor`). Rysowane jako warstwa `<svg>`
 nałożona na `<img>` w HTML (nie wypalane w PNG — łatwe do korekty stylu):
 
-- **arrow**: linia z grotem od `prev_cursor` do `target_center`.
-- **click**: czerwone kółko o stałym promieniu wokół `target_center`.
-- **typed**: czerwony prostokąt = `target_box` pola po wpisaniu tekstu.
-- **hover**: półprzezroczysta poświata/ramka = `target_box`.
+- **arrow**: linia z grotem od `prev_cursor` do `res.center`.
+- **click**: czerwone kółko o stałym promieniu wokół `res.center`.
+- **typed**: czerwony prostokąt = `res.box` pola po wpisaniu tekstu.
+- **hover**: półprzezroczysta poświata/ramka = `res.box`.
 
 Współrzędne skalują się do rozmiaru `<img>` w układzie strony (viewBox SVG =
 `screenshot_size`), więc pozostają trafne niezależnie od skali druku.
@@ -116,47 +184,74 @@ Współrzędne skalują się do rozmiaru `<img>` w układzie strony (viewBox SVG
 
 - `models/scenario.py`: dodać opcjonalne pole `caption: str | None = None`
   do `Step` (jak `say` — nie liczy się do walidatora „dokładnie jedna
-  komenda”; `extra="forbid"` wymaga jawnego dodania pola). Wstecznie zgodne.
+  komenda”; `extra="forbid"` wymaga jawnego dodania pola). Wstecznie zgodne
+  (potwierdzone w review: `_exactly_one_command`, walidator tłumaczeń i
+  `config_hash` nie ruszają `caption`). Krok z **samym** `caption` (bez
+  komendy i bez `say`) nadal jest błędem „pusty krok” — świadomie.
+- `recorder/recorder.py`: publiczne `point(target, *, ripple=True)` +
+  `PointResult` (B1); `_point_and_prepare` przebudowane na `point`.
 - `cli.py`: nowa komenda `guide` (wzorowana na `render_cmd`): argumenty
   `path`, `-o/--out`, `--timeout`, `--verbose`; ładuje scenariusz, uruchamia
-  Chromium przez `async_playwright()`, woła `run_guide(...)`.
+  Chromium przez `async_playwright()`, woła `run_guide(...)`. Faza PDF wymusza
+  headless niezależnie od flag (S4).
 - `pyproject.toml`: bez zmian w zależnościach runtime.
 
 ## Obsługa błędów
 
 - Brak `*.compiled.yaml` → czytelny błąd „najpierw `guidebot compile`”
-  (spójnie z `render`).
-- Nierozwiązany cel / `PendingAction` w skompilowanym pliku → błąd jak w
-  renderze (guide nie kompiluje).
-- Krok `optional`, którego element nie istnieje na stronie → pomiń stronę
-  tego kroku (spójnie z tolerancją renderu dla optional), z ostrzeżeniem.
-- `page.pdf()` jest wspierane tylko w Chromium headless — komenda wymusza
-  Chromium (jak reszta narzędzia).
+  (spójnie z `render`, render.py:1643-1651).
+- `PendingAction` na kroku obowiązkowym spoza gałęzi → twardy błąd (prolog).
+  Pending na bramce/`optional` → pomiń gałąź/krok z ostrzeżeniem (B3).
+- Bramka `when` nieobecna → pomiń **całą** gałąź (`skipped_branch`, B4).
+- Krok `optional` bez celu → pomiń jego stronę z ostrzeżeniem.
+- Niezgodność tożsamości celu obowiązkowego (`reuse_is_valid`) → błąd
+  „uruchom `compile --force`” (S5).
+- `cached.opens_popup` w którejkolwiek akcji → twardy błąd v1 (B6).
+- Faza `page.pdf()` zawsze headless (S4).
+
+## Uwagi (z review)
+
+- Wpisywany tekst może pochodzić z sekretów (`scenario_sensitive_values`,
+  render.py:1626) i zostanie zamrożony na zrzucie — **akceptowane ryzyko** w
+  v1; maskowanie pól wrażliwych to ewentualne v2.
+- `navigate` heading pokazuje **rozwiązany** URL (`_resolve_url`), nie surowy.
 
 ## Testy
 
 Jednostkowe (bez sieci, bez ffmpeg):
 
 - `annotate.py`: strzałka/kółko/ramka liczone z zadanych bounding-boxów i
-  pozycji kursora; brak strzałki gdy `prev_cursor is None`.
-- budowa manifestu: mapowanie `flat_steps` → strony (interaktywne+navigate+
-  slide dają strony; wait/gate pomijane; `optional` bez celu pomijany).
+  pozycji kursora; brak strzałki gdy `prev_cursor is None`; adnotacja idzie
+  po `cached.action` (`type` → `typed`, nie po `command_kind`).
+- budowa manifestu: mapowanie `flat_steps` → strony — akcja z celem, navigate,
+  slide, `say`-only/`wait`+`say` dają strony; `wait` bez `say` i bramki nie;
+  nieobecna bramka pomija całą gałąź (`skipped_branch`); `optional` bez celu
+  pomijany; `type` z kroku `teach` daje adnotację `typed`, nie `click`.
+- prolog: `opens_popup` → wyjątek; `PendingAction` obowiązkowy → wyjątek;
+  pending na bramce/`optional` → brak wyjątku.
 - `page_text`: `caption` nadpisuje narrację; fallback do `say`/`teach`.
+- `Recorder.point`: zwraca `locator`+`box`+`center`; `ripple=False` nie woła
+  ripple; `box is None` → `center is None` bez wyjątku.
 - `layout.py`: HTML zawiera tyle bloków-stron ile `GuidePage`; warstwa SVG
   ma poprawny `viewBox`.
 
 Integracyjny (oznaczony, jak istniejące e2e):
 
-- `guide` na fiksturze `tests/integration/fixtures/app.html` produkuje
-  niepusty PDF; liczba stron zgodna z oczekiwaną (np. przez zliczenie z
-  `pdfinfo`, jeśli dostępne, albo długość manifestu zwróconą przez
-  `run_guide`).
+- `guide` na fiksturze `tests/integration/fixtures/app.html` (compile+guide)
+  produkuje niepusty PDF; liczba stron zgodna z długością manifestu z
+  `run_guide`.
+- fikstura z bramką `when`, której element nie występuje → strony gałęzi
+  pominięte.
 
 ## Kryteria akceptacji
 
 - `guidebot guide examples/login.scenario.yaml -o /tmp/login.guide.pdf`
   tworzy poprawny PDF landscape.
-- Kroki interaktywne mają zrzut z widocznym kursorem i właściwą adnotacją;
-  `navigate` ma stronę z nagłówkiem adresu; `slide` ma stronę-przekładkę.
-- `wait`/bramki nie tworzą stron.
-- Renderer wideo działa bez zmian (żaden istniejący test nie regresuje).
+- Kroki z celem mają zrzut z widocznym kursorem i adnotacją zgodną z
+  `cached.action` (click→kółko, type→ramka, hover→poświata); `navigate` ma
+  stronę z rozwiązanym adresem; `slide` ma stronę-przekładkę; `say`-only ma
+  stronę tekstową.
+- `wait`/bramki nie tworzą stron; nieobecna bramka pomija całą gałąź.
+- Scenariusz z popupem kończy się jasnym błędem v1.
+- Renderer wideo działa bez zmian (żaden istniejący test nie regresuje;
+  `point()` to czysty refaktor `_point_and_prepare`).
