@@ -1,0 +1,154 @@
+"""Pure time-model tests — no ffmpeg, no I/O."""
+
+from __future__ import annotations
+
+import pytest
+
+from guidebot_recorder.video.timeline import (
+    FPS,
+    TimeEdit,
+    Timeline,
+    TimelineError,
+    frames_to_seconds,
+    seconds_to_frames,
+)
+
+
+def test_fps_is_twenty_five() -> None:
+    assert FPS == 25
+
+
+def test_seconds_to_frames_rounds_to_nearest() -> None:
+    assert seconds_to_frames(0.0) == 0
+    assert seconds_to_frames(1.0) == 25
+    assert seconds_to_frames(2.36) == 59
+    # 2.37 * 25 == 59.25 -> nearest whole frame is 59
+    assert seconds_to_frames(2.37) == 59
+    # 2.39 * 25 == 59.75 -> nearest whole frame is 60
+    assert seconds_to_frames(2.39) == 60
+
+
+def test_frames_to_seconds_is_exact_on_the_grid() -> None:
+    assert frames_to_seconds(0) == 0.0
+    assert frames_to_seconds(25) == 1.0
+    assert frames_to_seconds(59) == 2.36
+
+
+def test_empty_timeline_is_identity() -> None:
+    tl = Timeline.build([], source_frames=148)
+    assert tl.is_empty
+    assert tl.to_virtual(0) == 0
+    assert tl.to_virtual(75) == 75
+    assert tl.virtual_frames == 148
+
+
+def test_freeze_shifts_only_later_frames() -> None:
+    tl = Timeline.build([TimeEdit(at=75, kind="freeze", frames=59)], source_frames=148)
+    assert tl.to_virtual(0) == 0
+    assert tl.to_virtual(74) == 74
+    # A timestamp exactly at the freeze point maps to the START of the hold:
+    # narration begins there, the picture stops there.
+    assert tl.to_virtual(75) == 75
+    assert tl.to_virtual(76) == 76 + 59
+    assert tl.virtual_frames == 148 + 59
+
+
+def test_cut_pulls_later_frames_back() -> None:
+    tl = Timeline.build([TimeEdit(at=25, kind="cut", frames=25)], source_frames=148)
+    assert tl.to_virtual(0) == 0
+    assert tl.to_virtual(25) == 25
+    assert tl.to_virtual(50) == 25
+    assert tl.to_virtual(100) == 75
+    assert tl.virtual_frames == 148 - 25
+
+
+def test_timestamp_inside_a_cut_clamps_to_its_start() -> None:
+    tl = Timeline.build([TimeEdit(at=25, kind="cut", frames=25)], source_frames=148)
+    # Frames 25..49 are removed; anything landing there clamps to the cut start.
+    assert tl.to_virtual(30) == 25
+    assert tl.to_virtual(49) == 25
+
+
+def test_interleaved_freeze_and_cut() -> None:
+    tl = Timeline.build(
+        [
+            TimeEdit(at=25, kind="cut", frames=25),
+            TimeEdit(at=75, kind="freeze", frames=59),
+        ],
+        source_frames=148,
+    )
+    assert tl.to_virtual(75) == 75 - 25
+    assert tl.to_virtual(76) == 76 - 25 + 59
+    assert tl.virtual_frames == 148 - 25 + 59
+
+
+def test_edits_are_sorted_regardless_of_input_order() -> None:
+    unsorted = [
+        TimeEdit(at=75, kind="freeze", frames=10),
+        TimeEdit(at=25, kind="freeze", frames=10),
+    ]
+    tl = Timeline.build(unsorted, source_frames=148)
+    assert [e.at for e in tl.edits] == [25, 75]
+    assert tl.to_virtual(100) == 120
+
+
+def test_five_freezes_accumulate_exactly() -> None:
+    """The regression that would otherwise trip the 0.05s guard in mux.py."""
+    edits = [TimeEdit(at=10 * (i + 1), kind="freeze", frames=59) for i in range(5)]
+    tl = Timeline.build(edits, source_frames=148)
+    assert tl.virtual_frames == 148 + 5 * 59
+    # Exact on the grid: no float drift anywhere in the model.
+    assert tl.virtual_duration == pytest.approx((148 + 295) / 25, abs=0.0)
+
+
+def test_to_virtual_seconds_converts_at_the_boundary() -> None:
+    tl = Timeline.build([TimeEdit(at=25, kind="freeze", frames=25)], source_frames=148)
+    # 2.0s -> frame 50 -> virtual frame 75 -> 3.0s
+    assert tl.to_virtual_seconds(2.0) == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        TimeEdit(at=-1, kind="freeze", frames=10),
+        TimeEdit(at=10, kind="freeze", frames=0),
+        TimeEdit(at=10, kind="freeze", frames=-5),
+    ],
+)
+def test_rejects_malformed_edits(edit: TimeEdit) -> None:
+    with pytest.raises(TimelineError):
+        Timeline.build([edit], source_frames=148)
+
+
+def test_rejects_edit_beyond_the_recording() -> None:
+    with pytest.raises(TimelineError):
+        Timeline.build([TimeEdit(at=200, kind="freeze", frames=10)], source_frames=148)
+    with pytest.raises(TimelineError):
+        Timeline.build([TimeEdit(at=140, kind="cut", frames=20)], source_frames=148)
+
+
+def test_rejects_two_edits_at_the_same_frame() -> None:
+    with pytest.raises(TimelineError):
+        Timeline.build(
+            [
+                TimeEdit(at=50, kind="freeze", frames=10),
+                TimeEdit(at=50, kind="freeze", frames=10),
+            ],
+            source_frames=148,
+        )
+
+
+def test_rejects_edit_landing_inside_a_cut() -> None:
+    with pytest.raises(TimelineError):
+        Timeline.build(
+            [
+                TimeEdit(at=25, kind="cut", frames=50),
+                TimeEdit(at=40, kind="freeze", frames=10),
+            ],
+            source_frames=148,
+        )
+
+
+def test_rejects_non_positive_source_frames() -> None:
+    with pytest.raises(TimelineError):
+        Timeline.build([], source_frames=0)
