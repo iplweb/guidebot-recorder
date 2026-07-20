@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -62,11 +64,25 @@ def ffprobe_bin() -> str:
     return _resolve("ffprobe")
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run *cmd*, capturing output; raise ``RuntimeError`` on failure."""
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+def _run(
+    cmd: list[str],
+    *,
+    binary: bool = False,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess:
+    """Run *cmd*, capturing output; raise ``RuntimeError`` on failure.
+
+    ``binary`` keeps stdout as ``bytes`` (raw pixel output); stderr is decoded
+    either way so failures stay readable. ``timeout`` lets a caller that can live
+    without a result cap its wait: ``subprocess.TimeoutExpired`` propagates (the
+    child having been killed) and is that caller's to handle.
+    """
+    proc = subprocess.run(cmd, capture_output=True, text=not binary, check=False, timeout=timeout)
     if proc.returncode != 0:
-        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{proc.stderr}")
+        stderr = (
+            proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode(errors="replace")
+        )
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}\n{stderr}")
     return proc
 
 
@@ -105,13 +121,21 @@ def probe_duration(path: Path) -> float:
     return _probe_all(path).duration
 
 
-def _probe_all(path: Path, default_fps: float = 25.0) -> _ProbeResult:
+def _probe_all(
+    path: Path,
+    default_fps: float = 25.0,
+    *,
+    timeout: float | None = None,
+) -> _ProbeResult:
     """Read duration, average video FPS, and video size in one ffprobe call.
 
     Results deliberately are not cached across calls: render outputs are written
     atomically and callers may replace a path between probes. Sharing this result
     is therefore limited to one top-level composition operation, during which its
     input files are immutable.
+
+    ``timeout`` is for callers whose whole operation is optional (see
+    :func:`detect_content_crop`); the fail-loud callers leave it unset.
     """
 
     path = Path(path)
@@ -129,7 +153,8 @@ def _probe_all(path: Path, default_fps: float = 25.0) -> _ProbeResult:
             "-of",
             "json",
             str(path),
-        ]
+        ],
+        timeout=timeout,
     )
     try:
         payload = json.loads(proc.stdout)
@@ -194,6 +219,151 @@ def _probe_size(path: Path) -> tuple[int, int]:
     if size is None:  # pragma: no cover - defensive
         raise RuntimeError("ffprobe returned non-numeric size")
     return size
+
+
+#: How many frames ``detect_content_crop`` samples across the popup recording.
+#: One frame is not enough: animated content (a caret, a spinner) makes a single
+#: frame's rect wobble, and a wobbling crop would make the framed window jump.
+CROPDETECT_SAMPLES = 12
+
+#: Share of the sampled frames that must agree on the same rect before it is
+#: trusted. Below this the recording has no stable window and no crop is emitted.
+CROPDETECT_MIN_AGREEMENT = 0.6
+
+#: 8-bit distance from the padding colour above which a pixel counts as content.
+#: Small, because the padding is a flat fill: only codec noise sits below it.
+CROPDETECT_LIMIT = 8
+
+#: Wall-clock ceiling on each ffmpeg pass of the detection. Generous — the pass
+#: decodes the whole popup recording — but finite: the crop is optional and a
+#: render must never hang waiting for an optional refinement.
+CROPDETECT_TIMEOUT = 60.0
+
+_CROP_LINE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+
+
+def _padding_color(
+    path: Path,
+    at_seconds: float,
+    size: tuple[int, int],
+) -> tuple[int, int, int]:
+    """Sample the bottom-right pixel of *path* — the popup canvas's padding.
+
+    Playwright pads a popup's recording out to the *context* video size with a
+    flat fill (mid-grey in Chromium). The bottom-right pixel is inside that fill
+    for any popup smaller than the canvas; for a popup that fills the canvas it
+    is ordinary content, and the detection below then finds nothing to trim,
+    which is the correct answer.
+    """
+    width, height = size
+    raw = _run(
+        [
+            ffmpeg_bin(),
+            "-v",
+            "error",
+            "-ss",
+            f"{at_seconds:.6f}",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            # 2x2, not a single pixel: yuv420p subsamples chroma 2x2 and a crop
+            # of width 1 collapses the chroma planes to zero width.
+            f"crop=2:2:{max(0, width - 2)}:{max(0, height - 2)},scale=1:1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        binary=True,
+        timeout=CROPDETECT_TIMEOUT,
+    ).stdout
+    if len(raw) < 3:
+        raise RuntimeError(f"could not sample the popup padding colour from {path}")
+    return raw[0], raw[1], raw[2]
+
+
+def detect_content_crop(
+    path: Path,
+    *,
+    samples: int = CROPDETECT_SAMPLES,
+    min_agreement: float = CROPDETECT_MIN_AGREEMENT,
+) -> tuple[int, int, int, int] | None:
+    """Guess a popup recording's real window from its pixels, or ``None``.
+
+    Last resort behind the deterministic geometry (``window.open`` features, the
+    popup's content bounding box): the padding Playwright fills the oversized
+    canvas with is a flat colour, so mapping every pixel to its distance from
+    that colour turns the padding black and lets ``cropdetect`` trim it. Plain
+    ``cropdetect`` cannot: it only trims *dark* borders and the padding is
+    mid-grey.
+
+    ``samples`` frames spread across the recording are detected independently
+    (``reset_count=1``) and the rect must be shared by ``min_agreement`` of them,
+    so animated content cannot make the crop jitter frame to frame.
+
+    Unlike the rest of this module this helper is deliberately **not** fail-loud:
+    it is a heuristic, and every failure — no ffmpeg, an unreadable file, no
+    consensus, a rect covering the whole canvas, an ffmpeg pass overrunning
+    :data:`CROPDETECT_TIMEOUT` — degrades to ``None``, i.e. the uncropped
+    composite that was the behaviour before it existed.
+    """
+    path = Path(path)
+    try:
+        probe = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
+        if probe.size is None or probe.duration <= 0:
+            return None
+        padding = _padding_color(path, probe.duration / 2, probe.size)
+        red, green, blue = padding
+        rate = max(1e-3, samples / probe.duration)
+        proc = _run(
+            [
+                ffmpeg_bin(),
+                "-v",
+                "info",
+                "-i",
+                str(path),
+                "-vf",
+                (
+                    f"fps={rate:.6f},format=gbrp,"
+                    f"geq=r='abs(r(X,Y)-{red})':g='abs(g(X,Y)-{green})':b='abs(b(X,Y)-{blue})',"
+                    "format=gray,"
+                    f"cropdetect=limit={CROPDETECT_LIMIT}:round=2:reset_count=1:skip=0"
+                ),
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout=CROPDETECT_TIMEOUT,
+        )
+    except (RuntimeError, FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        # Includes the ffmpeg passes overrunning their budget: an optional
+        # refinement that costs too much is simply not applied.
+        return None
+
+    rects = [
+        (int(width), int(height), int(x), int(y))
+        for width, height, x, y in _CROP_LINE.findall(proc.stderr)
+    ]
+    rects = [rect for rect in rects if rect[0] > 0 and rect[1] > 0]
+    if not rects:
+        return None
+    winner, hits = Counter(rects).most_common(1)[0]
+    if hits < max(2, math.ceil(min_agreement * len(rects))):
+        return None
+    if (winner[0], winner[1]) == probe.size and (winner[2], winner[3]) == (0, 0):
+        return None  # nothing to trim
+    if (winner[2], winner[3]) != (0, 0):
+        # Playwright anchors the popup at the canvas's top-left and pads only to
+        # the right and below, so genuine padding always leaves the window at the
+        # origin. A rect that starts anywhere else is not a window inside padding
+        # — it is *ink inside a full-bleed page*, and the "padding" colour sampled
+        # at the corner was that page's own background. Cropping to it would cut
+        # the popup's background away and frame its text. Decline instead.
+        return None
+    return winner
 
 
 def _normalise_popup_crop(

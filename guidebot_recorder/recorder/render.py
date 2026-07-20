@@ -10,6 +10,7 @@ Resolved actions are read from the separate ``*.compiled.yaml`` sidecar.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import shutil
 import sys
@@ -76,6 +77,7 @@ from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
     MuxAudioTrack,
     compose_popup_video,
+    detect_content_crop,
     mux_audio_tracks,
     probe_duration,
 )
@@ -135,6 +137,19 @@ class _PopupSession:
     ``record_video_size`` below), so the popup's MP4 is main-viewport sized no
     matter how small a window the site asked for. This is the geometry the
     compositor crops that canvas back down to.
+    """
+    content_box: tuple[int, int, int, int] | None = None
+    """The popup's painted content as ``(width, height, x, y)``, or ``None``.
+
+    Level 2 of the crop chain — what a featureless ``window.open(url, name)``
+    leaves us with. Measured while the popup page is alive: the recording
+    outlives the page, its DOM does not.
+    """
+    content_box_probe: asyncio.Task[tuple[int, int, int, int] | None] | None = None
+    """The in-flight measurement, until :func:`_settle_popup_content_box` reaps it.
+
+    Kept pending on purpose: starting it when the popup opens and collecting it
+    at the end of the run keeps its cost out of the recorded timeline.
     """
 
 
@@ -298,6 +313,283 @@ async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
             file=sys.stderr,
         )
     return size
+
+
+#: A content bounding box at least this fraction of the viewport in *both*
+#: dimensions is refused as degenerate. ``body``'s children can trivially fill
+#: the frame (a ``100vw/100vh`` wrapper, a full-bleed background), in which case
+#: the box merely restates the context viewport this whole mechanism exists to
+#: correct, and level 3 has to decide instead.
+POPUP_BBOX_DEGENERATE_RATIO = 0.98
+
+#: How long the popup's content measurement gets to come back. The walk is
+#: bounded in the page (see ``_POPUP_CONTENT_BOX_SCRIPT``), so a healthy popup
+#: answers in single-digit milliseconds; the budget exists for the same reason
+#: the ``window.open`` lookup has one — ``Page.evaluate`` accepts no timeout, and
+#: a document that never commits an execution context never answers at all.
+_POPUP_CONTENT_BOX_TIMEOUT = 2.0
+
+#: Level 2: measure the popup's painted content from inside the popup document.
+#: Deliberately skips ``documentElement`` and ``body`` — both are laid out
+#: against the *context* viewport, so both report the very number being
+#: corrected. Only ``body``'s children are measured, and a child that paints
+#: nothing itself (a transparent layout wrapper) is descended into rather than
+#: counted, so a full-width wrapper around a small dialog does not inflate the
+#: result. Guidebot's own injected overlays (``data-guidebot-*``) are skipped:
+#: the cursor lives in the popup too and would stretch the box to wherever it
+#: happens to sit. A document that paints its own page background declines
+#: outright — see ``paintsPage`` below.
+_POPUP_CONTENT_BOX_SCRIPT = """
+() => {
+  const body = document.body;
+  if (!body) return null;
+  const vw = Math.round(window.innerWidth);
+  const vh = Math.round(window.innerHeight);
+  if (!(vw > 0) || !(vh > 0)) return null;
+  // A popup that paints its own page background is full-bleed by construction:
+  // the background covers the whole window, so the union of body's children is
+  // only the *ink* on top of it and cropping to that would cut the popup's
+  // background away. ``body``/``documentElement`` are skipped everywhere else in
+  // this walk precisely because their box is the context viewport — but whether
+  // they PAINT is a different question, and the honest answer here is "decline".
+  // An unstyled document leaves both transparent (the white is the canvas, not a
+  // background), so ordinary dialogs are unaffected.
+  const paintsPage = (el) => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    const bg = style.backgroundColor;
+    if (bg && bg !== "transparent" && !/^rgba\\(0,\\s*0,\\s*0,\\s*0\\)$/.test(bg)) return true;
+    return Boolean(style.backgroundImage) && style.backgroundImage !== "none";
+  };
+  if (paintsPage(document.documentElement) || paintsPage(body)) return null;
+  const MAX_DEPTH = 12;
+  const MAX_NODES = 1200;
+  // The walk runs on the popup's main thread while the popup is on camera, so
+  // it is bounded by wall clock as well as by node count: whatever the DOM
+  // looks like, it cannot cost the recording more than this. Overrunning
+  // abandons the measurement (partial unions are worse than none — they would
+  // crop away real content), and level 3 decides instead.
+  const BUDGET_MS = 20;
+  const deadline = performance.now() + BUDGET_MS;
+  let overran = false;
+  const REPLACED = new Set([
+    "IMG", "SVG", "CANVAS", "VIDEO", "IFRAME", "INPUT", "TEXTAREA",
+    "SELECT", "BUTTON", "OBJECT", "EMBED", "HR",
+  ]);
+  let visited = 0;
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  const add = (rect) => {
+    if (!rect) return;
+    const l = Math.max(0, rect.left);
+    const t = Math.max(0, rect.top);
+    const r = Math.min(vw, rect.right);
+    const b = Math.min(vh, rect.bottom);
+    if (!(r > l) || !(b > t)) return;
+    if (l < left) left = l;
+    if (t < top) top = t;
+    if (r > right) right = r;
+    if (b > bottom) bottom = b;
+  };
+  const isOverlay = (el) => {
+    for (const attr of el.attributes || []) {
+      if (attr.name.startsWith("data-guidebot")) return true;
+    }
+    return false;
+  };
+  const paints = (el, style) => {
+    if (REPLACED.has(el.tagName)) return true;
+    const bg = style.backgroundColor;
+    if (bg && bg !== "transparent" && !/^rgba\\(0,\\s*0,\\s*0,\\s*0\\)$/.test(bg)) return true;
+    if (style.backgroundImage && style.backgroundImage !== "none") return true;
+    if (style.boxShadow && style.boxShadow !== "none") return true;
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      if (parseFloat(style["border" + side + "Width"]) > 0) return true;
+    }
+    return false;
+  };
+  const walk = (el, depth) => {
+    if (overran) return;
+    if (visited++ > MAX_NODES || performance.now() > deadline) {
+      overran = true;
+      return;
+    }
+    if (isOverlay(el)) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return;
+    if (Number(style.opacity) === 0) return;
+    if (paints(el, style) || depth >= MAX_DEPTH) {
+      add(el.getBoundingClientRect());
+      return;
+    }
+    let descended = false;
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        walk(node, depth + 1);
+        descended = true;
+      } else if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) {
+        // Measure the glyphs, not the block box the text sits in: a <p> is as
+        // wide as its container, its text usually is not.
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        add(range.getBoundingClientRect());
+        descended = true;
+      }
+    }
+    if (!descended) add(el.getBoundingClientRect());
+  };
+  for (const child of body.children) walk(child, 1);
+  if (overran) return null;
+  if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+  if (!(right > left) || !(bottom > top)) return null;
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    viewportWidth: vw,
+    viewportHeight: vh,
+  };
+}
+"""
+
+
+def _parse_content_box(measured: object) -> tuple[int, int, int, int] | None:
+    """Validate and gate one content bounding box read back from a popup.
+
+    Returns ``(width, height, x, y)`` in recording pixels, or ``None`` when the
+    measurement is unusable — non-finite, empty, or *degenerate*: at least
+    :data:`POPUP_BBOX_DEGENERATE_RATIO` of the viewport in **both** dimensions,
+    which means the content genuinely is full-bleed and the box says nothing the
+    uncropped canvas did not already say. The origin rounds down and the far
+    edges round up, so rounding never shaves a painted pixel.
+    """
+    if not isinstance(measured, dict):
+        return None
+    values: list[float] = []
+    for key in ("x", "y", "width", "height", "viewportWidth", "viewportHeight"):
+        value = measured.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if not math.isfinite(float(value)):
+            return None
+        values.append(float(value))
+    x, y, width, height, viewport_width, viewport_height = values
+    if width <= 0 or height <= 0 or viewport_width <= 0 or viewport_height <= 0:
+        return None
+    if (
+        width >= viewport_width * POPUP_BBOX_DEGENERATE_RATIO
+        and height >= viewport_height * POPUP_BBOX_DEGENERATE_RATIO
+    ):
+        return None
+    left, top = math.floor(x), math.floor(y)
+    return (
+        math.ceil(x + width) - left,
+        math.ceil(y + height) - top,
+        max(0, left),
+        max(0, top),
+    )
+
+
+async def _popup_content_box(popup: Page) -> tuple[int, int, int, int] | None:
+    """Measure the popup's painted content while the page is still alive.
+
+    Level 2 of the crop chain, used when the site opened the popup without size
+    features. A closed page, a navigation race or a hostile document degrades to
+    ``None`` (fall through to level 3) rather than failing the render.
+    """
+    try:
+        measured = await popup.evaluate(_POPUP_CONTENT_BOX_SCRIPT)
+    except PlaywrightError:
+        return None
+    return _parse_content_box(measured)
+
+
+def _start_popup_content_box(popup: Page) -> asyncio.Task[tuple[int, int, int, int] | None]:
+    """Begin measuring the popup off the render's critical path.
+
+    The measurement has to happen while the popup's DOM exists, and the DOM dies
+    long before composition — but awaiting it where it starts would put its
+    latency *inside the recorded timeline*, right at the moment the popup appears
+    on camera. So it is started here and collected later
+    (:func:`_settle_popup_content_box`), by which time it has long since
+    finished: the render does not block on it at all.
+    """
+
+    return asyncio.ensure_future(_popup_content_box(popup))
+
+
+async def _settle_popup_content_box(popup: _PopupSession) -> None:
+    """Collect the pending measurement, bounded, before the context goes away.
+
+    Must run while the browser context is still open — a closed context can only
+    answer with "target closed". Bounded for the same reason the ``window.open``
+    lookup is: ``Page.evaluate`` never times out on its own, and no popup may
+    hang a render. Giving up costs the crop, not the video.
+    """
+
+    probe = popup.content_box_probe
+    if probe is None:
+        return
+    popup.content_box_probe = None
+    try:
+        popup.content_box = await asyncio.wait_for(
+            asyncio.shield(probe), _POPUP_CONTENT_BOX_TIMEOUT
+        )
+    except TimeoutError:
+        # ``shield`` keeps the timeout from cancelling the probe itself, so it is
+        # still ours to dispose of without orphaning its exception.
+        _discard_pending(probe)
+        tqdm.write(
+            "OSTRZEŻENIE: pomiar zawartości popupu nie zakończył się w "
+            f"{_POPUP_CONTENT_BOX_TIMEOUT:g}s — przycięcie z heurystyki obrazu",
+            file=sys.stderr,
+        )
+    except PlaywrightError:
+        # The popup closed under the probe: level 3 decides instead.
+        popup.content_box = None
+
+
+def _log_popup_crop(level: str, crop: tuple[int, int, int, int] | None, verbose: bool) -> None:
+    """Say which fallback level framed the popup — silent degradation is a bug."""
+    if not verbose:
+        return
+    if crop is None:
+        tqdm.write(f"   ⤷ kadr popupu: {level} nic nie wykrył — pełne płótno nagrania")
+        return
+    width, height, x, y = crop
+    tqdm.write(f"   ⤷ kadr popupu: {level} → {width}x{height}+{x}+{y}")
+
+
+def _resolve_popup_crop(
+    *,
+    window_size: tuple[int, int] | None,
+    content_box: tuple[int, int, int, int] | None,
+    popup_video: Path,
+    verbose: bool,
+) -> tuple[tuple[int, int, int, int] | None, str]:
+    """Pick the popup crop rect from the best available witness.
+
+    Three levels, most deterministic first, returned with the name of the one
+    that answered so the log can say which framed the video:
+
+    1. ``window.open`` size features — what the site literally asked for.
+    2. the popup's content bounding box — measured in the page, gated by
+       :data:`POPUP_BBOX_DEGENERATE_RATIO`.
+    3. ``cropdetect`` over the recording — a pixel heuristic, last resort.
+
+    All three declining yields ``(None, "none")``: the pre-crop full-canvas
+    filtergraph, byte for byte.
+    """
+    if window_size is not None:
+        crop = (window_size[0], window_size[1], 0, 0)
+        _log_popup_crop("window.open", crop, verbose)
+        return crop, "window.open"
+    if content_box is not None:
+        _log_popup_crop("bbox", content_box, verbose)
+        return content_box, "bbox"
+    detected = detect_content_crop(popup_video)
+    _log_popup_crop("cropdetect", detected, verbose)
+    return (detected, "cropdetect") if detected is not None else (None, "none")
 
 
 @dataclass(slots=True)
@@ -1512,6 +1804,11 @@ async def run_render(
         if popup is not None and popup.closed_at is None:
             popup_open_at_end = True
             popup.closed_at = max(popup.opened_at, time.monotonic() - anchor)
+        if popup is not None:
+            # Last moment the popup's DOM can still answer: the context (and with
+            # it every page) is closed a few lines below. The probe was started
+            # when the popup opened, so this normally settles instantly.
+            await _settle_popup_content_box(popup)
         prime_tasks = [
             observation.visual_prime
             for observation in observed_pages.values()
@@ -1551,6 +1848,15 @@ async def run_render(
         return
 
     popup_webm = Path(await popup.video.path())
+    # The popup recorded onto the main window's canvas; crop it back to its real
+    # window so float frames that and not a viewport-sized rectangle of filler.
+    # Three levels, best evidence first; all declining -> today's full canvas.
+    popup_crop, _crop_level = _resolve_popup_crop(
+        window_size=popup.window_size,
+        content_box=popup.content_box,
+        popup_video=popup_webm,
+        verbose=verbose,
+    )
     closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
     assert closed_at is not None
     composite = work / f"{out_mp4.stem}.composite.mp4"
@@ -1571,14 +1877,7 @@ async def run_render(
         open_ms=cfg.popup.open_ms,
         close_ms=cfg.popup.close_ms,
         hold_open_at_end=popup_open_at_end,
-        # The popup recorded onto the main window's canvas; crop it back to the
-        # window the site actually asked for so the float mode frames that and
-        # not a viewport-sized rectangle of filler. Unknown size -> no crop.
-        popup_crop=(
-            (popup.window_size[0], popup.window_size[1], 0, 0)
-            if popup.window_size is not None
-            else None
-        ),
+        popup_crop=popup_crop,
     )
     total = probe_duration(composite)
     await _assemble_audio_tracks(
@@ -1776,6 +2075,14 @@ async def _render_step(
                 # Read from the opener while it is still alive; the popup's own
                 # viewport is the context's and so cannot report this.
                 window_size=await _popup_window_request(page),
+                # Level 2, started (not awaited) now for the same reason: by
+                # composition time the popup page is closed. Only the *painted*
+                # content can be measured — the popup's layout viewport is the
+                # context's, so innerWidth/outerWidth/clientWidth all restate the
+                # oversized number instead of the real window. Awaiting it here
+                # would spend its latency on camera; it is reaped before the
+                # context closes instead.
+                content_box_probe=_start_popup_content_box(popup_page),
             )
     elif cached.action == "hover":
         await recorder.hover(cached.target)
