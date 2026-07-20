@@ -34,7 +34,7 @@ A throwaway experiment settled the one open technical question. Recording the
 numbers here because the scripts were scratchpad-only and are gone.
 
 Playwright **1.61.0**, Chromium **149.0.7827.55**, context set up as
-`render.py:1376-1381` (`record_video_dir`, `record_video_size` 640×480).
+`render.py:1415-1421` (`record_video_dir`, `record_video_size` 640×480).
 
 **1. Recordings are CFR, not VFR, and never go dark.** Interleave run
 (main → tab → main → tab, ~2 s each):
@@ -103,13 +103,21 @@ visible. This also keeps `closeWindow` byte-identical to the already-committed s
 ### B. Layer 1 — orchestration (the substance of this spec)
 
 `_active_page` becomes a **window registry** holding, per window: name, `Page`,
-open/closed state, creation offset against the main clock, and open-order depth.
-One entry is pre-seeded as `main`.
+open/closed state, creation offset against the main clock, open-order depth, and
+**saved cursor position**. One entry is pre-seeded as `main`.
+
+The cursor field is not optional bookkeeping. `Overlay.pos` is shared across pages,
+so a window's cursor position has to be saved on the way out and restored on the way
+back; PR#20 established exactly this for the single-popup case via
+`popup.main_cursor_pos` and `_prepare_main_after_popup_close(..., restore_cursor_to=)`
+(`render.py:876`, call site `render.py:1800`). With `switchWindow` that save/restore
+is needed on **every switch**, not only on open and close. A registry without this
+field would land the cursor at the wrong place on every jump back.
 
 - Steps route to `registry.active`. Per measured fact 2, focus is never consulted.
 - The "one popup per session" invariant is removed from both compile
-  (`compile.py:373-385`) and render (`render.py:1697-1698`).
-- `_unexpected_pages` (`compile.py:516-524`, `render.py:625-637`) changes meaning
+  (`compile.py:373-385`) and render (`render.py:1736-1737`).
+- `_unexpected_pages` (`compile.py:515-524`, `render.py:635-647`) changes meaning
   from "anything besides main and the one popup" to "any page not in the registry".
 - The `opener()` admission check generalises: a new page's opener must be the
   **active** page, and the page is bound to the name declared by `opensWindow` on
@@ -156,10 +164,43 @@ step and the full-frame presentation rule that one establishes.
   between them.
 - **Integration**: the interleave scenario from Why — main → tab → main → tab →
   close. Assert each segment is filmed on the correct window, that pushes run in the
-  correct direction, and that the tab's content at the second visit reflects real
-  elapsed wall-clock (the recording never stopped).
+  correct direction, and that the tab's content at the second visit has advanced
+  along the **recording clock** `t_real` (the recording never stopped). Name the
+  clock explicitly in the assertion: with `hold_frame_for_narration` enabled, film
+  time and recording time diverge by the running freeze sum, so "elapsed wall-clock"
+  alone is ambiguous.
 - **Regression**: single-popup `cut` / `float` / `slide` output unchanged, matching
   Spec C's byte-for-byte discipline.
+
+## Interaction with `hold-frame-for-narration`
+
+That design (`2026-07-20-hold-frame-for-narration-design.md`, merged in PR#20) and
+this one meet on the same function, so the order they land in matters.
+
+- **It declares as fixed what this spec rewrites.** Its pipeline diagram marks
+  `compose_popup_video` as "existing code, UNCHANGED", and its §2 states that
+  `opened_at`/`closed_at`, the encoder start-up compensation, and the
+  `crop`-before-`scale` ordering all stay untouched. §C above turns that single
+  interval into an N-segment list. These are not logically contradictory, but
+  **whichever lands second invalidates the other's stated premise**, and the second
+  plan must re-state the baseline rather than inherit it.
+- **The stage order protects per-window offsets — keep it.** Hold-frame applies
+  `apply_time_edits` *after* composition, so the per-window creation offsets of
+  measured fact 3 are computed wholly in `t_real` and freezes land on an
+  already-composited frame. Freezes therefore cannot desynchronise window alignment.
+  This is the safe ordering and it is load-bearing here: editing before composing
+  would make every window's offset drift by the running freeze sum.
+- **Its consumer inventory under-counts once windows are plural.** Hold-frame names
+  three `anchor` consumers — narration offsets, `sfx_events`, and popup
+  `opened_at`/`closed_at` — and argues that one mapping function makes forgetting a
+  consumer impossible. The argument holds; the enumeration does not. This spec
+  replaces the third consumer with N segment boundaries plus N creation offsets from
+  the registry.
+- **This spike answers an open question of theirs.** Hold-frame §4 flags that
+  "Playwright writes variable-frame-rate WebM, so 'fps' is not a single number" and
+  requires verification during implementation. Measured fact 1 settles it: the
+  recordings are CFR at exactly 25.00 fps with a maximum inter-frame gap of one
+  frame interval. Their proposed `fps=N` guard ahead of `trim` may be unnecessary.
 
 ## Out of scope
 
@@ -167,7 +208,7 @@ step and the full-frame presentation rule that one establishes.
   — still the north star's open problem, owned by a later spec.
 - Windows opened by anything other than a click.
 - `opensWindow` inside a `when` branch — pop-ups there are already unsupported
-  (`render.py:1264-1265`).
+  (`render.py:1303-1305`).
 - More than one window opened by a single click.
 
 ## Risks
