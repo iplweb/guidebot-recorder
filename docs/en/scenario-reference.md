@@ -315,7 +315,7 @@ popup:
 |---|---:|---|
 | `transition` | derived from `floating` | `cut`, `float`, or `slide` (see above). |
 | `floating` | `true` | Deprecated bool alias: `true` → `float`, `false` → `cut`. An explicit `transition` wins. |
-| `scale` | `0.72` | `float`: floating window size as a fraction of the viewport. |
+| `scale` | `0.85` | `float`: floating window size as a fraction of the viewport. |
 | `cornerRadius` | `14` | `float`: window corner radius in pixels. |
 | `shadow` | `true` | `float`: draw the drop shadow. |
 | `backdropDim` | `0.45` | `float`: opacity of the dark backdrop over the main page. |

@@ -171,7 +171,7 @@ class PopupConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     floating: bool = True
-    scale: float = 0.72
+    scale: float = 0.85
     corner_radius: int = Field(default=14, alias="cornerRadius")
     shadow: bool = True
     backdrop_dim: float = Field(default=0.45, alias="backdropDim")

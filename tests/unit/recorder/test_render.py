@@ -2259,3 +2259,84 @@ def test_resolve_popup_crop_does_not_run_cropdetect_when_a_level_answered(tmp_pa
         )[1]
         == "bbox"
     )
+
+
+class _CursorPage:
+    """A page that records nothing but its own liveness and viewport."""
+
+    def __init__(self, viewport=None, closed=False):
+        self.viewport_size = viewport
+        self._closed = closed
+
+    def is_closed(self):
+        return self._closed
+
+
+class _RecordingOverlay:
+    """Captures the cursor calls `_hand_cursor_to_popup` makes, in order."""
+
+    def __init__(self, pos=(0.0, 0.0)):
+        self.pos = pos
+        self.calls = []
+
+    async def hide(self, page):
+        self.calls.append(("hide", page))
+
+    async def show(self, page):
+        self.calls.append(("show", page))
+
+    async def move_to(self, page, x, y, ms=None):
+        self.calls.append(("move_to", page, x, y, ms))
+        self.pos = (x, y)
+
+
+async def test_hand_cursor_to_popup_centres_and_reveals_the_popup_cursor():
+    """The popup's cursor must be visible on arrival, not on first action.
+
+    Without this the popup's own cursor instance inherits ``Overlay.pos`` — the
+    opener's coordinates, usually the control that opened the popup — and paints
+    nothing until something moves it.
+    """
+
+    main = _CursorPage()
+    popup_page = _CursorPage(viewport={"width": 500, "height": 670})
+    popup = render_module._PopupSession(page=popup_page, video=None, opened_at=0.0)
+    overlay = _RecordingOverlay(pos=(1300.0, 40.0))
+
+    await render_module._hand_cursor_to_popup(main, popup, overlay)
+
+    assert overlay.calls == [
+        ("hide", main),
+        ("move_to", popup_page, 250.0, 335.0, 0),
+        ("show", popup_page),
+    ]
+    # ms=0: a glide would animate in from the *other* window's coordinates.
+    assert overlay.calls[1][4] == 0
+
+
+async def test_hand_cursor_to_popup_remembers_where_the_main_cursor_stood():
+    """Centring in the popup overwrites the shared position; it must be restorable."""
+
+    popup = render_module._PopupSession(
+        page=_CursorPage(viewport={"width": 500, "height": 670}),
+        video=None,
+        opened_at=0.0,
+    )
+
+    await render_module._hand_cursor_to_popup(
+        _CursorPage(), popup, _RecordingOverlay(pos=(1300.0, 40.0))
+    )
+
+    assert popup.main_cursor_pos == (1300.0, 40.0)
+
+
+async def test_hand_cursor_to_popup_skips_centring_without_a_viewport():
+    """An unknown viewport costs the centring, never the render."""
+
+    popup = render_module._PopupSession(page=_CursorPage(None), video=None, opened_at=0.0)
+    overlay = _RecordingOverlay()
+    main = _CursorPage()
+
+    await render_module._hand_cursor_to_popup(main, popup, overlay)
+
+    assert overlay.calls == [("hide", main)]
