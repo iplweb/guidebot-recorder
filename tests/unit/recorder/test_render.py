@@ -2494,10 +2494,63 @@ class _HangingFrame:
         await asyncio.Event().wait()  # never resolves, exactly like the real one
 
 
+class _RaisingFrame:
+    """A frame whose probe blows up rather than answering."""
+
+    url = "https://broken.test/"
+
+    async def evaluate(self, expression, *args):
+        raise RuntimeError("execution context destroyed")
+
+
 class _StubOpener:
     def __init__(self, frames, main_frame=None):
         self.main_frame = main_frame if main_frame is not None else _StubFrame(None)
         self.frames = [self.main_frame, *frames]
+
+
+async def test_popup_window_request_returns_as_soon_as_one_frame_answers():
+    """A silent frame must not *delay* an answer another frame already gave.
+
+    The budget is the ceiling for "nobody ever answers", not the price of every
+    popup. Waiting for all probes made a single dead ad iframe cost the full
+    ``_POPUP_REQUEST_LOOKUP_TIMEOUT`` on every popup open — a visible, dead
+    pause in the rendered film. Deliberately *not* monkeypatching the timeout:
+    the point of this test is the real-world duration.
+    """
+    hanging = _HangingFrame()
+    opener = _StubOpener([_StubFrame({"width": 420, "height": 300}), hanging])
+
+    started = time.monotonic()
+    assert await _popup_window_request(opener) == (420, 300)
+    elapsed = time.monotonic() - started
+
+    assert hanging.entered.is_set(), "test did not exercise the hanging frame"
+    assert elapsed < 0.5, (
+        f"lookup waited for the silent frame: took {elapsed:.2f}s "
+        f"(budget is {render_module._POPUP_REQUEST_LOOKUP_TIMEOUT:g}s)"
+    )
+
+
+async def test_popup_window_request_survives_a_frame_that_raises(monkeypatch):
+    """One exploding probe must not abort the scan — other frames may answer."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener(
+        [_StubFrame({"width": 420, "height": 300}), _RaisingFrame()],
+        main_frame=_RaisingFrame(),
+    )
+
+    assert await _popup_window_request(opener) == (420, 300)
+
+
+async def test_popup_window_request_takes_the_top_document_when_several_answer():
+    """Several answers: the priority order decides, and it is deterministic."""
+    opener = _StubOpener(
+        [_StubFrame({"width": 800, "height": 600}), _StubFrame({"width": 640, "height": 480})],
+        main_frame=_StubFrame({"width": 420, "height": 300}),
+    )
+
+    assert await _popup_window_request(opener) == (420, 300)
 
 
 async def test_popup_window_request_answers_despite_a_frame_that_never_answers(monkeypatch):
