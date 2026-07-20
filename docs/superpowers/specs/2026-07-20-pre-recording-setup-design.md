@@ -1,7 +1,7 @@
 # Pre-recording setup — cached session with a login health-check
 
 **Date:** 2026-07-20
-**Status:** approved, ready to plan
+**Status:** approved, ready to plan (revised after Fable 5 design review)
 
 ## Problem
 
@@ -14,50 +14,69 @@ scenario steps — and because recording is armed at browser-context creation
 on the film.**
 
 There is no un-recorded "prepare the environment first" phase. A repo-wide grep
-confirms the codebase has zero `storage_state`, `add_cookies`,
-`launch_persistent_context`, or `user_data_dir`: every `render`, `compile`, and
-localized variant gets a fresh, empty context, and the docs tell authors to
-arrange login/cookie state themselves as filmed steps
-(`docs/pl/scenario-reference.md:71`, `docs/pl/how-it-works.md:62`).
+confirms zero `storage_state`, `add_cookies`, `launch_persistent_context`, or
+`user_data_dir`: every `render`, `compile`, and localized variant gets a fresh,
+empty context, and the docs tell authors to arrange login/cookie state
+themselves as filmed steps.
 
 ## Goal
 
 Let a recording reuse a **prepared, cached browser session** (Playwright
-`storage_state`) established by *another scenario* — typically an existing
-scenario that already teaches logging in. The preparation runs on a context that
-is **not** recording, so it can never appear in the video. A cheap health-check
-decides whether the cached session is still valid; if not, it is refreshed
-automatically.
-
-## Non-goals (YAGNI)
-
-- No new dedicated `setup.yaml` file type. The setup source is an ordinary
-  `*.scenario.yaml` that is already compiled.
-- No inline per-scenario setup block. The setup source is always a referenced,
-  shared scenario file.
-- No interactive "record your login" codegen. The manual case (MFA/captcha) is
-  served by running the refresh `--headed` so a human can finish by hand.
-- No natural-language / LLM health-check. Liveness is a deterministic text
-  match. No Codex, no compiled target, for `verify`.
-- v1 keeps **one** session cache per setup scenario, language-agnostic — reused
-  across localized variants (auth is orthogonal to `locale`).
-- Setup replays only frozen targets. Render still makes **zero** LLM calls.
+`storage_state`) established by running ANOTHER already-compiled scenario —
+typically an existing scenario that already teaches logging in — on a context
+that is **not** recording. A cheap, deterministic text health-check
+(`verifyUserLoggedIn`) decides whether the cached session is still valid; if not,
+it is refreshed automatically.
 
 ## Terminology
 
-- **Setup scenario** — an ordinary `*.scenario.yaml` (with its
-  `*.compiled.yaml` sidecar) whose steps leave the browser in the desired
-  prepared state. Reusing an existing "how to log in" scenario is the intended
-  path.
+- **Setup scenario** — an ordinary `*.scenario.yaml` (+ its `*.compiled.yaml`
+  sidecar) whose steps leave the browser in the desired prepared state. Reusing
+  an existing "how to log in" scenario is the intended path.
 - **Target scenario** — the scenario being recorded, which references a setup
   scenario via `config.setup`.
-- **Session cache** — a Playwright `storage_state` JSON persisted under
-  `.guidebot/sessions/`, reused across renders.
+- **Session cache** — a Playwright `storage_state` persisted (wrapped) under
+  `.guidebot/sessions/`, reused across compiles and renders.
 
-## Schema changes (`models/config.py`)
+## The load-bearing insight (from review §1)
 
-Two optional additions to `Config`, both ignored during a normal render and only
-consulted when a scenario acts as a setup source or references one.
+Removing the login steps from the *target* scenario means the target must be
+**compiled AND rendered while already logged in**. If compile runs against a
+fresh, empty context it lands on the login page and `resolve_step_target` either
+fails or freezes garbage against the login DOM. Therefore the session pre-phase
+must run **before both `compile` and `render`** of the target — not render only.
+This is the central correction to the first draft.
+
+## Establishing the session — reuse the compile machinery (review §4)
+
+Rather than writing a third copy of the step loop (after `run_compile` and
+`run_render`), session establishment **replays the setup scenario through the
+existing compile path** with a reasoner that always raises:
+
+- `RaisingReasoner` — any call to resolve/infer raises `SetupNeedsCompile`. So a
+  setup sidecar whose targets are all reuse-valid replays cleanly (drives the
+  page from frozen targets); anything that would need an LLM fails loudly and
+  tells the user to run `guidebot compile <setup>` first. Render/setup still make
+  **zero** LLM calls.
+- Running through the compile path inherits, for free: the pop-up lifecycle
+  (SSO/OAuth login pop-ups are a canonical login flow — `compile.py:321-416`),
+  optional/gate **pending** entries (probe-and-skip when the element is absent),
+  readiness waits, `_resolve_url` against the setup's `base_url`, `${ENV}`
+  substitution, and secret redaction.
+- The replay context uses the **setup scenario's `site_viewport` and `locale`**
+  (matching how its targets were frozen, `compile.py:213-217`), never
+  `record_video_dir`.
+
+Implementation seam: factor the inner context/replay of `run_compile_in_browser`
+so a caller can (a) provide/own the context and (b) capture
+`context.storage_state()` **before the context closes**. The session module owns
+that context, runs the replay, snapshots, then closes.
+
+`opens_popup` and `pending` are thus supported (not just tolerated). If a future
+setup flow hits a genuinely unsupported shape, it fails loudly via the raising
+reasoner or the existing pop-up contract — never silently.
+
+## Schema changes (`models/config.py`, `extra="forbid"`)
 
 ### On the target scenario — reference the setup
 
@@ -66,179 +85,268 @@ config:
   setup: teach-login.scenario.yaml   # path, relative to this scenario
 ```
 
-`setup: Optional[str]`. When present, render runs the pre-recording session
-phase (below) before creating the recording context.
+`setup: Optional[str]`. **Not cosmetic** (review §1): its presence changes the
+DOM that compile resolves against, so it participates in target-compile
+invalidation (see "Compile invalidation").
+
+A scenario used as a setup source **must not itself declare `config.setup`**
+(recursion guard, review §8) — validation error.
 
 ### On the setup scenario — the health-check
 
 ```yaml
 config:
   baseUrl: https://example.com
-  verifyUserLoggedIn: "Wyloguj"      # shorthand: this text must appear on baseUrl
+  verifyUserLoggedIn: "Wyloguj"      # shorthand for {containsText: "Wyloguj"}
   # full form (all fields optional except containsText):
   # verifyUserLoggedIn:
   #   containsText: "Wyloguj"
-  #   url: /dashboard                # default: baseUrl
+  #   url: /dashboard                # default: target baseUrl (see health-check)
   #   timeout: 8                     # default: 8s
-  maxAgeHours: 12                    # optional TTL for proactive refresh
+  maxAgeHours: 12                    # optional TTL (see cache)
 ```
 
-- `verifyUserLoggedIn` accepts a **string** (equivalent to `{containsText: ...}`)
-  or an object `VerifyLoggedIn { containsText: str, url: Optional[str],
+- `verifyUserLoggedIn` accepts a **string** (= `{containsText: ...}`) or an
+  object `VerifyLoggedIn { containsText: str, url: Optional[str],
   timeout: float = 8 }`.
-- Match semantics: `containsText` is a plain substring of the target page's
-  visible text (`body.innerText`), **case-sensitive**, compared after `trim`.
-- `url` defaults to `baseUrl`. It is a rarely-needed override; the normal case is
-  "load `baseUrl`; a logged-in root shows the text, a logged-out root redirects
-  to a login form that does not."
-- If `verifyUserLoggedIn` is absent, the health-check is skipped: a present cache
-  is reused, and refresh happens only via `maxAgeHours`, `--force`, or a missing
-  cache.
-- `maxAgeHours: Optional[float]`. When set, a cache older than this is treated as
-  stale regardless of the text check.
-
-Both fields are cosmetic-to-render (they never affect a normal recording), so
-they stay outside the compile hash and do not force recompilation.
+- Match: plain substring of the page's rendered `document.body.innerText`,
+  **case-sensitive** (no whole-page "trim" — that clause is dropped). Docs must
+  tell authors to choose text that renders **only when authenticated** (a
+  username is the robust choice); substring matching has no word boundaries, so a
+  logged-out footer "wyloguj się kiedy chcesz" would false-positive.
+- Both `verifyUserLoggedIn` and `maxAgeHours` are render-only on the setup file
+  (stay outside the setup file's own compile hash).
+- **If a setup source declares neither `verifyUserLoggedIn` nor `maxAgeHours`**
+  (review §7): allowed, but emit a **loud warning** at setup/compile/render time.
+  The "never silently logged-out" guarantee below holds **only when a
+  health-check is configured**; without one a present cache is trusted until
+  `--force`.
 
 ## Session cache
 
-- **Location:** `.guidebot/sessions/<key>.json`, alongside the existing
-  `.guidebot/audio/` cache.
-- **Format:** exactly the object returned by Playwright
-  `context.storage_state()` (cookies + `localStorage` origins).
-- **Key:** a stable hash of `(resolved setup scenario path, setup baseUrl, setup
-  compiled-target hash)`. Changing the setup scenario's login flow (hence its
-  compiled targets) changes the key and abandons the old session.
-- **Git:** add `.guidebot/sessions/` to `.gitignore`. The file contains live
-  auth tokens and must never be committed.
+- **Location:** `.guidebot/sessions/<key>.json`, beside `.guidebot/audio/`.
+- **Format (wrapper, review §9):**
+  ```json
+  { "created_at": "<ISO-8601 UTC>", "key_inputs": {...}, "storage_state": {...} }
+  ```
+  `maxAgeHours` is computed from `created_at`, never file mtime (survives
+  `git clean`, copies, CI restore). The inner `storage_state` dict is passed
+  directly to `new_context(storage_state=<dict>)` — Playwright accepts a dict, so
+  no raw-file round-trip.
+- **Key (review §2):** `sha256` over canonical JSON of:
+  `{v, setup_path (Path.resolve()), setup_baseUrl, setup_config_hash,
+  env_digest}` where `env_digest = sha256(sorted (name,value) pairs of
+  scenario_env_references(setup_path, env))`. Credentials are folded into the
+  combined hash only — never raw, never a standalone filename component (avoids
+  offline guessing of a low-entropy password). Changing the login user changes
+  the key → old session abandoned. Key is pre-wired so `locale` can be added
+  later without breaking (review §6, per-variant sessions deferral).
+- **Writes:** atomic (`tmp` + `os.replace`); file `0o600`, dir `0o700`
+  (review §10). Concurrent render-set variants share it safely.
+- **Gitignore that travels (review §10):** on first use, write
+  `.guidebot/sessions/.gitignore` containing `*` — the cache protects itself in
+  the *user's* repo, not only this one. (This repo's root `.gitignore` also gets
+  `.guidebot/sessions/`.)
+
+## Health-check (`verifyUserLoggedIn`) — review §3
+
+Runs on a throwaway un-recorded context seeded with the cached `storage_state`:
+
+1. `goto(verify.url or TARGET baseUrl)`. The check uses the **target** scenario's
+   `baseUrl` when available (cookies are origin-scoped; a green check on the
+   setup origin means nothing if the render loads a different host).
+2. **Host guard:** if the target's `baseUrl` host differs from the setup's,
+   hard-error in v1 (cross-origin session reuse is not sound). Documented.
+3. Poll, don't snapshot: `wait_for_function` on
+   `document.body.innerText.includes(<containsText>)` up to `timeout`. This
+   avoids false negatives on async SPA shells.
+4. Returns a boolean "session live". No LLM, no compiled target. Error output
+   **never** includes `body.innerText` (PII/usernames) — only pass/fail and the
+   configured `containsText` is echoed.
+
+Known, documented false modes: an app that paints logged-in chrome then JS-
+redirects to `/login` can transiently satisfy the check; authors pick
+authenticated-only text to mitigate. Cross-origin and word-boundary limits are
+listed in docs.
 
 ## Execution flow
 
-### New CLI command
+### Shared pre-phase: `ensure_session(browser, setup_scenario, env, ...) -> dict`
+
+Used by **both** target-compile and target-render:
 
 ```
-guidebot setup SETUP_SCENARIO [--headed] [--force]
-```
-
-Builds or refreshes the session cache for a setup scenario:
-
-1. Require the setup scenario's `*.compiled.yaml` (error, instructing
-   `guidebot compile`, if missing/stale — setup replays frozen targets only).
-2. Open an un-recorded context (`browser.new_context()` with **no**
-   `record_video_dir`), `overlay=None`.
-3. Replay the setup scenario's compiled action steps, skipping render-only
-   entries (`say`, `slide`, cursor/chrome/intro/sound). `${ENV}` substitution
-   works as today; env-derived values are redacted in logs via the existing
-   `scenario_env_references` machinery.
-4. `storage_state = await context.storage_state()`; write it to the cache.
-5. Run the health-check (below). On success, report and exit. On failure with
-   `--headed`, pause for manual completion, then re-snapshot and re-check.
-6. `--force` ignores any existing cache and always rebuilds.
-
-### Health-check (`verifyUserLoggedIn`)
-
-Runs on a throwaway un-recorded context seeded with the cached `storage_state`:
-`goto(url or baseUrl)` → read `body.innerText` → assert it contains
-`containsText` within `timeout`. Returns a boolean "session live". No LLM, no
-compiled target.
-
-### Render pre-phase (`recorder/render.py`, before line 1705)
-
-When the target scenario has `config.setup`:
-
-```
-resolve + load setup scenario (+ its compiled sidecar)
+require setup scenario compiled (else error: run `guidebot compile <setup>`)
 compute cache key
-session_live = false
+live = false
 if cache exists and (maxAgeHours not exceeded):
-    session_live = run health-check on cached storage_state
-        (if verifyUserLoggedIn absent → treat present, unexpired cache as live)
-if not session_live:
-    # auto-refresh
-    run setup replay (un-recorded) → snapshot → save cache
-    session_live = run health-check
-    if not session_live:
-        FAIL LOUDLY: "session could not be established automatically;
-        run `guidebot setup <setup> --headed` to finish login by hand"
-# hand off to the recording context
+    live = health-check(cached storage_state)          # skipped→live if no verify configured
+if not live:
+    # auto-refresh: replay setup via compile-path + RaisingReasoner (un-recorded)
+    storage_state = replay_setup(...)                  # popups/pending/redaction inherited
+    save cache (atomic, 0600)
+    live = health-check(storage_state)
+    if not live:
+        FAIL LOUDLY. Message distinguishes:
+          - health-text-not-found  → check verifyUserLoggedIn / try `guidebot setup <setup> --headed`
+          - session-not-persisted  → "this app may keep its session outside
+            cookies/localStorage (sessionStorage/IndexedDB) — pre-recording setup
+            cannot cache it" (review §5)
+return storage_state (dict)
 ```
 
-Then the sole change at the recording boundary:
+### Target render (`recorder/render.py`, before line 1705)
+
+When target has `config.setup`: call `ensure_session(...)`, then the single
+boundary change:
 
 ```python
 context = await browser.new_context(
-    viewport=...,
-    locale=...,
-    record_video_dir=str(work),
+    viewport=..., locale=..., record_video_dir=str(work),
     record_video_size=...,
-    storage_state=<cache path>,     # NEW — only when config.setup is set
-    **({...} if cfg.chrome.enabled else {}),
+    storage_state=<session dict>,        # NEW — only when config.setup is set
+    **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
 )
 ```
 
-Everything the load-verify-refresh logic does happens on separate, non-recording
-contexts *before* this line. The prepared state therefore **cannot** reach the
-video.
+All load-verify-refresh happens on separate, non-recording contexts *before* this
+line. The prepared state **cannot** reach the video.
+
+### Target compile (`recorder/compile.py`, before line 214) — review §1
+
+When target has `config.setup`: call the same `ensure_session(...)`, then seed
+the compile context:
+
+```python
+context = await browser.new_context(
+    viewport={"width": site_width, "height": site_height},
+    locale=cfg.locale,
+    storage_state=<session dict>,        # NEW — only when config.setup is set
+)
+```
+
+So the Reasoner resolves targets against the logged-in DOM.
+
+### Compile invalidation (review §1)
+
+Adding/removing/changing `config.setup` must invalidate the target sidecar.
+Fold a `setup` marker into the target's compile fingerprint: extend
+`config_hash` projection (`models/config.py:309`) with `setup` (the resolved
+setup path) and the setup `env_digest`, so a changed login user/flow re-resolves.
+`verifyUserLoggedIn`/`maxAgeHours` stay out of the hash.
+
+### CLI: `guidebot setup SETUP_SCENARIO [--headed] [--force]`
+
+- Plain (live healthy cache, review §8): **check-and-exit**, report "session
+  reused". Does not replay.
+- Missing/stale/failed check: replay + save.
+- `--force`: always rebuild, ignoring any cache.
+- `--headed`: launch headed; on an auto-replay that still fails the check, pause
+  for manual completion (MFA/captcha), then re-snapshot and re-check.
+
+Mirror `render`/`compile` command structure (`async_playwright` → launch →
+`try/finally: browser.close()` → `asyncio.run`). `validate` accepts setup
+scenarios for free (they are scenarios).
 
 ## Error handling
 
-- Missing/stale cache, failing health-check, or exceeded `maxAgeHours` → silent
-  auto-refresh (re-run setup replay).
-- Auto-refresh that still fails the health-check → **stop the render** with a
-  clear message pointing at `guidebot setup <setup> --headed`. Render never
-  silently produces a video from a logged-out session.
-- Setup scenario not compiled → stop with an instruction to compile it first.
-- Auth values are redacted in all logs (reuse `scenario_sensitive_values`).
+- Missing/stale cache, failing health-check, exceeded `maxAgeHours` → silent
+  auto-refresh.
+- Auto-refresh that still fails the check → **stop** (compile or render), with the
+  disambiguated message above. Never produce a video/sidecar from a logged-out
+  session **when a health-check is configured**.
+- Setup scenario not compiled → stop, instruct `guidebot compile <setup>`.
+- Recursion (`setup` on a setup source) → validation error.
+- Auth values redacted in logs (existing `scenario_sensitive_values`); page text
+  never logged.
 
 ## Security
 
-- `.guidebot/sessions/*.json` holds live cookies/tokens → gitignored, never
-  logged.
-- Credentials continue to flow only through `${ENV}` substitution
-  (`DEMO_EMAIL`, `DEMO_PASSWORD`) into the setup scenario's `enterText`/
-  `navigate` values.
+- `.guidebot/sessions/*.json` = bearer credential → `0o600` file, `0o700` dir,
+  self-writing `.gitignore` (`*`), never logged.
+- Credentials continue to flow only through `${ENV}` substitution into the setup
+  scenario's `enterText`/`navigate` values.
+
+## Known limitations (documented, not solved in v1)
+
+- **Cookies + localStorage only.** `sessionStorage`/IndexedDB-backed auth (some
+  OIDC/MSAL SPAs) cannot be cached; the double-failure error names this.
+- **Language-persisting sessions (review §6).** If the backend pins UI language
+  to the session, reusing one language-agnostic session across localized variants
+  can mismatch frozen `RoleTarget` labels. Symptom documented; key pre-wired for a
+  later per-locale session.
+- **Cross-origin** setup vs target hosts: hard-error (host guard), not supported.
 
 ## Testing (TDD)
 
 Unit:
 
-- Cache key derivation is stable and changes with the setup compiled-target
-  hash.
-- `storage_state` round-trips (save → load).
-- Reuse-vs-refresh decision table: cache present + check passes → reuse; check
-  fails → refresh; `maxAgeHours` exceeded → refresh; `verifyUserLoggedIn`
-  absent + fresh cache → reuse; `--force` → refresh.
-- `verifyUserLoggedIn` string shorthand parses to the object form.
+- Cache key stable; **changes with `env_digest`** (credential change → refresh,
+  review §2) and with setup `config_hash`.
+- Wrapper round-trips; `maxAgeHours` derives from `created_at`, not mtime.
+- Reuse-vs-refresh decision table: present+check-pass → reuse; check-fail →
+  refresh; `maxAgeHours` exceeded → refresh; no `verifyUserLoggedIn` + fresh →
+  reuse (+ warning emitted); `--force` → refresh.
+- `verifyUserLoggedIn` string shorthand parses to object.
+- Recursion guard: `setup` on a setup source → validation error.
+- Session file is `0o600`, written atomically; `.guidebot/sessions/.gitignore`
+  auto-created.
+- Health-check failure output contains neither tokens nor page text.
 
-Integration (local test server, mirroring the injected cookie-banner harness at
-`render.py:1552`):
+Integration (local HTTP server, mirroring `framing_server` +
+`test_optional_branch_compile_render.py` patterns):
 
-- Setup replay "logs in" (server sets a cookie); health-check text present →
-  render receives the `storage_state`; **the recorded video does not contain the
-  login page**.
-- Falsifying test: cache seeded with an expired/invalid cookie → health-check
-  text absent → auto-refresh is triggered and rebuilds the session.
-- Auto-refresh that cannot succeed → render fails loudly with the `--headed`
-  instruction (no video emitted).
+- **Target compile with a seeded session** — the load-bearing test: a target
+  whose step-1 element exists only when logged in compiles successfully because
+  `ensure_session` seeded the compile context (review §1).
+- Setup replay "logs in" (server sets a cookie) → health-check passes → **render
+  receives the session and the recorded video does not contain the login page**.
+- Falsifying test: cache seeded with an expired cookie → health-check text absent
+  → auto-refresh triggered.
+- Health-check polling: text appears asynchronously → check still passes.
+- `opens_popup` setup sidecar (SSO-style pop-up) → supported (replayed) or, if
+  out of scope, a loud error — assert which.
+- Pending gate in the setup sidecar whose element appears at replay → skipped/
+  handled, login underneath still succeeds.
+- Host mismatch (setup baseUrl host ≠ target baseUrl host) → hard error.
+- `sessionStorage`-auth server → double-failure diagnostic message.
+- Render-set: two variants, one shared cache → exactly one refresh, no races.
 
 ## Files to touch
 
-- `models/config.py` — `Config.setup: Optional[str]`; `verifyUserLoggedIn`
-  (string | `VerifyLoggedIn`); `maxAgeHours: Optional[float]`.
-- `recorder/session.py` (new) — cache keying, `storage_state` load/save, the
-  health-check, the load-verify-refresh decision, setup replay driver.
-- `recorder/render.py` — pre-phase before line 1705; thread `storage_state` into
-  `new_context`.
-- `cli.py` — `setup` command; `validate` accepts setup scenarios (already
-  scenarios, so mostly free).
+- `models/config.py` — `Config.setup`; `verifyUserLoggedIn` (str | model);
+  `maxAgeHours`; recursion validator; extend `config_hash` projection with
+  `setup` + `env_digest`.
+- `recorder/session.py` (new) — cache key/wrapper/load/save (atomic, perms,
+  self-gitignore), health-check (polling, host guard), `ensure_session`,
+  `RaisingReasoner`, `replay_setup` via the factored compile seam.
+- `recorder/compile.py` — factor the context/replay seam to allow a caller-owned
+  context + `storage_state` capture; seed target-compile context when
+  `config.setup` set.
+- `recorder/render.py` — call `ensure_session` before line 1705; thread
+  `storage_state` into `new_context`.
+- `cli.py` — `setup` command.
 - `.gitignore` — `.guidebot/sessions/`.
-- `examples/` — an example target scenario with `config.setup`, plus a
-  `verifyUserLoggedIn` on the login example.
-- `docs/` (EN + PL) + README — document the setup reference, the session cache,
-  and `guidebot setup`.
+- `examples/` — target scenario with `config.setup`; `verifyUserLoggedIn` on a
+  login example.
+- `docs/` (EN + PL) + README — setup reference, session cache, `guidebot setup`,
+  the documented limitations.
+
+## Build order (two phases, ONE PR)
+
+The review recommends two PRs; the user wants a single PR, so build in two phases
+and ship together.
+
+- **Phase A** — `recorder/session.py` (key, wrapper, health-check, replay via
+  compile seam), the `compile.py` seam factoring, `guidebot setup` CLI, schema
+  fields + recursion validator, security hygiene, `.gitignore`. Independently
+  testable; `guidebot setup` + a manual `storage_state` handoff already delivers
+  value.
+- **Phase B** — auto pre-phase wired into `run_render` and
+  `run_compile_in_browser`, compile invalidation (`config_hash`), render-set
+  interaction, examples + docs.
 
 ## Open questions
 
-None blocking. Deferred by choice: `containsText` as a list ("all must match"),
-case-insensitive matching, and per-variant sessions — all easy later additions
-if a real need appears.
+None blocking. Deferred by choice: `containsText` as a list; case-insensitive
+matching; per-locale sessions; sessionStorage/IndexedDB capture.
