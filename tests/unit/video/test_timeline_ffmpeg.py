@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -9,17 +10,77 @@ import pytest
 
 from guidebot_recorder.video.mux import ffmpeg_bin
 from guidebot_recorder.video.timeline import (
+    FPS,
     TimeEdit,
     Timeline,
     TimelineError,
     apply_time_edits,
     assert_recording_fps,
+    build_filtergraph,
     probe_frame_count,
 )
 
 pytestmark = pytest.mark.ffmpeg
 
 SOURCE_FRAMES = 148
+
+_PTS_TIME_RE = re.compile(r"pts_time:(?P<value>[0-9.]+)")
+
+
+def concat_stage_pts(source: Path, timeline: Timeline) -> list[float]:
+    """Return the per-frame PTS (seconds), in order, at the ``concat`` output.
+
+    ``probe_frame_count`` on the final, CFR-encoded file only sees what
+    ``-vsync cfr`` leaves behind — at a small enough scale a single duplicated
+    PTS at the concat stage collapses into a dropped frame there, and the final
+    count comes out correct even though ``concat`` mistimed its output. This
+    inserts ``showinfo`` directly on the concat filter's output and reads the
+    frame timestamps ffmpeg reports for it, so a duplicate or a gap is visible
+    before the encoder gets a chance to paper over it.
+    """
+    graph = build_filtergraph(timeline)
+    assert graph.endswith("[v]")
+    # Rename concat's own output label and re-tap it through showinfo, so the
+    # probe sits exactly at the concat stage rather than after further filters.
+    graph = graph[: -len("[v]")] + "[vconcat];[vconcat]showinfo[v]"
+    proc = subprocess.run(
+        [
+            ffmpeg_bin(),
+            "-y",
+            "-i",
+            str(source),
+            "-filter_complex",
+            graph,
+            "-map",
+            "[v]",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [float(match) for match in _PTS_TIME_RE.findall(proc.stderr)]
+
+
+def assert_concat_stage_is_frame_exact(source: Path, timeline: Timeline) -> None:
+    """Fail loud unless the concat stage's PTS are strictly monotonic and evenly
+    spaced by exactly one frame interval.
+
+    This is the invariant the "no lost frame" tests actually depend on: a
+    duplicate PTS or an uneven step here can still yield a correct *final*
+    frame count (``-vsync cfr`` silently drops the duplicate), which is exactly
+    why checking only ``probe_frame_count`` at the encoder's output does not, on
+    its own, prove ``concat`` never collided two segments.
+    """
+    pts = concat_stage_pts(source, timeline)
+    assert len(pts) == len(set(pts)), f"duplicate PTS at the concat stage: {pts}"
+    step = 1 / FPS
+    steps = [round(b - a, 6) for a, b in zip(pts, pts[1:], strict=False)]
+    assert all(s == pytest.approx(step, abs=1e-6) for s in steps), (
+        f"non-{step}s step at the concat stage: {steps}"
+    )
 
 
 @pytest.fixture
@@ -117,6 +178,7 @@ def test_closely_spaced_freezes_stay_frame_exact(source: Path, tmp_path: Path) -
     out = tmp_path / "out.mp4"
     apply_time_edits(source, tl, out)
     assert probe_frame_count(out) == tl.virtual_frames == SOURCE_FRAMES + 5 * 2
+    assert_concat_stage_is_frame_exact(source, tl)
 
 
 @pytest.mark.parametrize(
@@ -141,3 +203,4 @@ def test_freeze_spacing_never_drifts(
     out = tmp_path / "out.mp4"
     apply_time_edits(source, tl, out)
     assert probe_frame_count(out) == tl.virtual_frames == SOURCE_FRAMES + len(ats) * frames
+    assert_concat_stage_is_frame_exact(source, tl)

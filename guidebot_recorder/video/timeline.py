@@ -162,12 +162,15 @@ def _segments(timeline: Timeline) -> list[tuple[int, int, int]]:
 
     Folding the freeze into the run that precedes it is not cosmetic. ``concat``
     infers each input's duration from the frames it sees, so a single-frame
-    input has no measurable frame duration and advances the running offset by
-    zero — the next segment then starts on top of it and one frame is lost
-    downstream. Emitting the freeze separately produced exactly that: a freeze
-    two frames after its predecessor left a one-frame ``keep`` between them.
-    Folded, a freeze-terminated run is always at least two frames long
-    (one source frame plus at least one clone).
+    input measures as zero-length and the next segment lands on the same
+    timestamp instead of after it — a duplicate PTS at the concat stage.
+    ``-vsync cfr`` resolves a single such collision by dropping the duplicate
+    frame, so the final frame count can still come out correct; the risk is in
+    letting collisions accumulate, not in any one of them being unrenderable.
+    Emitting the freeze separately produced exactly that: a freeze two frames
+    after its predecessor left a one-frame ``keep`` between them. Folded, a
+    freeze-terminated run is always at least two frames long (one source frame
+    plus at least one clone), so the collision cannot arise in the first place.
     """
     out: list[tuple[int, int, int]] = []
     cursor = 0
@@ -196,10 +199,16 @@ def build_filtergraph(timeline: Timeline) -> str:
 
     No segment but the last may be a single frame: ``concat`` derives an input's
     frame duration from the frames it receives, so a one-frame input measures as
-    zero-length and the following segment is concatenated on top of it instead of
-    after it. :func:`_segments` cannot produce such a segment from freezes; only
-    a lone kept frame butting up against a cut can, and that is rejected here
-    rather than rendered into a silently mistimed film.
+    zero-length and the following segment lands on the same output timestamp
+    instead of after it — a duplicate PTS at the concat stage. A single such
+    collision is not fatal by itself (``-vsync cfr`` resolves it by dropping the
+    duplicate, and the film's final frame count and content can still come out
+    correct), but nothing bounds how many collisions could accumulate, and each
+    one silently retimes everything after it until the encoder papers over it.
+    :func:`_segments` cannot produce such a segment from freezes; only a lone
+    kept frame butting up against a cut can, and rather than rely on the
+    encoder to keep recovering, this is rejected here as a defence-in-depth
+    guard against that condition ever reaching ``concat`` at all.
     """
     if timeline.is_empty:
         raise TimelineError("cannot build a filtergraph for an empty timeline")
