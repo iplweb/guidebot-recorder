@@ -30,6 +30,7 @@ from guidebot_recorder.recorder.render import (
     _parse_window_request,
     _popup_content_box,
     _popup_fills_canvas,
+    _popup_window_opened,
     _popup_window_request,
     _prime_visuals,
     _publish_render_artifacts,
@@ -1928,6 +1929,58 @@ async def test_popup_window_request_abandons_no_orphan_task(monkeypatch):
     opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
 
     assert await _popup_window_request(opener) is None
+
+    pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert all(task.done() for task in pending)
+
+
+# --- popup "opened" flag: the lookup must never hang the render either -------
+# Mirrors the geometry lookup's hang-resistance tests above using the same
+# stub frames — ``_scan_frames_for_window_opened`` is bounded exactly like
+# ``_scan_frames_for_window_request``, and ``_popup_window_opened`` now carries
+# the same outer hard timeout as ``_popup_window_request``. Unlike the
+# geometry lookup, giving up here must still answer ``True`` ("assume a
+# popup"), the fail-safe direction that never mounts an address bar on
+# uncertainty.
+
+
+async def test_popup_window_opened_answers_despite_a_frame_that_never_answers(monkeypatch):
+    """A dead ad iframe must neither hang the lookup nor hide the real answer."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    hanging = _HangingFrame()
+    # Reverse order puts the hanging frame ahead of the one holding the answer,
+    # so a sequential scan would never reach the answer at all.
+    opener = _StubOpener([_StubFrame(True), hanging])
+
+    started = time.monotonic()
+    assert await _popup_window_opened(opener) is True
+    elapsed = time.monotonic() - started
+
+    assert hanging.entered.is_set(), "test did not exercise the hanging frame"
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+
+
+async def test_popup_window_opened_gives_up_when_only_dead_frames_remain(monkeypatch, capsys):
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    started = time.monotonic()
+    # Unlike the geometry lookup (which gives up to "no crop"), giving up here
+    # must still assume a popup, so no address bar gets mounted on uncertainty.
+    assert await _popup_window_opened(opener) is True
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+    assert "OSTRZEŻENIE" in capsys.readouterr().err
+
+
+async def test_popup_window_opened_abandons_no_orphan_task(monkeypatch):
+    """An abandoned probe must not leave an un-awaited exception behind."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    assert await _popup_window_opened(opener) is True
 
     pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
     await asyncio.gather(*pending, return_exceptions=True)

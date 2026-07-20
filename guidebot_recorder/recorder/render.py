@@ -420,6 +420,14 @@ async def _popup_window_opened(page: Page) -> bool:
     ``target="_blank"`` tab. ``_scan_frames_for_window_opened`` asks every
     frame instead, exactly as ``_popup_window_request`` already does for the
     geometry record.
+
+    Bounded twice over, exactly like ``_popup_window_request``: this runs at
+    the same worst possible moment — right after a popup opens, while the
+    opener is at its busiest — and a render that hangs here is just as
+    unrecoverable. An unknown answer is by contrast harmless: it means
+    "assume a popup", i.e. the fail-safe direction that never mounts an
+    address bar on uncertainty. So the lookup always terminates, and says so
+    when it gives up.
     """
 
     def _assume_opened() -> bool:
@@ -430,8 +438,19 @@ async def _popup_window_opened(page: Page) -> bool:
         )
         return True
 
+    lookup = asyncio.ensure_future(_scan_frames_for_window_opened(page))
     try:
-        opened = await _scan_frames_for_window_opened(page)
+        opened = await asyncio.wait_for(asyncio.shield(lookup), _POPUP_REQUEST_HARD_TIMEOUT)
+    except TimeoutError:
+        # ``shield`` means the timeout does not itself cancel the lookup, so it
+        # is still ours to dispose of cleanly.
+        _discard_pending(lookup)
+        tqdm.write(
+            "OSTRZEŻENIE: sprawdzenie wywołania window.open() nie zakończyło się w "
+            f"{_POPUP_REQUEST_HARD_TIMEOUT:g}s — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
     except PlaywrightError:
         # An opener that navigated or died reports nothing; treat it as "unknown",
         # which keeps today's bare-popup behaviour rather than mounting a bar.
