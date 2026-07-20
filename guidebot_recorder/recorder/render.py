@@ -45,7 +45,13 @@ from guidebot_recorder.models.action import (
     PendingAction,
 )
 from guidebot_recorder.models.compiled import CompiledAction
-from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
+from guidebot_recorder.models.config import (
+    ChromeConfig,
+    SoundConfig,
+    TtsConfig,
+    Viewport,
+    config_hash,
+)
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
@@ -721,6 +727,31 @@ def _resolve_popup_crop(
         return crop, "bbox"
     _log_popup_crop("cropdetect", measured, verbose)
     return (measured, "cropdetect") if measured is not None else (None, "none")
+
+
+def _popup_fills_canvas(popup_crop: tuple[int, int, int, int] | None, viewport: Viewport) -> bool:
+    """Whether the popup window occupies the entire recording canvas.
+
+    ``None`` is the ``_blank`` tab case: every crop level declined, so no witness
+    could name a window smaller than the recording. An explicit rect covering the
+    canvas at the origin says the same thing positively — a ``window.open`` that
+    asked for the full viewport.
+
+    The distinction matters because ``float`` insets the popup at
+    :attr:`PopupConfig.scale`; applied to a full viewport that reads as a shrunken
+    clone of the page rather than as a separate window.
+
+    ``viewport`` here is *not* CSS pixels despite the name: ``cfg.viewport``'s
+    width/height are passed verbatim as ``record_video_size`` when the browser
+    context is created (see ``render.py`` around the ``browser.new_context`` call),
+    so it already is the canvas measured in recording pixels — the same unit
+    ``popup_crop`` is in. No CSS-to-recording-pixel conversion belongs here.
+    """
+
+    if popup_crop is None:
+        return True
+    width, height, x, y = popup_crop
+    return (x, y) == (0, 0) and (width, height) == (viewport.width, viewport.height)
 
 
 @dataclass(slots=True)
@@ -2020,6 +2051,15 @@ async def run_render(
         viewport=popup.viewport,
         canvas=(cfg.viewport.width, cfg.viewport.height),
     )
+    # A window that fills the canvas is not a floating popup. `slide` is the
+    # full-frame presentation by design and ignores `popup_crop`; `float` would
+    # inset a whole viewport. Only `float` is overridden — an author who asked
+    # for `cut` gets the hard cut they asked for.
+    transition = cfg.popup.effective_transition
+    if transition == "float" and _popup_fills_canvas(popup_crop, cfg.viewport):
+        transition = "slide"
+        if verbose:
+            tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
     closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
     assert closed_at is not None
     composite = work / f"{out_mp4.stem}.composite.mp4"
@@ -2030,7 +2070,7 @@ async def run_render(
         popup.opened_at,
         closed_at,
         visual_ready_delay=popup.visual_ready_delay,
-        transition=cfg.popup.effective_transition,
+        transition=transition,
         slide_ms=cfg.popup.slide_ms,
         scale=cfg.popup.scale,
         corner_radius=cfg.popup.corner_radius,

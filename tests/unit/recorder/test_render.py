@@ -27,6 +27,7 @@ from guidebot_recorder.recorder.render import (
     _parse_content_box,
     _parse_window_request,
     _popup_content_box,
+    _popup_fills_canvas,
     _popup_window_request,
     _prime_visuals,
     _publish_render_artifacts,
@@ -2457,24 +2458,38 @@ async def test_hand_cursor_to_popup_skips_centring_without_a_viewport():
 # --- closeWindow ---------------------------------------------------------------
 
 
-def _write_close_window_scenario(tmp_path: Path) -> Path:
+def _write_close_window_scenario(tmp_path: Path, *, popup_config: bool = True) -> Path:
     # A data: page cannot open a new window onto another data: URL (Chromium
     # blocks it outright), so the popup destination needs a real file:// URL —
-    # same convention as test_compile.py's closeWindow test.
+    # same convention as test_compile.py's closeWindow test. The page paints its
+    # own full-bleed background so it genuinely fills the tab: that makes the
+    # popup's content bounding box decline outright (see `paintsPage` in
+    # `_POPUP_CONTENT_BOX_SCRIPT`) and leaves cropdetect nothing to trim either —
+    # matching a real `_blank` tab, where every crop level declines because
+    # there is no smaller window to name.
     second = tmp_path / "second.html"
-    second.write_text("<p>druga</p>", encoding="utf-8")
+    second.write_text(
+        "<!doctype html><html><head><style>body{margin:0;background:#2a6ebb}</style>"
+        "</head><body><p>druga</p></body></html>",
+        encoding="utf-8",
+    )
     main = tmp_path / "main.html"
     main.write_text(
         f"<a href='{second.resolve().as_uri()}' target='_blank'>otworz</a>",
         encoding="utf-8",
     )
+    # popup_config=False drops the explicit `popup:` block so the default
+    # `float` transition applies — needed to prove a canvas-filling tab gets
+    # overridden to `slide` rather than testing a scenario that already asks
+    # for `slide`.
+    popup_line = "  popup: {transition: slide, slideMs: 40}" if popup_config else ""
     scenario = textwrap.dedent(
         f"""\
         config:
           title: Karta
           viewport: {{width: 640, height: 480}}
           tts: {{provider: fake, voice: v, lang: pl-PL}}
-          popup: {{transition: slide, slideMs: 40}}
+        {popup_line}
         steps:
           - navigate: "{main.resolve().as_uri()}"
           - teach: "kliknij otworz"
@@ -2531,3 +2546,58 @@ async def test_close_window_hands_the_cursor_back_to_its_pre_popup_position(tmp_
         "the cursor was handed back without its pre-popup position -- the main "
         "window's cursor will be parked at the popup's centre"
     )
+
+
+# --- _popup_fills_canvas --------------------------------------------------------
+
+
+def test_popup_fills_canvas_for_a_declined_crop():
+    # Every level declining is the `_blank` tab case: no witness could name a
+    # smaller window, so the recording *is* the window.
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas(None, Viewport(width=1376, height=800)) is True
+
+
+def test_popup_fills_canvas_for_a_full_cover_rect():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((1376, 800, 0, 0), Viewport(width=1376, height=800)) is True
+
+
+def test_popup_does_not_fill_canvas_for_a_real_window():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((520, 640, 0, 0), Viewport(width=1376, height=800)) is False
+
+
+def test_popup_does_not_fill_canvas_when_offset():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((1376, 800, 12, 12), Viewport(width=1376, height=800)) is False
+
+
+async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, monkeypatch):
+    # `float` is the default; a `_blank` tab must still render full-frame.
+    import guidebot_recorder.recorder.render as R
+
+    seen: list[str | None] = []
+    original = R.compose_popup_video
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("transition"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(R, "compose_popup_video", spy)
+
+    path = _write_close_window_scenario(tmp_path, popup_config=False)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert seen == ["slide"], f"expected the full-canvas tab to force slide, got {seen}"
