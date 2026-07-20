@@ -267,6 +267,10 @@ def _discard_pending(task: asyncio.Future) -> None:
     """
 
     if task.done():
+        # Already settled, so there is nothing to cancel — but a probe that
+        # raised and was never read is orphaned just the same. Read it.
+        if not task.cancelled():
+            task.exception()
         return
     task.cancel()
     task.add_done_callback(lambda done: done.cancelled() or done.exception())
@@ -284,30 +288,59 @@ async def _frame_window_request(frame: Frame) -> tuple[int, int] | None:
 
 
 async def _scan_frames_for_window_request(opener: Page) -> tuple[int, int] | None:
-    """Ask every frame for its record *concurrently*, then take the best answer.
+    """Ask every frame for its record *concurrently* and return the first answer.
 
     Concurrency is the point, not an optimisation. ``Frame.evaluate`` accepts no
     timeout, and an ad-heavy page routinely carries iframes whose document never
     commits an execution context — evaluating on one of those never returns.
     Asking the frames one after another therefore lets a single dead ad iframe
-    block the render forever (and it did). Asking them all at once means a dead
-    frame costs only the frames that answer nothing, and the opener still gets
-    to report its geometry within the budget.
+    block the render forever (and it did).
 
-    Frames are preferred newest-first, with the top document first of all: the
-    init script republishes each record on the real top document, so the top
-    frame holds the answer whenever it is same-origin with the opener frame.
+    Asking them all at once is only half the fix, though: waiting for *all* the
+    probes means a dead frame still costs the whole
+    ``_POPUP_REQUEST_LOOKUP_TIMEOUT`` even when a healthy frame answered in
+    milliseconds — and because this runs on every popup open, that budget shows
+    up in the finished film as a dead pause on the popup. So the scan settles
+    the moment it has a usable answer and abandons the rest. The budget survives
+    unchanged as what it was always meant to be: the ceiling for the case where
+    *nobody* ever answers, after which the caller falls back to the content
+    bounding box (and then to cropdetect).
+
+    Which answer wins when several frames have one: the probes are examined in a
+    fixed priority order — the top document first, then the remaining frames
+    newest-first — and the highest-priority *already-settled* answer is taken.
+    That is safe because the answers are not really independent. The init script
+    republishes every record on the real top document, so a same-origin page has
+    one record read back from several places; a cross-origin opener frame that
+    could not republish is instead the only frame holding one, and the top
+    answers ``None``. Genuinely conflicting records would need two frames to
+    each call ``window.open`` with different sizes before this runs, and the
+    scan runs immediately after the popup opens — newest-first is then exactly
+    the record that opened it. Worst case the crop rect is one popup stale,
+    which the downstream fallbacks already tolerate.
     """
 
     top = opener.main_frame
     frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
     tasks = [asyncio.ensure_future(_frame_window_request(frame)) for frame in frames]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _POPUP_REQUEST_LOOKUP_TIMEOUT
     try:
-        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
-        for task in tasks:
-            if task.done() and not task.cancelled() and task.exception() is None:
-                if (size := task.result()) is not None:
-                    return size
+        pending = set(tasks)
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            # Wake on every settled probe rather than on the slowest one. A
+            # frame that raises simply settles without an answer: it retires
+            # from ``pending`` and the others carry on.
+            _, pending = await asyncio.wait(
+                pending, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in tasks:
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    if (size := task.result()) is not None:
+                        return size
         return None
     finally:
         for task in tasks:
