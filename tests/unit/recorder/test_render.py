@@ -760,7 +760,7 @@ async def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
             raise RuntimeError("second bed failed")
         destination.write_bytes(f"new bed {build_calls}".encode())
 
-    def staged_mux(video, tracks, destination, *, preencoded=False, video_duration=None):
+    def staged_mux(video, tracks, destination, *, preencoded=False, video_duration=None, fade=None):
         assert video_duration == 1.0
         if failure_point == "mux":
             raise RuntimeError("mux failed")

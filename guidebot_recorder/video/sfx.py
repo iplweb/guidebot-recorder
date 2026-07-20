@@ -55,11 +55,7 @@ def build_sfx_bed(
     for kind, offset in events:
         if kind in by_kind:
             by_kind[kind][1].append(offset)
-    sources = [
-        (kind, path, offs)
-        for kind, (path, offs) in by_kind.items()
-        if offs
-    ]
+    sources = [(kind, path, offs) for kind, (path, offs) in by_kind.items() if offs]
     if not sources:
         return  # no events → no bed
 
@@ -81,14 +77,11 @@ def build_sfx_bed(
     for idx, (kind, _path, offs) in enumerate(sources, start=1):
         kind_gain = _KIND_GAIN_DB[kind]
         base = (
-            f"[{idx}:a]aresample={SAMPLE_RATE},aformat=channel_layouts=stereo,"
-            f"volume={kind_gain}dB"
+            f"[{idx}:a]aresample={SAMPLE_RATE},aformat=channel_layouts=stereo,volume={kind_gain}dB"
         )
         if len(offs) == 1:
             colour = _event_filters(kind, 0)
-            filters.append(
-                f"{base},{colour}adelay={int(round(offs[0] * 1000))}:all=1[s{idx}_0]"
-            )
+            filters.append(f"{base},{colour}adelay={int(round(offs[0] * 1000))}:all=1[s{idx}_0]")
             mix_labels.append(f"[s{idx}_0]")
         else:
             splits = "".join(f"[s{idx}_{j}]" for j in range(len(offs)))
@@ -96,8 +89,7 @@ def build_sfx_bed(
             for j, off in enumerate(offs):
                 colour = _event_filters(kind, j)
                 filters.append(
-                    f"[s{idx}_{j}]{colour}adelay={int(round(off * 1000))}:all=1"
-                    f"[d{idx}_{j}]"
+                    f"[s{idx}_{j}]{colour}adelay={int(round(off * 1000))}:all=1[d{idx}_{j}]"
                 )
                 mix_labels.append(f"[d{idx}_{j}]")
 
@@ -129,14 +121,20 @@ def mix_sfx_into_bed(narration_bed: Path, sfx_bed: Path, out: Path, total: float
     be different paths (no in-place).
     """
     cmd = [
-        ffmpeg_bin(), "-y",
-        "-i", str(narration_bed),
-        "-i", str(sfx_bed),
+        ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(narration_bed),
+        "-i",
+        str(sfx_bed),
         "-filter_complex",
         "[0:a][1:a]amix=inputs=2:duration=longest:normalize=0[m];"
         "[m]alimiter=limit=0.95:level=disabled[out]",
-        "-map", "[out]",
-        "-ar", str(SAMPLE_RATE),
-        "-t", f"{total:.6f}",
+        "-map",
+        "[out]",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-t",
+        f"{total:.6f}",
     ]
     _run_to_output(cmd, out)

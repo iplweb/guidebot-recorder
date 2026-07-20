@@ -254,6 +254,33 @@ biały start.
 
 Plansza powstaje z `config.title` oraz `intro.subtitle` i `intro.notes`.
 
+### `fade`
+
+Render-only, płynne wejście i wyjście gotowego filmu. Wyłączone domyślnie: włączenie
+wymusza przekodowanie obrazu w finalnym muksie (filtra nie da się nałożyć na
+kopiowany strumień), więc scenariusz, który o fade nie prosi, daje bajt w bajt to
+samo wyjście co dotąd.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `enabled` | `false` | Włącza fade. |
+| `in` | `0.6` | Sekundy wejścia z koloru na starcie. |
+| `out` | `0.8` | Sekundy wyjścia w kolor na końcu. |
+| `color` | `black` | Kolor, z/do którego przechodzi obraz (nazwa lub `0xRRGGBB`). |
+| `audio` | `true` | Ścisza też lektora równolegle z obrazem. |
+
+`in` i `out` mogą być zerem — wtedy dana strona filmu nie ma przejścia. Suma obu nie
+może przekroczyć długości filmu. Nie wchodzi do `config_hash`, więc włączenie
+lub zmiana fade nie wymaga ponownego `compile`.
+
+```yaml
+config:
+  fade:
+    enabled: true
+    in: 0.6
+    out: 1.0
+```
+
 ### `holdFrameForNarration` i `holdFrameSettle`
 
 Sterowanie tempem renderu, wyłącznie podczas renderu, **domyślnie włączone**, i —

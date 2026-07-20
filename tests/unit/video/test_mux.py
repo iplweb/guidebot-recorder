@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from guidebot_recorder.video.mux import (
+    FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
@@ -1386,3 +1387,86 @@ def test_mux_preencoded_adds_audio_without_changing_video_codec(tmp_path: Path) 
     assert _video_codec(out) == "h264"
     assert _stream_types(out) == ["video", "audio"]
     assert probe_duration(out) == pytest.approx(2.0, abs=0.4)
+
+
+def _fade_track(path: Path, seconds: float) -> MuxAudioTrack:
+    _make_audio(path, seconds)
+    return MuxAudioTrack(path=path, language="pol", title="Polski", default=True)
+
+
+def test_mux_audio_tracks_fades_the_picture_from_and_to_black(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 3.0)
+    track = _fade_track(tmp_path / "pol.wav", 3.0)
+
+    mux_audio_tracks(
+        video, [track], out, video_duration=3.0, fade=FadeSpec(fade_in=0.5, fade_out=0.5)
+    )
+
+    # Ends ramp from/to black; the middle keeps the source picture untouched.
+    # Asserted by brightness rather than an exact colour: where on the ramp a
+    # given timestamp lands depends on the frame grid, the direction does not.
+    assert max(_sample_rgb(out, 0.02)) < 60
+    assert _sample_rgb(out, 1.5) == pytest.approx((255, 255, 255), abs=20)
+    assert max(_sample_rgb(out, 2.9)) < 90
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.1)
+
+
+def test_mux_audio_tracks_fades_to_a_configured_colour(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(
+        video, [track], out, video_duration=2.0, fade=FadeSpec(fade_in=0.5, color="blue")
+    )
+
+    red, green, blue = _sample_rgb(out, 0.02)
+    assert blue > 150 and red < 80 and green < 80
+
+
+def test_mux_audio_tracks_fade_overrides_stream_copy(tmp_path):
+    # A filtered stream cannot also be copied: the fade must win over
+    # ``preencoded`` rather than being silently dropped.
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(
+        video, [track], out, preencoded=True, video_duration=2.0, fade=FadeSpec(fade_in=0.5)
+    )
+
+    assert _video_codec(out) == "h264"
+    assert max(_sample_rgb(out, 0.02)) < 60
+
+
+def test_mux_audio_tracks_without_a_fade_still_copies(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(video, [track], out, preencoded=True, video_duration=2.0, fade=None)
+
+    assert _sample_rgb(out, 0.02) == pytest.approx((255, 255, 255), abs=20)
+
+
+def test_mux_audio_tracks_rejects_a_fade_longer_than_the_film(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 1.0)
+    track = _fade_track(tmp_path / "pol.wav", 1.0)
+
+    with pytest.raises(ValueError, match="longer than the film"):
+        mux_audio_tracks(
+            video, [track], out, video_duration=1.0, fade=FadeSpec(fade_in=0.8, fade_out=0.8)
+        )
+
+
+def test_fade_spec_noop_is_recognised():
+    assert FadeSpec().is_noop()
+    assert not FadeSpec(fade_in=0.4).is_noop()
+    assert not FadeSpec(fade_out=0.4).is_noop()
