@@ -305,6 +305,12 @@ async def capture_pages(
                         )
                     raise GuideError(banner(fs, index, _REUSE_REASON_PL.get(reason, reason)))
             try:
+                # Doubles as the "is the target here at all?" probe, which is why
+                # `select` goes through it too even though its choreography
+                # approaches the control again: only a *resolution* failure here
+                # means an optional step's target is absent, and widening the
+                # `except` below to cover the choreography would start reading a
+                # failed click as one.
                 res = await recorder.point(action.target, ripple=False)
             except PlaywrightError:
                 if step.optional:
@@ -337,7 +343,9 @@ async def capture_pages(
                             "— uruchom `compile --force`",
                         )
                     )
-                frame = _OpenListFrame(page, shots_dir, index)
+                # Named `still`, not `frame`: in this codebase `frame` means a
+                # Playwright frame everywhere else.
+                still = _OpenListFrame(page, shots_dir, index)
                 try:
                     # `ripple=False` for the same reason `point` above uses it:
                     # a still capture wants a clean frame, not a click ring
@@ -347,20 +355,20 @@ async def capture_pages(
                         step.select.option,
                         native=select_mode(step, scenario.config) == "native",
                         ripple=False,
-                        on_revealed=frame,
+                        on_revealed=still,
                     )
                 except (SelectDriveError, SelectsNotReadyError) as exc:
                     # No silent fallback to `select_option`: it would restore
                     # exactly the invisible value change this capture exists to
                     # remove, and the PDF would look fine while being useless.
                     raise GuideError(banner(fs, index, str(exc))) from exc
-                if frame.shot is None or frame.size is None or frame.reveal is None:
+                if still.shot is None or still.size is None or still.reveal is None:
                     raise GuideError(
                         banner(fs, index, "krok `select` nie oddał kadru z rozwiniętą listą")
                     )
-                shot, size = frame.shot, frame.size
-                center, box = frame.reveal.control_center, frame.reveal.control_box
-                row_box, row_center = frame.reveal.row_box, frame.reveal.row_center
+                shot, size = still.shot, still.size
+                center, box = still.reveal.control_center, still.reveal.control_box
+                row_box, row_center = still.reveal.row_box, still.reveal.row_center
             else:
                 shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
                 if act == "hover":

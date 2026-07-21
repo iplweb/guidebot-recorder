@@ -223,7 +223,11 @@ async def _measure_open_list(browser: Browser, path: Path) -> tuple[dict, dict, 
     """
 
     scenario = load_scenario(path, None)
-    context = await browser.new_context(viewport={"width": 800, "height": 600})
+    # The same context recipe `run_guide` uses (viewport and locale both feed
+    # layout), so the rect measured here is the rect the guide photographed.
+    context = await browser.new_context(
+        viewport={"width": 800, "height": 600}, locale=scenario.config.locale
+    )
     try:
         selects = await install_selects(context, scenario.config)
         assert selects is not None
@@ -318,7 +322,10 @@ async def test_the_select_page_frames_the_control_and_points_the_arrow_at_the_ro
             await run_compile_in_browser(path, browser, SelectReasoner())
             pages = await _guide_with_pages(path, tmp_path / "marks.pdf", browser, monkeypatch)
             row, _backdrop, _closed = await _measure_open_list(browser, path)
-            context = await browser.new_context(viewport={"width": 800, "height": 600})
+            context = await browser.new_context(
+                viewport={"width": 800, "height": 600},
+                locale=load_scenario(path, None).config.locale,
+            )
             page = await context.new_page()
             await page.goto(FIXTURE.resolve().as_uri())
             control = await page.locator("#format").bounding_box()
