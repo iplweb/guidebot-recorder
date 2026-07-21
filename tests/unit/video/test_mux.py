@@ -16,9 +16,11 @@ from pathlib import Path
 import pytest
 
 from guidebot_recorder.video.mux import (
+    FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
+    detect_teardown_tail,
     mux,
     mux_audio_tracks,
     mux_preencoded,
@@ -1386,3 +1388,196 @@ def test_mux_preencoded_adds_audio_without_changing_video_codec(tmp_path: Path) 
     assert _video_codec(out) == "h264"
     assert _stream_types(out) == ["video", "audio"]
     assert probe_duration(out) == pytest.approx(2.0, abs=0.4)
+
+
+def _make_popup_with_teardown_tail(
+    path: Path,
+    *,
+    good_seconds: float = 0.8,
+    tail_seconds: float = 0.2,
+    window: tuple[int, int] = (200, 150),
+    shrunk: tuple[int, int] | None = (150, 110),
+) -> None:
+    """Write a popup recording whose window shrinks for its final frames.
+
+    Mimics a headed render's teardown: the page content is unchanged but Chromium
+    stops rasterising the window at the screen's backing scale, so Playwright's
+    mid-grey padding grows and a crop sized from the stable part starts exposing
+    filler. ``shrunk=None`` writes a recording that never shrinks.
+    """
+    inputs: list[str] = []
+    parts: list[str] = []
+    sizes = [(window, good_seconds)]
+    if shrunk is not None:
+        sizes.append((shrunk, tail_seconds))
+    for index, ((width, height), seconds) in enumerate(sizes):
+        inputs += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:duration={seconds}:size={width}x{height}:rate=25",
+        ]
+        # 0x808080 is the mid-grey Chromium pads a popup's canvas with.
+        parts.append(f"[{index}:v]pad=320:240:0:0:0x808080[p{index}]")
+    concat = "".join(f"[p{i}]" for i in range(len(sizes)))
+    parts.append(f"{concat}concat=n={len(sizes)}:v=1:a=0,format=yuv420p[outv]")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(parts),
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_detect_teardown_tail_measures_the_trailing_shrunken_frames(tmp_path):
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == pytest.approx(0.2, abs=0.05)
+
+
+def test_detect_teardown_tail_reports_nothing_for_a_stable_recording(tmp_path):
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=1.0, shrunk=None)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_declines_when_the_crop_covers_the_canvas(tmp_path):
+    # No padding anywhere means no filler to recognise a shrunken window against.
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    assert detect_teardown_tail(popup, (320, 240, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_refuses_an_implausibly_long_run(tmp_path):
+    # Almost the whole recording reads as filler: the sampled corner is not
+    # reporting a window at all, so the measurement is discarded rather than
+    # trimming the popup away.
+    popup = tmp_path / "popup.mp4"
+    _make_popup_with_teardown_tail(popup, good_seconds=0.1, tail_seconds=0.9)
+
+    assert detect_teardown_tail(popup, (200, 150, 0, 0)) == 0.0
+
+
+def test_detect_teardown_tail_degrades_on_an_unreadable_file(tmp_path):
+    missing = tmp_path / "nope.webm"
+
+    assert detect_teardown_tail(missing, (200, 150, 0, 0)) == 0.0
+
+
+def test_compose_popup_holds_the_last_good_frame_instead_of_the_teardown_tail(tmp_path):
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(main, "blue", 3.0)
+    _make_popup_with_teardown_tail(popup, good_seconds=0.8, tail_seconds=0.2)
+
+    compose_popup_video(
+        main,
+        popup,
+        out,
+        1.0,
+        2.0,
+        transition="float",
+        popup_crop=(200, 150, 0, 0),
+    )
+
+    # The composite keeps its full length — the tail is replaced, not dropped.
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.2)
+
+
+def _fade_track(path: Path, seconds: float) -> MuxAudioTrack:
+    _make_audio(path, seconds)
+    return MuxAudioTrack(path=path, language="pol", title="Polski", default=True)
+
+
+def test_mux_audio_tracks_fades_the_picture_from_and_to_black(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 3.0)
+    track = _fade_track(tmp_path / "pol.wav", 3.0)
+
+    mux_audio_tracks(
+        video, [track], out, video_duration=3.0, fade=FadeSpec(fade_in=0.5, fade_out=0.5)
+    )
+
+    # Ends ramp from/to black; the middle keeps the source picture untouched.
+    # Asserted by brightness rather than an exact colour: where on the ramp a
+    # given timestamp lands depends on the frame grid, the direction does not.
+    assert max(_sample_rgb(out, 0.02)) < 60
+    assert _sample_rgb(out, 1.5) == pytest.approx((255, 255, 255), abs=20)
+    assert max(_sample_rgb(out, 2.9)) < 90
+    assert probe_duration(out) == pytest.approx(3.0, abs=0.1)
+
+
+def test_mux_audio_tracks_fades_to_a_configured_colour(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(
+        video, [track], out, video_duration=2.0, fade=FadeSpec(fade_in=0.5, color="blue")
+    )
+
+    red, green, blue = _sample_rgb(out, 0.02)
+    assert blue > 150 and red < 80 and green < 80
+
+
+def test_mux_audio_tracks_fade_overrides_stream_copy(tmp_path):
+    # A filtered stream cannot also be copied: the fade must win over
+    # ``preencoded`` rather than being silently dropped.
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(
+        video, [track], out, preencoded=True, video_duration=2.0, fade=FadeSpec(fade_in=0.5)
+    )
+
+    assert _video_codec(out) == "h264"
+    assert max(_sample_rgb(out, 0.02)) < 60
+
+
+def test_mux_audio_tracks_without_a_fade_still_copies(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 2.0)
+    track = _fade_track(tmp_path / "pol.wav", 2.0)
+
+    mux_audio_tracks(video, [track], out, preencoded=True, video_duration=2.0, fade=None)
+
+    assert _sample_rgb(out, 0.02) == pytest.approx((255, 255, 255), abs=20)
+
+
+def test_mux_audio_tracks_rejects_a_fade_longer_than_the_film(tmp_path):
+    video = tmp_path / "video.mp4"
+    out = tmp_path / "out.mp4"
+    _make_color_video(video, "white", 1.0)
+    track = _fade_track(tmp_path / "pol.wav", 1.0)
+
+    with pytest.raises(ValueError, match="longer than the film"):
+        mux_audio_tracks(
+            video, [track], out, video_duration=1.0, fade=FadeSpec(fade_in=0.8, fade_out=0.8)
+        )
+
+
+def test_fade_spec_noop_is_recognised():
+    assert FadeSpec().is_noop()
+    assert not FadeSpec(fade_in=0.4).is_noop()
+    assert not FadeSpec(fade_out=0.4).is_noop()

@@ -137,9 +137,11 @@ itself declare `config.setup` (recursion is a validation error), and the setup
 and target must share the same origin (host); cross-origin reuse is a hard error.
 
 Because `setup` changes the authenticated DOM that compile resolves against, it
-is **not cosmetic**: it participates in the target's compile hash (see the
-[recompile matrix](#recompile-matrix)), so adding, removing, or changing it — or
-changing the login user — re-resolves the target.
+is **not cosmetic**: the `setup` path participates in the target's compile hash
+(see the [recompile matrix](#recompile-matrix)), so adding, removing, or
+repointing `setup` re-resolves the target. (Changing the login user alone
+refreshes the cached session but does not itself recompile the target sidecar —
+render's live identity check catches any resulting DOM drift with a loud error.)
 
 **`verifyUserLoggedIn` — on the setup scenario.** The login health-check that
 decides whether a cached session is still valid. It accepts a string (shorthand
@@ -441,7 +443,7 @@ has no address bar — only the compositor frame is drawn.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `wait`, and `slide`;
+  `enterText`, `select`, `scroll`, `wait`, `slide`, and `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -461,9 +463,12 @@ page state and align one generated action slot with each source step.
 | `click` | Yes | No |
 | `hover` | Yes | No |
 | `enterText` | Yes, `into` only | Only accompanying `say` |
+| `select` | Yes, `from` only | Only accompanying `say` |
+| `scroll` | No | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
 | `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
+| `closeWindow` | No | Only accompanying `say` |
 
 If `say` accompanies an action, narration is rendered before the action. With
 multiple audio tracks, all translations start together and the longest one controls
@@ -563,6 +568,50 @@ only in `text`, not `into`.
 Playwright uses `fill`, which replaces the current value. A normal text field can
 show the value in the recording; Guidebot does not add masking.
 
+### `select`
+
+```yaml
+- select:
+    from: "the report type dropdown"
+    option: "tabela"
+  say: "From the report type list I choose the table format."
+```
+
+Choose an option from a native `<select>` dropdown. `from` is a semantic target
+instruction sent to the reasoner and must resolve to a native `<select>` element —
+resolving to a non-select control (a custom `role="combobox"` widget, a button) is a
+`not_select` validation error. `option` is the visible label of the option to pick;
+it is shown, never spoken, and is **not** environment-substituted.
+
+A native select's option list is drawn by the operating system, so no
+browser-automation tool — Playwright included — can unfurl or screenshot it. During
+`render` the cursor therefore glides to the control, shows the click ripple, and
+*steps* the collapsed control's value to `option` with arrow keys, so the value
+visibly changes even though the list never opens (a jump of more than twelve options
+is set directly to keep the animation short). During `compile` the value is set
+directly. Either way the element ends on `option`, so later steps and the render
+agree. Pair it with a `say` such as "from this list I choose …" to narrate the intent.
+
+### `scroll`
+
+```yaml
+- scroll: down                    # up | down | top | bottom
+- scroll: { to: down, amount: 300 }   # object form; amount in pixels
+  say: "I scroll down to reveal the results preview."
+```
+
+Scroll the page — a render-only visual with no agent target, like a numeric `wait`.
+`to` is `up`, `down`, `top`, or `bottom`; the string shorthand `scroll: down` is
+accepted for all four. `amount` (pixels) tunes an `up`/`down` scroll and is ignored
+for `top`/`bottom`; without it, `down`/`up` moves by most of a viewport.
+
+Its purpose is to bring below-the-fold content into view so the recording shows it —
+in particular content the resolver **cannot** target, such as a live-preview
+`<iframe>` or a native select's option list. The cursor still cannot enter an iframe,
+but the scroll brings the iframe into frame. With an overlay (render) the scroll is
+an animated glide; during `compile` it jumps directly. Because it resolves no
+element, `scroll` needs no `compile` for its own sake and takes no `optional`.
+
 ### Numeric `wait`
 
 ```yaml
@@ -627,9 +676,32 @@ without a `say`, it holds for `hold` seconds (default `2.5`). A narrated slide
 therefore cannot linger after its narration ends. To hold a card *after* speech,
 follow it with a second, silent `slide` (same text, a `hold`, no `say`).
 
-Adding, removing, or reordering a `slide` step changes the step count, so it is the
-one step kind that **needs `guidebot compile`**; render preflights the step count
-against the sidecar and fails loudly otherwise.
+Adding, removing, or reordering a `slide` step changes the step count, so it
+**needs `guidebot compile`**; render preflights the step count against the sidecar and
+fails loudly otherwise. The same holds for `closeWindow` (below).
+
+### `closeWindow`
+
+```yaml
+- teach: "Click the link that opens in a new tab"
+- say: "We've read it; now back."
+- closeWindow: true
+```
+
+Closes the **active** window and returns to the one that opened it. It accepts only
+`true`; `closeWindow: false` is a validation error, not a silent no-op. With no window
+open the step fails.
+
+A new window appears on its own when a click on the page opens one — via `window.open`
+or a `target="_blank"` link. Guidebot recognises it by its `opener()`, so a link with
+`rel="noopener"` (which nulls `opener()`) is **not** recognised as opening a window. A
+window that fills the whole canvas (e.g. a `target="_blank"` tab that requested no size)
+is shown full-frame with its own address bar; a smaller `window.open` window keeps the
+floating presentation. The scenario never opens a window itself — there is no "open a
+window" command.
+
+Like `slide`, `closeWindow` changes the step count, so it **needs `guidebot compile`**.
+Full example: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
 
 ## Optional branches
 
@@ -764,9 +836,10 @@ use explicit waits and verify the result.
 | `verifyUserLoggedIn`, `maxAgeHours` (on a setup) | No — render-only, outside the compile hash |
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
-| `config.setup` (on a target) added, removed, changed, or its login user changed | Yes — folded into the target's compile hash |
+| `select.option` value alone | No — render-only |
+| `config.setup` (on a target) added, removed, or repointed | Yes — the setup path is folded into the target's compile hash |
 | Adding, removing, or reordering a `slide` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) | Yes |
 | Switching a step's command kind | Yes |
 
 See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
@@ -780,7 +853,7 @@ including `viewport`/`locale`/`tts.lang` and application drift.
 - `enterText.text`.
 
 Substitution does not run in `baseUrl`, `say`, `teach`, `translations`, target
-instructions, or any TTS/config field.
+instructions, `select.option`, or any TTS/config field.
 
 A variable may appear more than once. Missing variables raise an error. `$${` escapes
 a literal `${` sequence:

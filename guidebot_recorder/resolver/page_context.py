@@ -237,7 +237,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
     return normalize(Array.from(
       node.childNodes,
       (child) => textAlternative(child, visited, false, childInHiddenReference),
-    ).join(" "));
+    ).join(""));
   };
 
   const accessibleName = (element, role) => {

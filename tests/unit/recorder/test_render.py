@@ -4,7 +4,9 @@ import os
 import shutil
 import subprocess
 import textwrap
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,8 @@ from guidebot_recorder.recorder.render import (
     _parse_content_box,
     _parse_window_request,
     _popup_content_box,
+    _popup_fills_canvas,
+    _popup_window_opened,
     _popup_window_request,
     _prime_visuals,
     _publish_render_artifacts,
@@ -75,6 +79,14 @@ class MockReasoner:
         return ReasonerResult(
             action="click",
             target=RoleTarget(role="button", name="Zaloguj", exact=True),
+        )
+
+
+class LinkReasoner:
+    async def resolve(self, instruction, candidates):
+        return ReasonerResult(
+            action="click",
+            target=RoleTarget(role="link", name="otworz", exact=True),
         )
 
 
@@ -748,7 +760,7 @@ async def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
             raise RuntimeError("second bed failed")
         destination.write_bytes(f"new bed {build_calls}".encode())
 
-    def staged_mux(video, tracks, destination, *, preencoded=False, video_duration=None):
+    def staged_mux(video, tracks, destination, *, preencoded=False, video_duration=None, fade=None):
         assert video_duration == 1.0
         if failure_point == "mux":
             raise RuntimeError("mux failed")
@@ -2593,6 +2605,58 @@ async def test_popup_window_request_abandons_no_orphan_task(monkeypatch):
     assert all(task.done() for task in pending)
 
 
+# --- popup "opened" flag: the lookup must never hang the render either -------
+# Mirrors the geometry lookup's hang-resistance tests above using the same
+# stub frames — ``_scan_frames_for_window_opened`` is bounded exactly like
+# ``_scan_frames_for_window_request``, and ``_popup_window_opened`` now carries
+# the same outer hard timeout as ``_popup_window_request``. Unlike the
+# geometry lookup, giving up here must still answer ``True`` ("assume a
+# popup"), the fail-safe direction that never mounts an address bar on
+# uncertainty.
+
+
+async def test_popup_window_opened_answers_despite_a_frame_that_never_answers(monkeypatch):
+    """A dead ad iframe must neither hang the lookup nor hide the real answer."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    hanging = _HangingFrame()
+    # Reverse order puts the hanging frame ahead of the one holding the answer,
+    # so a sequential scan would never reach the answer at all.
+    opener = _StubOpener([_StubFrame(True), hanging])
+
+    started = time.monotonic()
+    assert await _popup_window_opened(opener) is True
+    elapsed = time.monotonic() - started
+
+    assert hanging.entered.is_set(), "test did not exercise the hanging frame"
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+
+
+async def test_popup_window_opened_gives_up_when_only_dead_frames_remain(monkeypatch, capsys):
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    started = time.monotonic()
+    # Unlike the geometry lookup (which gives up to "no crop"), giving up here
+    # must still assume a popup, so no address bar gets mounted on uncertainty.
+    assert await _popup_window_opened(opener) is True
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, f"lookup was not bounded: took {elapsed:.1f}s"
+    assert "OSTRZEŻENIE" in capsys.readouterr().err
+
+
+async def test_popup_window_opened_abandons_no_orphan_task(monkeypatch):
+    """An abandoned probe must not leave an un-awaited exception behind."""
+    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
+
+    assert await _popup_window_opened(opener) is True
+
+    pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert all(task.done() for task in pending)
+
+
 async def test_popup_window_request_prefers_the_top_documents_record():
     """The init script republishes on the top document; it wins over stale frames."""
     opener = _StubOpener(
@@ -3114,3 +3178,342 @@ async def test_hand_cursor_to_popup_skips_centring_without_a_viewport():
     await render_module._hand_cursor_to_popup(main, popup, overlay)
 
     assert overlay.calls == [("hide", main)]
+
+
+# --- closeWindow ---------------------------------------------------------------
+
+
+def _write_close_window_scenario(
+    tmp_path: Path, *, popup_config: bool = True, chrome: bool = False
+) -> Path:
+    # A data: page cannot open a new window onto another data: URL (Chromium
+    # blocks it outright), so the popup destination needs a real file:// URL —
+    # same convention as test_compile.py's closeWindow test. The page paints its
+    # own full-bleed background so it genuinely fills the tab: that makes the
+    # popup's content bounding box decline outright (see `paintsPage` in
+    # `_POPUP_CONTENT_BOX_SCRIPT`) and leaves cropdetect nothing to trim either —
+    # matching a real `_blank` tab, where every crop level declines because
+    # there is no smaller window to name.
+    second = tmp_path / "second.html"
+    second.write_text(
+        "<!doctype html><html><head><style>body{margin:0;background:#2a6ebb}</style>"
+        "</head><body><p>druga</p></body></html>",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.html"
+    main.write_text(
+        f"<a href='{second.resolve().as_uri()}' target='_blank'>otworz</a>",
+        encoding="utf-8",
+    )
+    # popup_config=False drops the explicit `popup:` block so the default
+    # `float` transition applies — needed to prove a canvas-filling tab gets
+    # overridden to `slide` rather than testing a scenario that already asks
+    # for `slide`.
+    popup_line = "  popup: {transition: slide, slideMs: 40}" if popup_config else ""
+    # chrome=True turns the whole browser-chrome feature on, which is what makes
+    # the `_blank` tab's address bar observable at all: without it the render
+    # builds no `Chrome` controller and there is no bar to mount anywhere.
+    chrome_line = "  chrome: {enabled: true}" if chrome else ""
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: Karta
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+        {popup_line}
+        {chrome_line}
+        steps:
+          - navigate: "{main.resolve().as_uri()}"
+          - teach: "kliknij otworz"
+          - closeWindow: true
+          - say: "Wrocilismy do glownego okna."
+        """
+    )
+    path = tmp_path / "tab.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+    return path
+
+
+async def test_close_window_returns_to_main_and_restores_the_cursor(tmp_path):
+    path = _write_close_window_scenario(tmp_path)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        out = tmp_path / "out.mp4"
+        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert out.exists()
+    assert probe_duration(out) > 0
+
+
+async def test_close_window_hands_the_cursor_back_to_its_pre_popup_position(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
+    restored: list[tuple[float, float] | None] = []
+    original = R._prepare_main_after_popup_close
+
+    async def spy(page, overlay, chrome, settle_ms, restore_cursor_to=None):
+        restored.append(restore_cursor_to)
+        await original(page, overlay, chrome, settle_ms, restore_cursor_to=restore_cursor_to)
+
+    monkeypatch.setattr(R, "_prepare_main_after_popup_close", spy)
+
+    path = _write_close_window_scenario(tmp_path)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert restored, "closeWindow never routed through the popup-close handler"
+    assert restored[0] is not None, (
+        "the cursor was handed back without its pre-popup position -- the main "
+        "window's cursor will be parked at the popup's centre"
+    )
+
+
+# --- _popup_fills_canvas --------------------------------------------------------
+
+
+def test_popup_fills_canvas_for_a_declined_crop():
+    # Every level declining is the `_blank` tab case: no witness could name a
+    # smaller window, so the recording *is* the window.
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas(None, Viewport(width=1376, height=800)) is True
+
+
+def test_popup_fills_canvas_for_a_full_cover_rect():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((1376, 800, 0, 0), Viewport(width=1376, height=800)) is True
+
+
+def test_popup_does_not_fill_canvas_for_a_real_window():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((520, 640, 0, 0), Viewport(width=1376, height=800)) is False
+
+
+def test_popup_does_not_fill_canvas_when_offset():
+    from guidebot_recorder.models.config import Viewport
+
+    assert _popup_fills_canvas((1376, 800, 12, 12), Viewport(width=1376, height=800)) is False
+
+
+async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, monkeypatch):
+    # `float` is the default; a `_blank` tab must still render full-frame.
+    import guidebot_recorder.recorder.render as R
+
+    seen: list[str | None] = []
+    original = R.compose_popup_video
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("transition"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(R, "compose_popup_video", spy)
+
+    path = _write_close_window_scenario(tmp_path, popup_config=False)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert seen == ["slide"], f"expected the full-canvas tab to force slide, got {seen}"
+
+
+async def test_window_open_call_is_recorded_even_without_size_features():
+    # A featureless `window.open` must be distinguishable from no call at all:
+    # only the latter is a `target=_blank` tab.
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context()
+        await context.add_init_script(script=render_module._POPUP_REQUEST_SCRIPT)
+        page = await context.new_page()
+        await page.goto("data:text/html,<p>opener</p>")
+
+        assert await render_module._popup_window_opened(page) is False
+
+        await page.evaluate("window.open('about:blank', 'named')")
+        assert await render_module._popup_window_opened(page) is True
+        assert await render_module._popup_window_request(page) is None
+
+        await browser.close()
+
+
+def _start_static_http_server(body: bytes) -> tuple[ThreadingHTTPServer, threading.Thread, str]:
+    """Serve ``body`` at ``/`` on an ephemeral 127.0.0.1 port; return (server, thread, origin)."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:  # silence the test server
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+async def test_popup_window_opened_is_true_from_a_cross_origin_opener_iframe():
+    """The click that opens the popup happens inside a genuinely cross-origin
+    site iframe — unlike ``test_popup_window_request_finds_the_opener_iframe``,
+    which uses ``srcdoc`` and is therefore same-origin with the opener's top
+    document. Here the iframe's ``realTop[OPENED] = true`` mirror write throws
+    a real cross-origin ``SecurityError`` (swallowed by the init script's own
+    ``catch``), so only a per-frame scan — not a top-frame-only read — can see
+    that ``window.open`` was called at all.
+    """
+
+    inner_body = (
+        b"<!doctype html><body>"
+        b"<button id='go' onclick=\"window.open('about:blank','p','width=500,height=400')\">"
+        b"go</button></body>"
+    )
+    inner_server, inner_thread, inner_origin = _start_static_http_server(inner_body)
+    outer_body = (
+        f"<!doctype html><body><iframe id='site' src='{inner_origin}/'></iframe></body>"
+    ).encode()
+    outer_server, outer_thread, outer_origin = _start_static_http_server(outer_body)
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(viewport={"width": 640, "height": 480})
+            await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
+            page = await context.new_page()
+            await page.goto(outer_origin)
+            frame = page.frame_locator("#site")
+
+            # Nothing opened yet, and the two documents are on distinct origins.
+            assert await render_module._popup_window_opened(page) is False
+
+            async with context.expect_page():
+                await frame.locator("#go").click()
+
+            assert await render_module._popup_window_opened(page) is True
+            # The sibling geometry lookup already handled this correctly; must
+            # keep doing so unchanged.
+            assert await _popup_window_request(page) == (500, 400)
+
+            await context.close()
+            await browser.close()
+    finally:
+        inner_server.shutdown()
+        inner_thread.join()
+        outer_server.shutdown()
+        outer_thread.join()
+
+
+# --- the address bar on a `target="_blank"` tab --------------------------------
+# `bare_popups` (float/slide) is a context-wide init-script flag, so it strips the
+# legacy in-DOM bar from every top-level non-shell document. A genuine `_blank`
+# tab is a real browser tab, though, and reads as a rendering fault without an
+# address bar — so it, and only it, mounts the bar per page.
+
+
+async def test_blank_tab_gets_an_address_bar_while_other_popups_stay_bare(tmp_path, monkeypatch):
+    # `_blank` is the case where `window.open` was never called at all -- that,
+    # not the crop verdict, is what is knowable while the window is still being
+    # recorded (the crop chain only answers once the recording is over, and the
+    # bar is painted DOM that would corrupt crop levels 2 and 3).
+    from guidebot_recorder.chrome import Chrome as ChromeController
+
+    mounted: list[bool] = []
+    original = ChromeController.install_bar
+
+    async def spy(self, page):
+        await original(self, page)
+        mounted.append(await page.query_selector("[data-guidebot-chrome]") is not None)
+
+    monkeypatch.setattr(ChromeController, "install_bar", spy)
+
+    path = _write_close_window_scenario(tmp_path, chrome=True)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert mounted == [True], (
+        "a `_blank` tab must mount the legacy address bar exactly once, and it "
+        f"must actually be in the popup's DOM afterwards (got {mounted!r})"
+    )
+
+
+async def test_sized_window_open_popup_never_mounts_the_address_bar(tmp_path, monkeypatch):
+    # The counterpart: a popup the site really did open with `window.open` stays
+    # bare, exactly as today -- the compositor frames it in post-process. This is
+    # what pins the per-window seam as per-window rather than a global flip.
+    from guidebot_recorder.chrome import Chrome as ChromeController
+
+    calls: list[str] = []
+
+    async def spy(self, page):
+        calls.append(page.url)
+
+    monkeypatch.setattr(ChromeController, "install_bar", spy)
+
+    second = tmp_path / "second.html"
+    second.write_text(
+        "<!doctype html><html><head><style>body{margin:0;background:#2a6ebb}</style>"
+        "</head><body><p>druga</p></body></html>",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.html"
+    main.write_text(
+        "<a href='#' onclick=\"window.open("
+        f"'{second.resolve().as_uri()}','p','width=420,height=300');return false\">otworz</a>",
+        encoding="utf-8",
+    )
+    scenario = textwrap.dedent(
+        f"""\
+        config:
+          title: Popup
+          viewport: {{width: 640, height: 480}}
+          tts: {{provider: fake, voice: v, lang: pl-PL}}
+          popup: {{transition: slide, slideMs: 40}}
+          chrome: {{enabled: true}}
+        steps:
+          - navigate: "{main.resolve().as_uri()}"
+          - teach: "kliknij otworz"
+          - closeWindow: true
+          - say: "Wrocilismy do glownego okna."
+        """
+    )
+    path = tmp_path / "popup.scenario.yaml"
+    path.write_text(scenario, encoding="utf-8")
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner())
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert calls == [], f"a sized window.open popup must stay bare (install_bar called for {calls})"

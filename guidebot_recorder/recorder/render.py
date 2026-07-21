@@ -38,6 +38,7 @@ from tqdm import tqdm
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
+from guidebot_recorder.desktop import DesktopOverlay, resolve_icon
 from guidebot_recorder.models.action import (
     COMPILER_VERSION,
     CachedAction,
@@ -45,7 +46,13 @@ from guidebot_recorder.models.action import (
     PendingAction,
 )
 from guidebot_recorder.models.compiled import CompiledAction
-from guidebot_recorder.models.config import ChromeConfig, SoundConfig, TtsConfig, config_hash
+from guidebot_recorder.models.config import (
+    ChromeConfig,
+    SoundConfig,
+    TtsConfig,
+    Viewport,
+    config_hash,
+)
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
@@ -76,6 +83,7 @@ from guidebot_recorder.tts.base import (
 )
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import (
+    FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
@@ -146,6 +154,30 @@ class _PopupSession:
     :attr:`Overlay.pos` is shared by every page, so centring the cursor in the
     popup overwrites the opener's. Restored on close.
     """
+    is_blank_tab: bool = False
+    """Whether this window is a real browser tab rather than a popup window.
+
+    True when the opener never called ``window.open`` at all — the
+    ``target="_blank"`` case. Decided at furnishing time via
+    :func:`_popup_window_opened`, because the crop chain's verdict does not
+    exist until the recording is over.
+
+    Do **not** substitute ``popup_crop is None`` for this. That is a weaker
+    signal: a *featureless* ``window.open`` whose page paints a full-bleed
+    background also declines every crop level, and it is a genuine floating
+    window that must keep the ``float`` presentation (pinned by
+    ``test_full_bleed_featureless_popup_renders_uncropped``).
+    """
+    wants_bar: bool = False
+    """Whether this window shows the legacy in-DOM address bar.
+
+    True only for a real ``target="_blank"`` tab — a browser tab with no address
+    bar reads as a rendering fault. Every other popup stays bare and is framed by
+    the compositor instead. Decided at open time from
+    :func:`_popup_window_opened`, because the crop chain's verdict does not exist
+    until the recording is over, and the bar is painted DOM that would corrupt
+    crop levels 2 and 3.
+    """
     window_size: tuple[int, int] | None = None
     """The popup's real window size in CSS px, or ``None`` when unknown.
 
@@ -192,6 +224,13 @@ class _PopupSession:
 # :func:`_recording_scale` for the conversion and for why headed renders differ.
 _POPUP_REQUEST_KEY = "__guidebot_popup_request"
 
+# Set unconditionally the moment ``window.open`` runs, features or not. This is
+# what tells a real ``target="_blank"`` tab (no call at all) apart from a
+# featureless ``window.open(url, name)`` (a call that leaves ``KEY`` at
+# ``null``, exactly like never having been called) — a distinction
+# ``_POPUP_REQUEST_KEY`` alone cannot make. See ``_popup_window_opened``.
+_POPUP_OPENED_KEY = "__guidebot_popup_opened"
+
 # How long the opener's frames get to answer the geometry probe. They read a
 # value the page already wrote synchronously, so a healthy frame answers in
 # milliseconds; the budget exists purely to survive frames that can never
@@ -206,10 +245,12 @@ _POPUP_REQUEST_HARD_TIMEOUT = 5.0
 _POPUP_REQUEST_SCRIPT = f"""
 (() => {{
   const KEY = "{_POPUP_REQUEST_KEY}";
+  const OPENED = "{_POPUP_OPENED_KEY}";
   if (Object.prototype.hasOwnProperty.call(window, KEY)) return;
   const native = window.open;
   if (typeof native !== "function") return;
   window[KEY] = null;
+  window[OPENED] = false;
   // Captured before chrome.js shadows ``top`` (frame-bust neutralization), so
   // this is the *real* top document even from inside the shell's site iframe.
   // Publishing the record there lets the Python side read one frame instead of
@@ -230,6 +271,10 @@ _POPUP_REQUEST_SCRIPT = f"""
     return {{ width: Math.round(width), height: Math.round(height) }};
   }};
   window.open = function (...args) {{
+    window[OPENED] = true;
+    try {{
+      if (realTop && realTop !== window) realTop[OPENED] = true;
+    }} catch (e) {{}}
     const requested = parse(args[2]);
     if (requested) {{
       window[KEY] = requested;
@@ -378,6 +423,110 @@ async def _popup_window_request(opener: Page) -> tuple[int, int] | None:
             file=sys.stderr,
         )
     return size
+
+
+async def _frame_window_opened(frame: Frame) -> bool | None:
+    """Read one frame's "was window.open called" flag, or ``None`` if it cannot answer."""
+
+    try:
+        return bool(await frame.evaluate(f"() => window.{_POPUP_OPENED_KEY} === true"))
+    except PlaywrightError:
+        # The frame navigated away, detached, or never ran the init script.
+        return None
+
+
+async def _scan_frames_for_window_opened(opener: Page) -> bool | None:
+    """Ask every frame, concurrently, whether it recorded a ``window.open`` call.
+
+    Mirrors ``_scan_frames_for_window_request``: the ``OPENED`` flag is mirrored
+    to the real top document only as a same-origin optimisation (see
+    ``_POPUP_REQUEST_SCRIPT``), so a call made from a genuinely cross-origin
+    frame — routine for the shell's site iframe — never reaches that mirror,
+    and the top frame alone cannot be trusted to answer. Every frame is asked
+    directly instead, concurrently and for the same reason as the geometry
+    scan: a dead ad iframe whose document never commits an execution context
+    must not block the others, or the render, forever.
+
+    Returns ``True`` the moment any frame reports the flag set, ``False`` if
+    every frame answered and none did, or ``None`` if no frame could answer at
+    all (the opener navigated away or died) — callers must treat ``None`` as
+    unknown, not as "no popup".
+    """
+
+    top = opener.main_frame
+    frames = [top, *(frame for frame in reversed(opener.frames) if frame is not top)]
+    tasks = [asyncio.ensure_future(_frame_window_opened(frame)) for frame in frames]
+    try:
+        await asyncio.wait(tasks, timeout=_POPUP_REQUEST_LOOKUP_TIMEOUT)
+        answered = False
+        for task in tasks:
+            if task.done() and not task.cancelled() and task.exception() is None:
+                result = task.result()
+                if result is True:
+                    return True
+                if result is False:
+                    answered = True
+        return False if answered else None
+    finally:
+        for task in tasks:
+            _discard_pending(task)
+
+
+async def _popup_window_opened(page: Page) -> bool:
+    """Whether this document called ``window.open`` at all, features or not.
+
+    ``_popup_window_request`` answers "what geometry did the site ask for", and
+    returns ``None`` both for a featureless ``window.open(url, name)`` and for a
+    window this document never opened. Only the second is a ``target="_blank"``
+    tab, and telling them apart is possible *while the popup is alive* — unlike
+    the crop chain, whose verdict arrives after the recording is finished.
+
+    Read per frame, not just the top document: the init script's mirror onto
+    the real top document (``realTop[OPENED] = true``) is only a same-origin
+    optimisation — it throws and is swallowed for a genuinely cross-origin
+    frame, which is routine for the shell's site iframe. Reading only the top
+    frame therefore misses exactly that call and misreports a real popup as a
+    ``target="_blank"`` tab. ``_scan_frames_for_window_opened`` asks every
+    frame instead, exactly as ``_popup_window_request`` already does for the
+    geometry record.
+
+    Bounded twice over, exactly like ``_popup_window_request``: this runs at
+    the same worst possible moment — right after a popup opens, while the
+    opener is at its busiest — and a render that hangs here is just as
+    unrecoverable. An unknown answer is by contrast harmless: it means
+    "assume a popup", i.e. the fail-safe direction that never mounts an
+    address bar on uncertainty. So the lookup always terminates, and says so
+    when it gives up.
+    """
+
+    def _assume_opened() -> bool:
+        tqdm.write(
+            "OSTRZEŻENIE: żadna ramka strony otwierającej nie potwierdziła wywołania "
+            "window.open() — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
+
+    lookup = asyncio.ensure_future(_scan_frames_for_window_opened(page))
+    try:
+        opened = await asyncio.wait_for(asyncio.shield(lookup), _POPUP_REQUEST_HARD_TIMEOUT)
+    except TimeoutError:
+        # ``shield`` means the timeout does not itself cancel the lookup, so it
+        # is still ours to dispose of cleanly.
+        _discard_pending(lookup)
+        tqdm.write(
+            "OSTRZEŻENIE: sprawdzenie wywołania window.open() nie zakończyło się w "
+            f"{_POPUP_REQUEST_HARD_TIMEOUT:g}s — zakładam otwarty popup (bez paska adresu)",
+            file=sys.stderr,
+        )
+        return True
+    except PlaywrightError:
+        # An opener that navigated or died reports nothing; treat it as "unknown",
+        # which keeps today's bare-popup behaviour rather than mounting a bar.
+        return _assume_opened()
+    if opened is None:
+        return _assume_opened()
+    return opened
 
 
 #: A content bounding box at least this fraction of the viewport in *both*
@@ -766,6 +915,31 @@ def _resolve_popup_crop(
     return (measured, "cropdetect") if measured is not None else (None, "none")
 
 
+def _popup_fills_canvas(popup_crop: tuple[int, int, int, int] | None, viewport: Viewport) -> bool:
+    """Whether the popup window occupies the entire recording canvas.
+
+    ``None`` is the ``_blank`` tab case: every crop level declined, so no witness
+    could name a window smaller than the recording. An explicit rect covering the
+    canvas at the origin says the same thing positively — a ``window.open`` that
+    asked for the full viewport.
+
+    The distinction matters because ``float`` insets the popup at
+    :attr:`PopupConfig.scale`; applied to a full viewport that reads as a shrunken
+    clone of the page rather than as a separate window.
+
+    ``viewport`` here is *not* CSS pixels despite the name: ``cfg.viewport``'s
+    width/height are passed verbatim as ``record_video_size`` when the browser
+    context is created (see ``render.py`` around the ``browser.new_context`` call),
+    so it already is the canvas measured in recording pixels — the same unit
+    ``popup_crop`` is in. No CSS-to-recording-pixel conversion belongs here.
+    """
+
+    if popup_crop is None:
+        return True
+    width, height, x, y = popup_crop
+    return (x, y) == (0, 0) and (width, height) == (viewport.width, viewport.height)
+
+
 @dataclass(slots=True)
 class _TtsWork:
     text: str
@@ -874,6 +1048,63 @@ def _is_shell_page(page: Page) -> bool:
     return page.url.startswith(SHELL_URL)
 
 
+#: Desktop-opener beats, in ms. The window growth (`_DESKTOP_OPEN_MS`) is the one
+#: the eye actually reads; the rest are short settles that keep the double-click
+#: legible without dragging the opener out.
+_DESKTOP_SETTLE_MS = 260
+_DESKTOP_DOUBLE_CLICK_GAP_MS = 130
+_DESKTOP_PRE_OPEN_MS = 220
+_DESKTOP_OPEN_MS = 760
+
+
+async def _play_desktop_opener(
+    desktop: DesktopOverlay,
+    overlay: Overlay,
+    page: Page,
+    payload: dict[str, str],
+    *,
+    hold: float,
+    settle_ms: float,
+    reveal: Callable[[], Awaitable[None]],
+    on_click: Callable[[str], None] | None = None,
+) -> None:
+    """Paint a desktop, arc the cursor to its icon, double-click, open the window.
+
+    The visual half of a :class:`~guidebot_recorder.models.scenario.Desktop` step.
+    Ends on the revealed underlay (the chrome shell) — *reveal* is called with the
+    faux window still covering it, so hiding the desktop overlay uncovers a live
+    browser rather than a blank frame. ``on_click`` (when given) stamps a click
+    SFX at each of the two clicks.
+
+    Fails loud if the icon cannot be located: the desktop was just painted, so a
+    missing icon is a real overlay bug, not a case to paper over.
+    """
+    await desktop.show(page, payload)
+    await overlay.show(page)
+    center = await desktop.icon_center(page)
+    if center is None:
+        raise RenderError("nie udało się zlokalizować ikony pulpitu po jej narysowaniu")
+    await overlay.move_to(page, center[0], center[1])
+    await page.wait_for_timeout(max(settle_ms, _DESKTOP_SETTLE_MS))
+    # Double-click: two ripples a beat apart, each with its own click SFX.
+    await overlay.ripple(page)
+    if on_click is not None:
+        on_click("click")
+    await page.wait_for_timeout(_DESKTOP_DOUBLE_CLICK_GAP_MS)
+    await overlay.ripple(page)
+    if on_click is not None:
+        on_click("click")
+    await page.wait_for_timeout(_DESKTOP_PRE_OPEN_MS)
+    await desktop.open_window(page, _DESKTOP_OPEN_MS)
+    await page.wait_for_timeout(_DESKTOP_OPEN_MS)
+    # Uncover the live browser: show the underlay first, THEN drop the overlay, so
+    # the reveal never flashes a blank document between the two.
+    await reveal()
+    await desktop.hide(page)
+    if hold > 0:
+        await page.wait_for_timeout(int(hold * 1000))
+
+
 async def _ensure_visuals(
     page: Page,
     overlay: Overlay,
@@ -935,10 +1166,21 @@ async def _ensure_visuals(
             return {cursor: true, chrome: true, mounted: true};
         }"""
     args = [overlay.pos[0], overlay.pos[1], expect_chrome, page.url, False]
-    readiness = await page.evaluate(
-        ensure_script,
-        args,
-    )
+    try:
+        readiness = await page.evaluate(ensure_script, args)
+    except PlaywrightError as exc:
+        # A prior click can trigger a navigation/reload the recorder never asked
+        # for — e.g. a cookie banner whose accept runs `window.location.reload()`,
+        # or a link that leaves for an external login. The next step's visual
+        # mount then races the in-flight document swap and the context is
+        # destroyed. Wait for the replacement document and retry once, re-reading
+        # the URL for the fresh context. Mirrors the opener-settle retry in
+        # `_prepare_main_after_popup_close`. A closed page is a real failure.
+        if page.is_closed():
+            raise RenderError("okno zamknęło się w trakcie montażu warstw wizualnych") from exc
+        await page.wait_for_load_state()
+        args[3] = page.url
+        readiness = await page.evaluate(ensure_script, args)
     if readiness.get("mounted"):
         return
     # Context init scripts normally make both APIs available. Repair a missing
@@ -1429,6 +1671,7 @@ async def _assemble_audio_tracks(
     preencoded: bool = False,
     sound: SoundConfig | None = None,
     sfx_offsets: list[tuple[str, float]] | None = None,
+    fade: FadeSpec | None = None,
 ) -> None:
     """Stage a complete bed set, mux atomically, then publish durable WAVs.
 
@@ -1468,6 +1711,7 @@ async def _assemble_audio_tracks(
             staged_mp4,
             preencoded=preencoded,
             video_duration=total,
+            fade=fade,
         )
         _publish_render_artifacts(staged_mp4, tracks, work, out_mp4)
 
@@ -1489,6 +1733,8 @@ def _compiled_from(step: Step) -> str:
         return step.hover
     if kind == "enterText":
         return step.enter_text.into
+    if kind == "select":
+        return step.select.from_
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok {kind} nie wymaga cachedAction")
@@ -1520,6 +1766,7 @@ def _compiled_action_is_current(
         "click": "click",
         "hover": "hover",
         "enterText": "type",
+        "select": "select",
         "wait": "waitFor",
     }.get(kind)
     if expected_action is not None and action.action != expected_action:
@@ -1673,6 +1920,19 @@ async def run_render(
                 f"krok {index}: wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
             )
 
+    # Desktop icons are resolved here, before recording: an unknown built-in or a
+    # missing file is an authoring error and must fail loud up front, not after
+    # minutes of render. Relative icon paths resolve against the scenario file's
+    # directory. Keyed by flat-step index for the render loop to read back.
+    desktop_payloads: dict[int, dict[str, str]] = {}
+    for index, step in enumerate(flat_steps):
+        if step.desktop is not None:
+            desktop_payloads[index] = {
+                "color": cfg.desktop.color,
+                "label": step.desktop.label,
+                **resolve_icon(step.desktop, base_dir=path.parent),
+            }
+
     # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
     cache = TtsCache(cache_dir)
     narration_count = sum(_narration(step) is not None for step in flat_steps)
@@ -1736,6 +1996,11 @@ async def run_render(
     await overlay.install_context(context)
     slide = SlideOverlay()
     await slide.install_context(context)
+    # Same role-gating rationale as slide.js (isTop guard): must be registered
+    # before chrome.js so it reads the real ``window.top`` and never mounts the
+    # desktop inside the framed site.
+    desktop = DesktopOverlay(config={"background": cfg.desktop.color})
+    await desktop.install_context(context)
     # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
     # compositor frames them in post. This flips the chrome.js popup-site branch
     # off and gates the fail-loud "expect chrome" checks on popup pages below.
@@ -1913,7 +2178,31 @@ async def run_render(
             # first (asserting it survived, fail-loud) before its normal
             # `_ensure_visuals`. With no card ever painted this is exactly
             # today's unconditional `_ensure_visuals` call (back-compat).
-            if kind == "slide":
+            if kind == "desktop":
+                assert step.desktop is not None  # guaranteed by command_kind()
+                if card_active:
+                    await _assert_card_alive(active_page)
+                    await slide.hide(active_page)
+                    card_active = False
+                    active_card = None
+
+                async def _reveal_shell(pg: Page = active_page) -> None:
+                    await _chrome_show(pg)
+
+                await _play_desktop_opener(
+                    desktop,
+                    overlay,
+                    active_page,
+                    desktop_payloads[index],
+                    hold=step.desktop.hold,
+                    settle_ms=cfg.cursor.settle,
+                    reveal=_reveal_shell,
+                    on_click=(sfx_sink if cfg.sound.enabled else None),
+                )
+                # The opener ends on the revealed chrome shell — normal visible
+                # state, so from here it is exactly the no-card path (card_active
+                # stays False).
+            elif kind == "slide":
                 assert step.slide is not None  # guaranteed by command_kind()
                 if card_active:
                     # Fail loud before repainting: a slide following a say whose
@@ -2055,10 +2344,16 @@ async def run_render(
                     active_page,
                     overlay,
                     chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                 )
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
+            if kind == "closeWindow" and popup is None:
+                raise RenderError(f"krok {index}: closeWindow bez otwartego okna")
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
             recorder = Recorder(
@@ -2085,7 +2380,11 @@ async def run_render(
                     anchor,
                     observed_pages,
                     _ensure_card,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    expect_chrome=(
+                        popup.wants_bar
+                        if popup is not None and active_page is popup.page
+                        else _expect_chrome(chrome, bare_popups)
+                    ),
                     resolved=resolved,
                     optional=optional,
                     scenario_hash=scenario_hash,
@@ -2094,11 +2393,14 @@ async def run_render(
                 if opened is not None:
                     popup = opened
                     popup.page.set_default_timeout(timeout * 1000)
+                    popup.is_blank_tab = not await _popup_window_opened(page)
+                    popup.wants_bar = chrome is not None and popup.is_blank_tab
                     prepared = await _prepare_popup(
                         popup.page,
                         overlay,
                         chrome,
-                        expect_chrome=_expect_chrome(chrome, bare_popups),
+                        expect_chrome=_expect_chrome(chrome, bare_popups) or popup.wants_bar,
+                        mount_bar=popup.wants_bar,
                     )
                     _sync_popup_close(popup, observed_pages, anchor)
                     if not prepared:
@@ -2213,6 +2515,23 @@ async def run_render(
             viewport=popup.viewport,
             canvas=(cfg.viewport.width, cfg.viewport.height),
         )
+        # A real browser TAB that fills the canvas is not a floating popup:
+        # `slide` is the full-frame presentation by design and ignores
+        # `popup_crop`, while `float` would inset a whole viewport and read as a
+        # shrunken clone of the page. Gated on `is_blank_tab`, not on the crop
+        # alone — a featureless `window.open` painting a full-bleed background
+        # also declines every crop level, yet is a genuine floating window that
+        # must keep `float`. Only `float` is overridden: an author who asked for
+        # `cut` gets the hard cut they asked for.
+        transition = cfg.popup.effective_transition
+        if (
+            transition == "float"
+            and popup.is_blank_tab
+            and _popup_fills_canvas(popup_crop, cfg.viewport)
+        ):
+            transition = "slide"
+            if verbose:
+                tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
         closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
         assert closed_at is not None
         composite = work / f"{out_mp4.stem}.composite.mp4"
@@ -2223,7 +2542,7 @@ async def run_render(
             popup.opened_at,
             closed_at,
             visual_ready_delay=popup.visual_ready_delay,
-            transition=cfg.popup.effective_transition,
+            transition=transition,
             slide_ms=cfg.popup.slide_ms,
             scale=cfg.popup.scale,
             corner_radius=cfg.popup.corner_radius,
@@ -2277,6 +2596,16 @@ async def run_render(
         preencoded=preencoded,
         sound=cfg.sound,
         sfx_offsets=sfx_offsets,
+        fade=(
+            FadeSpec(
+                fade_in=cfg.fade.fade_in,
+                fade_out=cfg.fade.fade_out,
+                color=cfg.fade.color,
+                audio=cfg.fade.audio,
+            )
+            if cfg.fade.enabled
+            else None
+        ),
     )
 
 
@@ -2324,6 +2653,11 @@ async def _render_step(
 
     if kind == "say":
         return None
+    if kind == "desktop":
+        # The opener's whole choreography (paint, cursor arc, double-click, window
+        # growth) already ran in the card block before narration; nothing is left
+        # to do in the action phase. Mirrors the visual-only `slide`/`say` returns.
+        return None
     if kind == "slide":
         assert step.slide is not None  # guaranteed by command_kind()
         if _narration(step) is not None:
@@ -2343,6 +2677,13 @@ async def _render_step(
             if remaining <= 0:
                 return None
             await asyncio.sleep(min(0.1, remaining))
+    if kind == "closeWindow":
+        # The loop's popup-lifecycle check sees the closed page next and runs
+        # `_prepare_main_after_popup_close` with the saved cursor position. Do not
+        # duplicate that here: calling the funnel without `restore_cursor_to`
+        # leaves the main window's cursor at the popup's centre.
+        await page.close()
+        return None
     if kind == "navigate":
         source_url = step.navigate_url()
         assert source_url is not None  # guaranteed by command_kind()
@@ -2383,6 +2724,9 @@ async def _render_step(
         return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
+        return None
+    if kind == "scroll":
+        await recorder.scroll(step.scroll_config())
         return None
 
     url_before = action_frame.url
@@ -2482,6 +2826,10 @@ async def _render_step(
         if input_text is None:
             raise RenderError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
         await recorder.enter_text(cached.target, input_text)
+    elif cached.action == "select":
+        if step.select is None:
+            raise RenderError(f"krok {index}: brak opcji dla akcji select — uruchom `compile`")
+        await recorder.select(cached.target, step.select.option)
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:
@@ -2518,12 +2866,17 @@ async def _prepare_popup(
     chrome: Chrome | None,
     *,
     expect_chrome: bool | None = None,
+    mount_bar: bool = False,
 ) -> bool:
     """Prepare a new page; translate close races into lifecycle state.
 
     ``expect_chrome`` defaults to ``chrome is not None``; pass ``False`` for a
     bare (floating) popup so the chrome bar is not mounted on it (the cursor is
     still ensured).
+
+    ``mount_bar`` forces the legacy bar onto this one page even when the
+    context-wide script is bare — a real ``target="_blank"`` tab is a browser
+    tab and reads as a rendering fault without an address bar.
     """
 
     if expect_chrome is None:
@@ -2534,7 +2887,9 @@ async def _prepare_popup(
         await page.bring_to_front()
         await page.wait_for_load_state()
         await overlay.ensure(page)
-        if chrome is not None and expect_chrome:
+        if chrome is not None and mount_bar:
+            await chrome.install_bar(page)
+        elif chrome is not None and expect_chrome:
             await chrome.ensure(page)
     except PlaywrightError:
         if page.is_closed():

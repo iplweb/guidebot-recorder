@@ -6,7 +6,7 @@ CompiledScenario (``*.compiled.yaml``), not inline on the step.
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -14,13 +14,72 @@ from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
 
 #: "primary" commands (an action/step); `say` may accompany one as narration
-PRIMARY_COMMANDS = ("teach", "navigate", "click", "hover", "enter_text", "wait", "slide")
+PRIMARY_COMMANDS = (
+    "teach",
+    "navigate",
+    "click",
+    "hover",
+    "enter_text",
+    "select",
+    "scroll",
+    "wait",
+    "slide",
+    "close_window",
+    "desktop",
+)
+
+#: Built-in generic browser icons for the ``desktop`` step. Deliberately NOT the
+#: real browser logos — those are trademarks and this package is redistributable.
+#: They are hand-drawn stand-ins whose names merely say which browser they evoke;
+#: a scenario that wants a real logo points ``icon`` at its own file instead.
+DESKTOP_ICON_ALIASES = {
+    "chrome": "browser",
+    "browser": "browser",
+    "firefox": "flame",
+    "flame": "flame",
+    "iexplore": "legacy",
+    "edge": "legacy",
+    "legacy": "legacy",
+    "globe": "globe",
+}
 
 
 class EnterText(BaseModel):
     model_config = ConfigDict(extra="forbid")
     into: str
     text: str
+
+
+class Select(BaseModel):
+    """Choose an option from a native ``<select>`` dropdown.
+
+    ``from_`` (written ``from`` in YAML) is the semantic target of the dropdown;
+    ``option`` is the visible label of the option to pick. The option list of a
+    native select is drawn by the OS and cannot be shown by any browser-automation
+    tool, so render animates the cursor to the control and steps its value to the
+    chosen option with arrow keys — the value visibly changes even though the list
+    never unfurls. ``option`` is shown, never spoken, and is not env-substituted.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    from_: str = Field(alias="from")
+    option: str
+
+
+class Scroll(BaseModel):
+    """Scroll the page — a render-only visual with no agent target.
+
+    ``to`` picks the direction/destination; ``amount`` (pixels) tunes an up/down
+    scroll and is ignored for ``top``/``bottom``. Use it to bring below-the-fold
+    content into view — for example a live-preview ``<iframe>`` whose contents the
+    resolver cannot target — so the recording still shows it. ``down`` without an
+    ``amount`` scrolls by most of a viewport; the shorthand ``scroll: down`` is
+    accepted for any of the four destinations.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    to: Literal["up", "down", "top", "bottom"] = "down"
+    amount: float | None = None
 
 
 class WaitUntil(BaseModel):
@@ -53,6 +112,25 @@ class Slide(BaseModel):
         return self
 
 
+class Desktop(BaseModel):
+    """A simulated desktop opener: cursor double-clicks a browser icon, window opens.
+
+    Visual-only, like :class:`Slide` — resolves to no compiled action. ``icon`` is
+    either a built-in name (see :data:`DESKTOP_ICON_ALIASES`) or a path to the
+    scenario author's own image; ``label`` is the caption under the icon. The
+    desktop background colour is a render setting (``config.desktop.color``), not
+    a per-step field, so every desktop step in a film matches.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    icon: str = "chrome"
+    label: str = "Przeglądarka internetowa"
+    hold: float = 1.0
+
+    def is_builtin_icon(self) -> bool:
+        return self.icon in DESKTOP_ICON_ALIASES
+
+
 class Step(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -62,8 +140,14 @@ class Step(BaseModel):
     click: str | None = None
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
+    select: Select | None = None
+    scroll: Literal["up", "down", "top", "bottom"] | Scroll | None = None
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
+    desktop: Desktop | None = None
+    #: close the active window and return to the one that opened it; `Literal[True]`
+    #: so that `closeWindow: false` is a validation error rather than a silent no-op
+    close_window: Literal[True] | None = Field(default=None, alias="closeWindow")
     expect: Expect | None = None
     #: tolerate an absent element instead of failing the run (single-step shorthand)
     optional: bool = False
@@ -101,16 +185,24 @@ class Step(BaseModel):
     def command_kind(self) -> str:
         for c in PRIMARY_COMMANDS:
             if getattr(self, c) is not None:
-                return "enterText" if c == "enter_text" else c
+                if c == "enter_text":
+                    return "enterText"
+                if c == "close_window":
+                    return "closeWindow"
+                return c
         return "say"
 
     def requires_target(self) -> bool:
         kind = self.command_kind()
-        if kind in ("teach", "enterText", "click", "hover"):
+        if kind in ("teach", "enterText", "click", "hover", "select"):
             return True
         if kind == "wait" and isinstance(self.wait, WaitUntil):
             return True
         return False
+
+    def scroll_config(self) -> Scroll:
+        """Normalize the string shorthand and object form to a :class:`Scroll`."""
+        return self.scroll if isinstance(self.scroll, Scroll) else Scroll(to=self.scroll)
 
     def navigate_url(self) -> str | None:
         """Return the URL from either the legacy string or object form."""

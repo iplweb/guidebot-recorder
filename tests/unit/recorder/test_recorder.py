@@ -1,6 +1,8 @@
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
+from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import Recorder
@@ -115,3 +117,64 @@ async def test_enter_text_control_char_falls_back_to_instant(page):
     await rec.enter_text(RoleTarget(role="textbox", name="T"), "a\nb")
     assert await page.locator("#t").input_value() == "a\nb"
     assert events == []  # instant path, no per-char key events
+
+
+_SELECT_HTML = (
+    '<select aria-label="Report">'
+    "<option>lista</option><option>tabela</option><option>BibTeX</option>"
+    "</select>"
+)
+
+
+async def test_select_sets_value_in_compile_mode(page):
+    await page.set_content(_SELECT_HTML)
+    rec = Recorder(page, overlay=None)  # compile mode: set value directly
+    await rec.select(RoleTarget(role="combobox", name="Report"), "tabela")
+    assert await page.locator("select").input_value() == "tabela"
+
+
+async def test_select_steps_visibly_with_overlay_and_lands_on_option(page):
+    overlay = Overlay()
+    await page.set_content(_SELECT_HTML)
+    await overlay.install(page)
+    events = []
+    rec = Recorder(page, overlay, on_sfx=events.append)
+    await rec.select(RoleTarget(role="combobox", name="Report"), "BibTeX")
+    assert await page.locator("select").input_value() == "BibTeX"
+    assert overlay.pos != (0.0, 0.0)  # cursor glided to the control
+    assert events == ["click", "key", "key"]  # ripple + two arrow steps (lista→tabela→BibTeX)
+
+
+async def test_select_unknown_option_raises(page):
+    await page.set_content(_SELECT_HTML)
+    rec = Recorder(page, overlay=None)
+    with pytest.raises(PlaywrightError):
+        await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej")
+
+
+_TALL_PAGE = "<div style='height:3000px'>tall</div>"
+
+
+async def test_scroll_down_moves_viewport_with_overlay(page):
+    overlay = Overlay()
+    await page.set_content(_TALL_PAGE)
+    await overlay.install(page)
+    rec = Recorder(page, overlay)
+    await rec.scroll(Scroll(to="down"))
+    assert await page.evaluate("() => window.scrollY") > 0
+
+
+async def test_scroll_bottom_then_top_compile_mode(page):
+    await page.set_content(_TALL_PAGE)
+    rec = Recorder(page, overlay=None)  # compile mode: jump directly
+    await rec.scroll(Scroll(to="bottom"))
+    assert await page.evaluate("() => window.scrollY") > 100
+    await rec.scroll(Scroll(to="top"))
+    assert await page.evaluate("() => window.scrollY") == 0
+
+
+async def test_scroll_amount_is_honoured(page):
+    await page.set_content(_TALL_PAGE)
+    rec = Recorder(page, overlay=None)
+    await rec.scroll(Scroll(to="down", amount=200))
+    assert await page.evaluate("() => window.scrollY") == 200

@@ -404,6 +404,96 @@ def _normalise_popup_crop(
     return width, height, x, y
 
 
+#: Largest share of a popup recording that may be written off as teardown tail.
+#: The tail observed in practice is one second on recordings tens of seconds
+#: long; anything approaching this means the sampled corner is not reporting what
+#: :func:`detect_teardown_tail` assumes and the whole measurement is discarded.
+TEARDOWN_TAIL_MAX_FRACTION = 0.25
+
+
+def detect_teardown_tail(
+    path: Path,
+    crop: tuple[int, int, int, int],
+    *,
+    probe: _ProbeResult | None = None,
+) -> float:
+    """Seconds of trailing frames whose window no longer fills *crop*.
+
+    A popup's recorded size is not necessarily constant. Chromium can stop
+    rasterising the window at the screen's backing scale for the final frames of
+    a headed render — the page content is unchanged, but it arrives smaller, so
+    Playwright's padding grows and the fixed crop (sized from the *stable* part
+    of the recording, see ``_recording_scale``) starts exposing filler along its
+    right and bottom edges. In a held-open composite that reads as the popup
+    abruptly shrinking against a grey slab for the last second of the film.
+
+    Detection samples the 2x2 block just inside *crop*'s far corner across every
+    frame: while the window fills the crop that block is page content, and the
+    moment the window shrinks it becomes filler. The answer is the *trailing run*
+    of filler frames — a run that does not reach the last frame is content that
+    merely happens to match the filler colour, not a shrunken window.
+
+    Like :func:`detect_content_crop` this is a heuristic and deliberately not
+    fail-loud: an unreadable file, a crop that covers the whole canvas (no filler
+    to sample), or a run longer than :data:`TEARDOWN_TAIL_MAX_FRACTION` of the
+    recording all yield ``0.0`` — trim nothing, which is the behaviour that
+    predates this.
+
+    *probe* lets a caller that already measured *path* share the result, keeping
+    one composition to one ffprobe per artifact (see :func:`_probe_all`).
+    """
+    path = Path(path)
+    width, height, x, y = crop
+    try:
+        if probe is None:
+            probe = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
+        if probe.size is None or probe.duration <= 0:
+            return 0.0
+        canvas_width, canvas_height = probe.size
+        # No padding anywhere means no filler to recognise, so nothing to detect.
+        if (x, y) == (0, 0) and (width, height) == probe.size:
+            return 0.0
+        filler = _padding_color(path, probe.duration / 2, probe.size)
+        corner_x = min(max(0, x + width - 2), max(0, canvas_width - 2))
+        corner_y = min(max(0, y + height - 2), max(0, canvas_height - 2))
+        raw = _run(
+            [
+                ffmpeg_bin(),
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-vf",
+                f"crop=2:2:{corner_x}:{corner_y},scale=1:1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            binary=True,
+            timeout=CROPDETECT_TIMEOUT,
+        ).stdout
+    except (RuntimeError, FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return 0.0
+
+    frames = len(raw) // 3
+    if frames <= 1:
+        return 0.0
+    trailing = 0
+    for index in range(frames - 1, -1, -1):
+        pixel = raw[index * 3 : index * 3 + 3]
+        if max(abs(pixel[c] - filler[c]) for c in range(3)) > CROPDETECT_LIMIT:
+            break
+        trailing += 1
+    if trailing == 0:
+        return 0.0
+    tail = trailing * probe.duration / frames
+    if tail > TEARDOWN_TAIL_MAX_FRACTION * probe.duration:
+        return 0.0
+    return tail
+
+
 def compose_popup_video(
     main: Path,
     popup: Path,
@@ -495,7 +585,10 @@ def compose_popup_video(
         raise ValueError("popup interval has no encoded video frames")
     if visual_ready_delay >= raw_popup_span:
         raise ValueError("visual-ready delay consumes the whole popup interval")
-    popup_duration = probe_duration(popup)
+    # One probe of the popup, shared by everything below that needs its geometry
+    # or its length — see `_probe_all` on why results are not cached globally.
+    popup_probe = _probe_all(popup)
+    popup_duration = popup_probe.duration
     encoder_startup_gap = max(0.0, raw_popup_span - popup_duration)
     # Page events precede the popup encoder's first frame. Real Chromium startup
     # can take a couple of seconds; permit that floor or 15% on longer intervals,
@@ -514,11 +607,28 @@ def compose_popup_video(
     popup_source_start = visual_ready_delay
     opened_at += visual_ready_delay
     popup_span = closed_at - opened_at
-    popup_available = popup_duration - popup_source_start
+    # The mirror image of the prime delay above: frames the recording carries at
+    # the *end* that no longer match the crop (see ``detect_teardown_tail``).
+    # Dropped from the source and paid back below by cloning the last good frame,
+    # so the composite keeps its length and simply holds the popup a moment
+    # longer instead of showing it shrink into the filler.
+    normalised_crop = _normalise_popup_crop(popup_crop, popup_probe.size)
+    teardown_tail = (
+        detect_teardown_tail(popup, normalised_crop, probe=popup_probe)
+        if normalised_crop is not None
+        else 0.0
+    )
+    popup_recorded = popup_duration - popup_source_start
+    popup_available = popup_recorded - teardown_tail
     if popup_span <= 0 or popup_available <= 0:
         raise ValueError("popup has no verified encoded video frames")
-    startup_gap = max(0.0, popup_span - popup_available)
+    # The startup gap stays measured against what the recording actually holds:
+    # it describes frames that were never encoded, and is paid at the *start* by
+    # cloning forward. The teardown tail is the opposite — frames that exist but
+    # must not be shown — so it is paid at the *end*, cloning the last good frame.
+    startup_gap = max(0.0, popup_span - popup_recorded)
     popup_cut_duration = min(popup_span, popup_available)
+    tail_gap = max(0.0, popup_span - startup_gap - popup_cut_duration)
 
     has_pre = opened_at > tolerance
     has_tail = main_duration - closed_at > tolerance
@@ -534,6 +644,8 @@ def compose_popup_video(
     )
     if startup_gap > tolerance:
         popup_filter += f",tpad=start_mode=clone:start_duration={startup_gap:.6f}"
+    if tail_gap > tolerance:
+        popup_filter += f",tpad=stop_mode=clone:stop_duration={tail_gap:.6f}"
     popup_filter += (
         f",trim=duration={popup_span:.6f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[popup_cut]"
     )
@@ -542,7 +654,7 @@ def compose_popup_video(
 
     if mode == "float":
         _compose_floating(
-            popup_crop=_normalise_popup_crop(popup_crop, _probe_all(popup).size),
+            popup_crop=normalised_crop,
             main=main,
             popup=popup,
             out=out,
@@ -1006,6 +1118,43 @@ def mux(video: Path, audio: Path, out: Path) -> None:
     )
 
 
+@dataclass(frozen=True)
+class FadeSpec:
+    """A fade from/to a flat colour at the two ends of the finished film.
+
+    Durations are seconds and either may be zero. ``audio`` fades every narration
+    bed in step with the picture, which is almost always what a fade to black
+    wants — see :class:`~guidebot_recorder.models.config.FadeConfig`.
+    """
+
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    color: str = "black"
+    audio: bool = True
+
+    def is_noop(self) -> bool:
+        return self.fade_in <= 0 and self.fade_out <= 0
+
+
+def _fade_filters(fade: FadeSpec, duration: float) -> tuple[str, str | None]:
+    """Build the ``(video, audio)`` filter chains for *fade* over *duration*.
+
+    The out-fade is anchored to the film's end here rather than by the caller, so
+    it lands correctly whatever the composite turned out to be. The audio chain
+    is ``None`` when the fade is picture-only.
+    """
+    video_parts: list[str] = []
+    audio_parts: list[str] = []
+    if fade.fade_in > 0:
+        video_parts.append(f"fade=t=in:st=0:d={fade.fade_in:.6f}:c={fade.color}")
+        audio_parts.append(f"afade=t=in:st=0:d={fade.fade_in:.6f}")
+    if fade.fade_out > 0:
+        start = max(0.0, duration - fade.fade_out)
+        video_parts.append(f"fade=t=out:st={start:.6f}:d={fade.fade_out:.6f}:c={fade.color}")
+        audio_parts.append(f"afade=t=out:st={start:.6f}:d={fade.fade_out:.6f}")
+    return ",".join(video_parts), (",".join(audio_parts) if fade.audio and audio_parts else None)
+
+
 def mux_audio_tracks(
     video: Path,
     tracks: list[MuxAudioTrack],
@@ -1013,6 +1162,7 @@ def mux_audio_tracks(
     *,
     preencoded: bool = False,
     video_duration: float | None = None,
+    fade: FadeSpec | None = None,
 ) -> None:
     """Attach one or more language-tagged audio tracks to a single MP4 video.
 
@@ -1023,6 +1173,10 @@ def mux_audio_tracks(
     compositor path); otherwise Playwright's WebM picture is encoded to H.264.
     Callers that just probed an immutable staged video may pass ``video_duration``
     to avoid launching ffprobe for the same artifact again.
+
+    ``fade`` ramps the picture (and, unless opted out, every audio bed) at both
+    ends. A filter cannot be applied to a copied stream, so requesting one forces
+    the encode even on the ``preencoded`` path — the reason fades are opt-in.
     """
 
     video, out = Path(video), Path(out)
@@ -1066,7 +1220,22 @@ def mux_audio_tracks(
     cmd += ["-map", "0:v:0"]
     for input_index in range(1, len(tracks) + 1):
         cmd += ["-map", f"{input_index}:a:0"]
-    if preencoded:
+    fade_active = fade is not None and not fade.is_noop()
+    if fade_active:
+        assert fade is not None
+        if fade.fade_in + fade.fade_out > video_duration:
+            raise ValueError(
+                f"fade ({fade.fade_in} + {fade.fade_out}) is longer than the film "
+                f"({video_duration})"
+            )
+        video_chain, audio_chain = _fade_filters(fade, video_duration)
+        # A filtered stream cannot also be copied, so `preencoded` is overridden
+        # rather than silently dropping the fade the scenario asked for.
+        cmd += ["-vf", video_chain, "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+        if audio_chain is not None:
+            for stream_index in range(len(tracks)):
+                cmd += [f"-filter:a:{stream_index}", audio_chain]
+    elif preencoded:
         cmd += ["-c:v", "copy"]
     else:
         cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
