@@ -15,13 +15,14 @@ from guidebot_recorder.guide.annotate import annotations_for
 from guidebot_recorder.guide.model import GuidePage, page_text
 from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
-from guidebot_recorder.models.scenario import FlatStep, WaitUntil
+from guidebot_recorder.models.scenario import FlatStep, WaitUntil, select_mode
 
 # Imported as a bare name (not `from ... import _debug`) so it becomes an attribute
 # of this module and tests can monkeypatch it, like `reuse_failure` below.
 from guidebot_recorder.recorder._debug import pause_for_inspection
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError, SelectReveal
 from guidebot_recorder.resolver.validate import reuse_failure
+from guidebot_recorder.selects import Selects, SelectsNotReadyError
 
 #: User-facing (Polish) sentence for each reason a cached action can no longer
 #: be reused. The `compile --force` hint is baked into the two identity
@@ -72,6 +73,37 @@ async def _screenshot(page: Page, shots_dir: Path, index: int) -> tuple[Path, tu
     return path, (size["width"], size["height"])
 
 
+class _OpenListFrame:
+    """The `select:` step's screenshot, taken while its option list is unfurled.
+
+    `select:` is the one action whose frame belongs *inside* the interaction
+    rather than before or after it. `click`/`hover` are photographed before the
+    action and `type` after the fill, but a dropdown that is worth documenting is
+    only itself for one instant: list open, option row under the cursor, nothing
+    chosen yet. A frame taken after the choice shows a collapsed control that has
+    silently changed value — which is the complaint this whole capture exists to
+    answer.
+
+    `Recorder.select` awaits this at exactly that instant, on every class of
+    control, so everything the PDF page needs is read here: none of it survives
+    the click, and the box the cursor approach measured beforehand is by then the
+    *collapsed* control's, which for a page-enhanced select was never even on
+    screen.
+    """
+
+    def __init__(self, page: Page, shots_dir: Path, index: int) -> None:
+        self._page = page
+        self._shots_dir = shots_dir
+        self._index = index
+        self.shot: Path | None = None
+        self.size: tuple[int, int] | None = None
+        self.reveal: SelectReveal | None = None
+
+    async def __call__(self, reveal: SelectReveal) -> None:
+        self.reveal = reveal
+        self.shot, self.size = await _screenshot(self._page, self._shots_dir, self._index)
+
+
 async def capture_pages(
     scenario,
     compiled,
@@ -83,7 +115,18 @@ async def capture_pages(
     verbose: bool = False,
     pause_on_error: bool = False,
     sensitive_values: Iterable[str] = (),
+    selects: Selects | None = None,
 ) -> list[GuidePage]:
+    """Replay the compiled scenario, keeping one annotated frame per step.
+
+    ``selects`` is the DOM select shim's controller for this browser context, or
+    ``None`` under ``config.selects.mode: native`` (where no widget is injected)
+    — the guide's half of the readiness barrier compile and render also take. It
+    is awaited once per navigation rather than once per step: unlike those two,
+    the guide resolves nothing, so the only instant at which the shimmed DOM has
+    to exist is "after the document that will be photographed has loaded".
+    """
+
     flat = scenario.flat_steps()
     actions = compiled.actions
     pages: list[GuidePage] = []
@@ -147,6 +190,17 @@ async def capture_pages(
             if kind == "navigate":
                 url = scenario_resolve_url(scenario, step.navigate_url())
                 await recorder.navigate(url)
+                if selects is not None:
+                    # Readiness barrier: everything after this point either
+                    # photographs the document or drives a `<select>` in it, and
+                    # both must see the shimmed DOM compile resolved against.
+                    try:
+                        await selects.wait_ready(recorder.frame)
+                    except SelectsNotReadyError as exc:
+                        # A wedged widget stops the run before its step begins,
+                        # so without the banner it would be the one failure to
+                        # reach the author with no file, line or YAML fragment.
+                        raise GuideError(banner(fs, index, str(exc))) from exc
                 shot, size = await _screenshot(page, shots_dir, index)
                 pages.append(
                     GuidePage(
@@ -229,6 +283,26 @@ async def capture_pages(
             if not step.optional and act != "waitFor":
                 reason = await reuse_failure(recorder.frame, action)
                 if reason is not None:
+                    if reason == "not_visible" and act == "select" and step.select is not None:
+                        # `not_visible` is a sentence shared with click/hover/type,
+                        # but for a `select` it has exactly one cause:
+                        # `validate_compile_time`'s select arm reaches it only
+                        # through `user_visible_control() is None`, i.e. the page
+                        # hid the control and nothing visible stands in for it.
+                        # The recorder already words that situation for the
+                        # render; asking it here is what keeps the guide from
+                        # growing a second, vaguer wording of its own.
+                        raise GuideError(
+                            banner(
+                                fs,
+                                index,
+                                str(
+                                    await recorder.diagnose_select(
+                                        action.target, step.select.option
+                                    )
+                                ),
+                            )
+                        )
                     raise GuideError(banner(fs, index, _REUSE_REASON_PL.get(reason, reason)))
             try:
                 res = await recorder.point(action.target, ripple=False)
@@ -238,6 +312,13 @@ async def capture_pages(
                         tqdm.write(banner(fs, index, "pomijam: cel nieobecny"))
                     continue
                 raise
+            # Where this step's marks go. For every action but `select` that is
+            # the control the cursor just approached; `select` re-derives it from
+            # the open list, because by the time its frame is taken `res.box` is
+            # the *collapsed* control's and stale.
+            center, box = res.center, res.box
+            row_box: dict | None = None
+            row_center: tuple[float, float] | None = None
             if act == "type":
                 text = (step.enter_text.text if step.enter_text else None) or action.input_text
                 if text is None:
@@ -256,8 +337,30 @@ async def capture_pages(
                             "— uruchom `compile --force`",
                         )
                     )
-                await res.locator.select_option(label=step.select.option)
-                shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
+                frame = _OpenListFrame(page, shots_dir, index)
+                try:
+                    # `ripple=False` for the same reason `point` above uses it:
+                    # a still capture wants a clean frame, not a click ring
+                    # frozen mid-animation.
+                    await recorder.select(
+                        action.target,
+                        step.select.option,
+                        native=select_mode(step, scenario.config) == "native",
+                        ripple=False,
+                        on_revealed=frame,
+                    )
+                except (SelectDriveError, SelectsNotReadyError) as exc:
+                    # No silent fallback to `select_option`: it would restore
+                    # exactly the invisible value change this capture exists to
+                    # remove, and the PDF would look fine while being useless.
+                    raise GuideError(banner(fs, index, str(exc))) from exc
+                if frame.shot is None or frame.size is None or frame.reveal is None:
+                    raise GuideError(
+                        banner(fs, index, "krok `select` nie oddał kadru z rozwiniętą listą")
+                    )
+                shot, size = frame.shot, frame.size
+                center, box = frame.reveal.control_center, frame.reveal.control_box
+                row_box, row_center = frame.reveal.row_box, frame.reveal.row_center
             else:
                 shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
                 if act == "hover":
@@ -272,12 +375,19 @@ async def capture_pages(
                     text=page_text(step),
                     heading=None,
                     annotations=annotations_for(
-                        act, prev_cursor=prev_cursor, center=res.center, box=res.box
+                        act,
+                        prev_cursor=prev_cursor,
+                        center=center,
+                        box=box,
+                        row_box=row_box,
+                        row_center=row_center,
                     ),
                     screenshot_size=size,
                 )
             )
-            prev_cursor = res.center
+            # The next step's arrow starts where this one left the reader's eye —
+            # on the option row, when a list was opened.
+            prev_cursor = row_center if row_center is not None else center
         except Exception as exc:
             if pause_on_error:
                 await pause_for_inspection(

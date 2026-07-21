@@ -9,7 +9,7 @@ The overlay is optional — the `compile` phase needs no animation, so it can us
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import NamedTuple
 
 from playwright.async_api import ElementHandle, Frame, Locator, Page
@@ -219,6 +219,40 @@ class PointResult(NamedTuple):
     center: tuple[float, float] | None
 
 
+class SelectReveal(NamedTuple):
+    """Where a ``select:`` step's marks belong, at the instant before the choice.
+
+    ``control_*`` is the control the viewer points at: the ``<select>`` itself
+    when the shim owns it, the page's own widget when the page took it over, the
+    listbox when it draws its own rows. ``row_*`` is the option row that is about
+    to be clicked.
+
+    ``row_*`` is ``None`` exactly when nothing was unfurled — ``mode: native``,
+    where the option list is an OS popup no screenshot can hold, or a compile run
+    with no overlay at all. A consumer reads that as "there is no row to mark".
+
+    Boxes are Playwright bounding boxes in viewport pixels — the same units
+    :meth:`Recorder.point` already hands the PDF guide.
+    """
+
+    control_box: dict | None
+    control_center: tuple[float, float] | None
+    row_box: dict | None = None
+    row_center: tuple[float, float] | None = None
+
+
+#: Awaited by :meth:`Recorder.select` while the option list is open.
+RevealHook = Callable[[SelectReveal], Awaitable[None]]
+
+
+def _center_of(box: dict | None) -> tuple[float, float] | None:
+    """Centre of a Playwright bounding box, or ``None`` when there is no box."""
+
+    if box is None:
+        return None
+    return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+
 class Recorder:
     def __init__(
         self,
@@ -291,10 +325,9 @@ class Recorder:
         rippled = False
         if self.overlay is not None:
             box = await control.bounding_box()
-            if box is not None:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                center = (cx, cy)
+            center = _center_of(box)
+            if center is not None:
+                cx, cy = center
                 await self.overlay.move_to(self.page, cx, cy)
                 if ripple:
                     await self.overlay.ripple(self.page, flash=click_sound)
@@ -377,7 +410,15 @@ class Recorder:
         if needs_fix:
             await locator.fill(text)
 
-    async def select(self, target: Target, option: str, *, native: bool = False) -> None:
+    async def select(
+        self,
+        target: Target,
+        option: str,
+        *,
+        native: bool = False,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """Choose ``option`` (a visible label) from a ``<select>``, on camera.
 
         A native select draws its option list as an OS popup, which the
@@ -408,6 +449,16 @@ class Recorder:
                 that one control back to the browser (see :data:`_PIN_NATIVE_JS`)
                 — otherwise the cursor would be landing on a widget the hatch
                 just opted out of.
+            ripple: draw the click ring (and its flash) when the cursor lands.
+                The PDF guide turns it off: a still capture wants a clean frame,
+                and the ring would be frozen mid-animation in it.
+            on_revealed: awaited **exactly once, immediately before the click (or
+                ``select_option``) that commits the choice**, on every path. That
+                instant is the only one at which the list is open, the cursor is
+                on the option row and nothing has been chosen yet — which is
+                precisely the frame the PDF guide has to keep. It is handed a
+                :class:`SelectReveal`; a hook that raises aborts the step with
+                the choice not made.
 
         Without an overlay (compile) the value is set directly and nothing is
         animated — compilation is meant to be fast, not pretty — but an enhanced
@@ -437,6 +488,7 @@ class Recorder:
             # makes spec §6's validation relaxation usable: without it a hidden
             # select would validate and then fail to compile.
             visible = await locator.is_visible()
+            await self._reveal(on_revealed, SelectReveal(None, None))
             await locator.select_option(label=option, force=not visible)
             return
         if native:
@@ -445,8 +497,11 @@ class Recorder:
             # must be gone before this control is on camera, or the ripple would
             # land on a widget that vanishes out from under it.
             await self._pin_native(locator)
-            await self._approach(locator, click_sound=True)
+            box, center = await self._approach(locator, ripple=ripple, click_sound=True)
             visible = await locator.is_visible()
+            # No row geometry: `native` never unfurls anything, so a still
+            # capture can only show the collapsed control.
+            await self._reveal(on_revealed, SelectReveal(box, center))
             await locator.select_option(label=option, force=not visible)
             return
         locator = await build_locator(self.frame, target)
@@ -456,9 +511,18 @@ class Recorder:
         # own single-beat path rather than an association heuristic to run.
         state = await locator.evaluate(_SHIM_STATE_JS)
         if state["listbox"]:
-            await self._select_in_listbox(locator, option)
+            await self._select_in_listbox(locator, option, ripple=ripple, on_revealed=on_revealed)
             return
-        await self._select_in_two_beats(locator, state, option)
+        await self._select_in_two_beats(
+            locator, state, option, ripple=ripple, on_revealed=on_revealed
+        )
+
+    @staticmethod
+    async def _reveal(hook: RevealHook | None, reveal: SelectReveal) -> None:
+        """Hand the caller the open list's geometry, before anything is chosen."""
+
+        if hook is not None:
+            await hook(reveal)
 
     async def _await_selects_ready(self) -> None:
         """Wait for this frame's first classification pass — but not forever.
@@ -533,7 +597,9 @@ class Recorder:
         clicked an unrelated sibling on camera and then blamed the option.
         """
 
-        tail = f'nie da się pokazać na filmie wyboru opcji „{option}"'
+        # Medium-neutral wording: the PDF guide raises these too, and a message
+        # about "the film" reaches an author who asked for a document.
+        tail = f'nie da się pokazać rozwiniętej listy z opcją „{option}"'
         described = await self._describe(locator)
         if state["hidden"]:
             return SelectDriveError(
@@ -559,6 +625,28 @@ class Recorder:
             f"a listę natywnego selecta rysuje system operacyjny; {tail} "
             f"(użyj `mode: native`, jeśli sam wybór wystarczy)"
         )
+
+    async def diagnose_select(self, target: Target, option: str) -> SelectDriveError:
+        """Why this ``<select>`` cannot be revealed, phrased for the author.
+
+        The public face of :meth:`_no_control_error`, for a caller that has
+        already learned *that* a select is undrivable from somewhere else and now
+        wants the situation named. The PDF guide's preflight is that caller: its
+        reuse check answers ``not_visible``, which for a ``select`` action has
+        exactly one cause — ``validate_compile_time``'s select arm reaches it
+        only through ``user_visible_control() is None`` — but says so in a
+        sentence shared with ``click``, ``hover`` and ``type``. Rather than
+        write a second wording for the guide, it asks here and raises what the
+        render would have raised.
+
+        Returns the error rather than raising it so the caller can wrap it in
+        its own step banner (`plik:linia` plus the YAML fragment) without having
+        to catch what it just constructed.
+        """
+
+        locator = await build_locator(self.frame, target)
+        state = await locator.evaluate(_SHIM_STATE_JS)
+        return await self._no_control_error(locator, option, state)
 
     async def _no_option_error(self, locator: Locator, option: str) -> SelectDriveError:
         return SelectDriveError(
@@ -673,7 +761,40 @@ class Recorder:
             return
         raise await self._no_control_error(locator, option, state)
 
-    async def _select_in_listbox(self, locator: Locator, option: str) -> None:
+    async def _commit_option(
+        self,
+        select: Locator,
+        row: Locator | ElementHandle,
+        option: str,
+        *,
+        ripple: bool,
+        on_revealed: RevealHook | None,
+        control_box: dict | None,
+        control_center: tuple[float, float] | None,
+    ) -> None:
+        """The tail all three on-camera paths share: land on the row, then choose.
+
+        Written once because the order inside it is load-bearing and the three
+        paths must not be free to disagree about it: the cursor arrives, the
+        caller gets its one look at the open list, and only then does the click
+        that closes the list and changes the value happen. Reading the select
+        back afterwards is what turns a click that landed on nothing into a
+        failure instead of a quietly wrong recording.
+        """
+
+        box, center = await self._approach(row, ripple=ripple, click_sound=True)
+        await self._reveal(on_revealed, SelectReveal(control_box, control_center, box, center))
+        await row.click()
+        await self._confirm_selected(select, option)
+
+    async def _select_in_listbox(
+        self,
+        locator: Locator,
+        option: str,
+        *,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """One visible beat for a select that renders its own in-page listbox.
 
         ``multiple`` and ``size > 1`` are the shim's documented non-goal — they
@@ -700,11 +821,28 @@ class Recorder:
                 f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
             )
         row = locator.locator("option").nth(index)
-        await self._approach(row, click_sound=True)
-        await row.click()
-        await self._confirm_selected(locator, option)
+        # The listbox *is* the control the viewer sees, so its own box is the one
+        # a still capture frames. Reading it moves no cursor and opens nothing.
+        control_box = await locator.bounding_box()
+        await self._commit_option(
+            locator,
+            row,
+            option,
+            ripple=ripple,
+            on_revealed=on_revealed,
+            control_box=control_box,
+            control_center=_center_of(control_box),
+        )
 
-    async def _select_in_two_beats(self, locator: Locator, state: dict, option: str) -> None:
+    async def _select_in_two_beats(
+        self,
+        locator: Locator,
+        state: dict,
+        option: str,
+        *,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """Open the list, then click the option — both with the cursor visible."""
 
         control: Locator | ElementHandle
@@ -727,15 +865,32 @@ class Recorder:
             # it.
             await self.frame.evaluate(_SNAPSHOT_JS)
 
-            await self._approach(control, click_sound=True)  # beat 1
+            control_box, control_center = await self._approach(  # beat 1
+                control, ripple=ripple, click_sound=True
+            )
             await control.click()
             await self.page.wait_for_timeout(self.open_hold_ms)
 
+            row: Locator | ElementHandle
             if state["shimmed"]:  # beat 2
-                await self._click_shim_option(locator, option)
+                row = await self._shim_option_row(locator, option)
             else:
-                await self._click_appeared_option(locator, option)
-            await self._confirm_selected(locator, option)
+                row = await self._appeared_option_row(locator, option)
+            try:
+                await self._commit_option(
+                    locator,
+                    row,
+                    option,
+                    ripple=ripple,
+                    on_revealed=on_revealed,
+                    control_box=control_box,
+                    control_center=control_center,
+                )
+            finally:
+                # A handle on the page-widget path; a `Locator` on the shimmed
+                # one, which owns nothing to release.
+                if isinstance(row, ElementHandle):
+                    await row.dispose()
         finally:
             # `control` is a `Locator` on the shimmed path (nothing to release)
             # and a handle on the page-widget one, which this frame owns from
@@ -754,8 +909,15 @@ class Recorder:
             raise await self._no_control_error(locator, option, state)
         return control
 
-    async def _click_shim_option(self, locator: Locator, option: str) -> None:
-        """Beat 2 for a shimmed select: click the row the shim rendered."""
+    async def _shim_option_row(self, locator: Locator, option: str) -> Locator:
+        """Beat 2 for a shimmed select: the row the shim rendered, ready to click.
+
+        Everything that has to be true *before* the cursor sets off happens here
+        — the row exists, is visible, is not ``disabled``, and the list has been
+        scrolled to it — and nothing that changes the page's state does. Handing
+        the row back rather than clicking it is what lets the PDF guide take its
+        frame in between; the click itself is :meth:`_commit_option`'s.
+        """
 
         # Read both *after* beat 1: the observer may have unshimmed and
         # reclassified the select while the list was opening (late select2
@@ -792,19 +954,18 @@ class Recorder:
         if await row.get_attribute("data-guidebot-option-disabled") is not None:
             raise SelectDriveError(
                 f'opcja „{option}" na liście {await self._describe(locator)} jest '
-                f"wyłączona (`disabled`) — nie da się jej wybrać ani na filmie, "
-                f"ani bezpośrednio"
+                f"wyłączona (`disabled`) — nie da się jej wybrać ani z rozwiniętej "
+                f"listy, ani bezpośrednio"
             )
         # Scroll the list *before* the glide: the cursor must travel to a row the
         # viewer can already see, not to one that scrolls under it on arrival.
         await locator.evaluate(
             "(el, i) => window.__guidebot_selects.scrollOptionIntoView(el, i)", index
         )
-        await self._approach(row, click_sound=True)
-        await row.click()
+        return row
 
-    async def _click_appeared_option(self, locator: Locator, option: str) -> None:
-        """Beat 2 for a page's own widget: click the row it just rendered.
+    async def _appeared_option_row(self, locator: Locator, option: str) -> ElementHandle:
+        """Beat 2 for a page's own widget: the row it just rendered.
 
         "The row it just rendered" is defined entirely by the snapshot taken
         before beat 1, so a missing snapshot is not a degraded search — it is no
@@ -816,8 +977,8 @@ class Recorder:
             raise SelectDriveError(
                 f"stan sprzed rozwinięcia listy {await self._describe(locator)} zniknął "
                 f"— dokument został podmieniony w trakcie kroku, więc nie da się odróżnić "
-                f"świeżo narysowanych opcji od reszty strony; nie da się pokazać na "
-                f'filmie wyboru opcji „{option}"'
+                f"świeżo narysowanych opcji od reszty strony; nie da się pokazać "
+                f'rozwiniętej listy z opcją „{option}"'
             )
         try:
             handle = await self.frame.wait_for_function(
@@ -829,10 +990,9 @@ class Recorder:
         if row is None:
             await handle.dispose()
             raise await self._no_option_error(locator, option)
-        # ``_approach`` scrolls the row into view on both axes, which is what
-        # scrolls an internally-scrolling widget list to it.
-        await self._approach(row, click_sound=True)
-        await row.click()
+        # ``_commit_option``'s approach scrolls the row into view on both axes,
+        # which is what scrolls an internally-scrolling widget list to it.
+        return row
 
     async def scroll(self, spec: Scroll) -> None:
         """Scroll the site — a render-only visual with no agent target.

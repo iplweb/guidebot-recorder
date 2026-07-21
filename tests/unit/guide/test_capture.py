@@ -14,8 +14,9 @@ from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Select, Step, WaitUntil, WhenBlock
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.recorder import PointResult
+from guidebot_recorder.recorder.recorder import PointResult, SelectDriveError, SelectReveal
 from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.selects import SelectsNotReadyError
 
 #: Scenariusz z pliku — jedyna droga do mapy źródła (`Scenario.source`), więc
 #: jedyna, w której bannery `guide` mogą nieść `plik:linia`.
@@ -77,7 +78,19 @@ class FakeLocator:
         self.events.append(f"select:{label}")
 
 
+#: Geometry a `FakeRecorder.select` reports for the option row it "opened".
+FAKE_ROW = {"x": 40.0, "y": 100.0, "width": 200.0, "height": 24.0}
+FAKE_ROW_CENTER = (140.0, 112.0)
+#: ...and for the control the reader is in, which the same call reports.
+FAKE_CONTROL = {"x": 30.0, "y": 60.0, "width": 220.0, "height": 21.0}
+FAKE_CONTROL_CENTER = (140.0, 70.5)
+
+
 class FakeRecorder:
+    #: The row a `select` reports to its `on_revealed` hook; `None` stands for
+    #: `mode: native`, which unfurls nothing and so has no row to mark.
+    row: dict | None = FAKE_ROW
+
     def __init__(self, events: list[str] | None = None):
         self.frame = object()
         self.events = events if events is not None else []
@@ -87,7 +100,28 @@ class FakeRecorder:
         self.readiness_calls: list[str] = []
         self.point_calls: list = []
         self.scroll_calls: list = []
+        self.select_calls: list[tuple] = []
         self.last_locator: FakeLocator | None = None
+
+    async def select(self, target, option, *, native=False, ripple=True, on_revealed=None):
+        """Stand in for the real choreography: open, let the caller look, commit.
+
+        The order is the contract the PDF guide depends on, so the fake keeps it
+        rather than just recording the call.
+        """
+
+        self.select_calls.append((target, option, native, ripple))
+        self.events.append("open")
+        if on_revealed is not None:
+            await on_revealed(
+                SelectReveal(
+                    FAKE_CONTROL,
+                    FAKE_CONTROL_CENTER,
+                    self.row,
+                    None if self.row is None else FAKE_ROW_CENTER,
+                )
+            )
+        self.events.append(f"select:{option}")
 
     async def wait_for(self, target, state, timeout):
         self.wait_for_calls.append((target, state, timeout))
@@ -287,26 +321,248 @@ async def test_gate_honors_hidden_state_and_the_gates_own_timeout(tmp_path, monk
     assert recorder.wait_for_calls == [(gate_target, "hidden", 3.0)]
 
 
-async def test_select_step_picks_option_then_screenshots(tmp_path, monkeypatch):
-    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+def _select_scenario_and_action(mode: str | None = None):
     scenario = Scenario(
-        config=_cfg(), steps=[Step(select=Select(from_="zakres", option="Zakres lat"))]
+        config=_cfg(),
+        steps=[Step(select=Select(from_="zakres", option="Zakres lat", mode=mode))],
     )
     action = CachedAction(
         action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
     )
+    return scenario, action
+
+
+async def test_select_step_is_photographed_while_its_list_is_open(tmp_path, monkeypatch):
+    """The frame lands *between* opening the list and choosing from it.
+
+    This is the whole feature. A frame taken after the choice — which is what
+    the guide used to take — shows a collapsed control that has silently changed
+    value: no list, no click target, nothing that reads as a dropdown.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _select_scenario_and_action()
     events: list[str] = []
     recorder = FakeRecorder(events)
     page = FakePage(events)
     pages = await capture_pages(
         scenario, _compiled([action]), page, recorder, tmp_path / "shots", timeout=15.0
     )
-    assert recorder.last_locator.select_calls == ["Zakres lat"]
-    # select_option happens BEFORE the screenshot: the native option list closes
-    # only after the value is chosen, so the frame must be taken afterwards.
-    assert events == ["select:Zakres lat", "screenshot"]
+    assert events == ["open", "screenshot", "select:Zakres lat"]
     assert len(pages) == 1
-    assert any(a.kind == "selected" for a in pages[0].annotations)
+    assert pages[0].screenshot is not None
+
+
+async def test_select_marks_the_option_row_and_frames_the_control(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _select_scenario_and_action()
+    pages = await capture_pages(
+        scenario,
+        _compiled([action]),
+        FakePage(),
+        FakeRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+    )
+    annotations = {a.kind: a for a in pages[0].annotations}
+    assert set(annotations) == {"selected", "click"}
+    # The rectangle is the control the reader is in — NOT the row, and not the
+    # box the cursor approach measured, which by frame time is stale.
+    rect = annotations["selected"]
+    assert (rect.x, rect.y, rect.w, rect.h) == (
+        FAKE_CONTROL["x"],
+        FAKE_CONTROL["y"],
+        FAKE_CONTROL["width"],
+        FAKE_CONTROL["height"],
+    )
+    assert (annotations["click"].cx, annotations["click"].cy) == FAKE_ROW_CENTER
+
+
+async def test_the_next_steps_arrow_starts_from_the_option_row(tmp_path, monkeypatch):
+    """The reader's eye was left on the row, so that is where the next arrow begins."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[
+            Step(select=Select(from_="zakres", option="Zakres lat")),
+            Step(click="przycisk zapisu"),
+        ],
+    )
+    select_action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    click_action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    pages = await capture_pages(
+        scenario,
+        _compiled([select_action, click_action]),
+        FakePage(),
+        FakeRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+    )
+    arrow = next(a for a in pages[1].annotations if a.kind == "arrow")
+    assert (arrow.x1, arrow.y1) == FAKE_ROW_CENTER
+
+
+async def test_native_mode_keeps_the_collapsed_frame_and_its_single_mark(tmp_path, monkeypatch):
+    """A `select` with nothing to unfurl must not become an error or grow a circle."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _select_scenario_and_action(mode="native")
+    recorder = FakeRecorder()
+    recorder.row = None
+    pages = await capture_pages(
+        scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert [call[2] for call in recorder.select_calls] == [True]  # `native=True`
+    assert {a.kind for a in pages[0].annotations} == {"selected"}
+
+
+async def test_the_still_capture_asks_for_no_click_ring(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _select_scenario_and_action()
+    recorder = FakeRecorder()
+    await capture_pages(
+        scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert [call[3] for call in recorder.select_calls] == [False]  # `ripple=False`
+
+
+async def test_an_undriveable_select_fails_with_its_own_banner(tmp_path, monkeypatch):
+    """`SelectDriveError` is a step failure, so it arrives with `plik:linia`."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _select_scenario_and_action()
+
+    class RefusingRecorder(FakeRecorder):
+        async def select(self, *_args, **_kwargs):
+            raise SelectDriveError("strona ukryła select#z i nie znaleziono kontrolki")
+
+    with pytest.raises(GuideError) as excinfo:
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            RefusingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+    assert "nie znaleziono kontrolki" in str(excinfo.value)
+    assert "krok 1/1" in str(excinfo.value)
+
+
+async def test_not_visible_on_a_select_is_answered_by_the_recorders_diagnosis(
+    tmp_path, monkeypatch
+):
+    """`cel jest niewidoczny` is shared with click/hover/type and says nothing
+    about *why* a dropdown cannot be shown. For a `select` the verdict has one
+    cause, and the recorder already words it for the render."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_reason("not_visible"))
+    scenario, action = _select_scenario_and_action()
+
+    class DiagnosingRecorder(FakeRecorder):
+        async def diagnose_select(self, target, option):
+            return SelectDriveError(
+                f'strona ukryła select#z i nie znaleziono widocznej kontrolki dla opcji „{option}"'
+            )
+
+    with pytest.raises(GuideError) as excinfo:
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            DiagnosingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+    message = str(excinfo.value)
+    assert "nie znaleziono widocznej kontrolki" in message
+    assert "Zakres lat" in message
+    assert "cel jest niewidoczny" not in message
+
+
+async def test_a_non_select_reuse_failure_keeps_the_shared_wording(tmp_path, monkeypatch):
+    """The diagnosis is scoped to `select`; a hidden button still reads as before."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_reason("not_visible"))
+    scenario, action = _click_scenario_and_action()
+    with pytest.raises(GuideError, match="cel jest niewidoczny"):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            FakeRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+
+
+class FakeSelects:
+    """Stand-in for the shim controller: records the frames it was asked about."""
+
+    def __init__(self, error: Exception | None = None):
+        self.waited: list = []
+        self._error = error
+
+    async def wait_ready(self, frame):
+        self.waited.append(frame)
+        if self._error is not None:
+            raise self._error
+
+
+async def test_the_readiness_barrier_is_taken_after_navigation(tmp_path):
+    """Everything downstream either photographs the document or drives a select
+    in it, and both must see the shimmed DOM compile resolved against."""
+
+    scenario = Scenario(config=_cfg(), steps=[Step(navigate="/panel")])
+    recorder = FakeRecorder()
+    selects = FakeSelects()
+    await capture_pages(
+        scenario,
+        _compiled([None]),
+        FakePage(),
+        recorder,
+        tmp_path / "shots",
+        timeout=15.0,
+        selects=selects,
+    )
+    assert selects.waited == [recorder.frame]
+
+
+async def test_a_wedged_widget_stops_the_run_with_a_located_banner(tmp_path):
+    scenario = Scenario(config=_cfg(), steps=[Step(navigate="/panel")])
+    selects = FakeSelects(SelectsNotReadyError("widget select nie zgłosił gotowości"))
+    with pytest.raises(GuideError) as excinfo:
+        await capture_pages(
+            scenario,
+            _compiled([None]),
+            FakePage(),
+            FakeRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            selects=selects,
+        )
+    assert "nie zgłosił gotowości" in str(excinfo.value)
+    assert "krok 1/1" in str(excinfo.value)
+
+
+async def test_native_mode_installs_no_controller_and_waits_for_nothing(tmp_path, monkeypatch):
+    """`selects=None` is `config.selects.mode: native`: there is no widget to wait on."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(config=_cfg(), steps=[Step(navigate="/panel")])
+    await capture_pages(
+        scenario,
+        _compiled([None]),
+        FakePage(),
+        FakeRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+    )  # no `selects=`: must not raise
 
 
 class _Boom(RuntimeError):

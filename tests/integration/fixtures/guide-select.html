@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Przewodnik z listą rozwijaną</title>
+    <style>
+      html, body { margin: 0; background: rgb(245, 246, 250); }
+      body { font: 15px/1.4 sans-serif; color: #111; }
+      section { padding: 10px 16px; }
+      label { display: block; font-weight: bold; margin-bottom: 3px; }
+      select { font: inherit; width: 220px; }
+
+      /* A large, flat block of one saturated colour directly under the raw
+         <select>. Everything the shim's option list draws over it — its white
+         surface, its border, its row text — is a colour this block is not, so a
+         screenshot can be asked whether the list was really in frame without
+         needing to know a single thing about how the list is styled. */
+      #backdrop { height: 300px; background: rgb(0, 153, 102); }
+
+      /* The Tom Select pattern: the original <select> keeps its place in the
+         document and is hidden with display:none, and the widget standing in
+         for it follows immediately. */
+      .hidden-original { display: none; }
+      .widget {
+        width: 220px;
+        box-sizing: border-box;
+        border: 1px solid #777;
+        background: #fff;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .widget-list {
+        position: fixed;
+        z-index: 900;
+        width: 220px;
+        box-sizing: border-box;
+        border: 1px solid #777;
+        background: #fff;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      }
+      .widget-list > div { padding: 4px 8px; }
+    </style>
+  </head>
+  <body>
+    <!-- 1. A raw <select>: nothing on the page enhanced it, so the shim owns it. -->
+    <section>
+      <label for="format">Format raportu</label>
+      <select id="format" data-testid="format">
+        <option>lista</option>
+        <option>tabela</option>
+        <option>BibTeX</option>
+      </select>
+    </section>
+
+    <div id="backdrop"></div>
+
+    <!-- 2. A page-enhanced select: the original is display:none, so the guide's
+         old `select_option` against it timed out on its actionability wait. -->
+    <section>
+      <label for="miasto">Miasto</label>
+      <select id="miasto" data-testid="miasto" class="tomselected hidden-original">
+        <option>Gdańsk</option>
+        <option>Lublin</option>
+        <option>Poznań</option>
+      </select>
+      <div class="widget" id="miasto-widget" data-testid="miasto-widget">Gdańsk</div>
+    </section>
+
+    <script>
+      // The pattern select2 / Tom Select / Chosen share: the list is built on
+      // click and appended to <body>, each row carries exactly the option label
+      // as its text, and choosing a row writes the value back to the original
+      // <select> and fires `change`.
+      (function wireWidget() {
+        const select = document.getElementById('miasto');
+        const widget = document.getElementById('miasto-widget');
+        let list = null;
+
+        const close = () => {
+          if (list !== null) {
+            list.remove();
+            list = null;
+          }
+        };
+
+        widget.addEventListener('click', () => {
+          if (list !== null) {
+            close();
+            return;
+          }
+          const rect = widget.getBoundingClientRect();
+          list = document.createElement('div');
+          list.className = 'widget-list';
+          list.setAttribute('data-fake-list', 'miasto');
+          list.style.top = rect.bottom + 'px';
+          list.style.left = rect.left + 'px';
+          for (const option of select.options) {
+            const row = document.createElement('div');
+            row.setAttribute('data-fake-option', '');
+            row.textContent = option.textContent;
+            row.addEventListener('click', () => {
+              select.value = option.value;
+              widget.textContent = option.textContent;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              close();
+            });
+            list.appendChild(row);
+          }
+          document.body.appendChild(list);
+        });
+      })();
+    </script>
+  </body>
+</html>
