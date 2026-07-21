@@ -1,8 +1,9 @@
 # Building step-by-step PDF guides
 
 Guidebot can render a compiled scenario as a landscape PDF guide — one annotated step per page,
-side-by-side with narration text. Each guide page freezes the frame at the moment an interactive
-step completes and overlays it with visual annotations of the cursor movement, click target, and text input.
+side-by-side with narration text. Each guide page freezes the frame at the moment that best explains
+its step — for most actions the moment the step completes, for a `select` the moment its option list
+is open — and overlays it with visual annotations of the cursor movement, click target, and text input.
 
 This feature is LLM-free and requires no additional dependencies beyond the compiled sidecar.
 
@@ -28,6 +29,8 @@ A guide requires a successful prior `compile` step. It produces no LLM calls, TT
 A single PDF guide contains one or more pages:
 
 - **Interactive step (click, hover, type)** — Full-width annotated screenshot (left), narration text (right).
+- **Dropdown step (`select`)** — The same layout, but the frame is taken **while the option list is
+  open**. See [Dropdowns](#dropdowns-select).
 - **Navigation** — Page with text "Otwórz adres:" followed by the URL (`navigate` steps).
 - **Section divider** — A card-style slide inserted as a visual break (`slide` steps).
 - **Wait/when gates** — No page. Conditional waits and background polling produce no output.
@@ -40,6 +43,30 @@ Screenshots are overlaid with visual markers:
 - **Red circle** — Mouse click target.
 - **Red frame** — Text entered into a field (from `enterText` or literal `teach` typing).
 - **Glow** (soft halo) — Hover state on an element.
+
+## Dropdowns (`select`)
+
+A `select` page is photographed **mid-interaction**: the option list is unfurled, and the option the
+step chooses is circled the way a `click` step's target is. Three marks appear together:
+
+- a **red circle** on the option row — the thing the reader is being told to click;
+- a **red frame** around the control itself, so the reader can see which field they are in;
+- the **arrow** ending on the option row rather than on the control.
+
+The next step's arrow starts from that row, where the reader's eye was left.
+
+This works because Guidebot injects a DOM replacement for the native option list (the same one that
+makes dropdowns visible in `render` videos) — a native `<select>`'s list is drawn by the operating
+system and no browser-automation tool can screenshot it. Pages that enhance their own selects
+(select2, Tom Select, Chosen) already draw a DOM list, and the guide drives that one instead.
+
+`config.selects.mode: native`, or `mode: native` on a single step, opts out: the cursor still travels
+to the control and the value is still chosen, but the frame shows the collapsed control and the page
+carries only the red frame — there is no list to reveal. Use it for a widget the guide cannot drive;
+the error message says so and names the option it was trying to choose.
+
+Both settings are documented in the
+[scenario reference](scenario-reference.md).
 
 ## Narration text: `say`, `teach`, or `caption`
 
@@ -91,10 +118,6 @@ The current guide feature has the following scope:
 - **No numbered multi-step grouping** — Steps are rendered individually. Future versions may allow
   multi-step sequences to be visually grouped or numbered (e.g. "Step 1 of 5").
 - **No PDF layout customization** — Margins, fonts, colors, and page dimensions are fixed.
-- **`select` shows no expanded dropdown** — A `select` step actually chooses the option, and the
-  PDF page shows the screenshot taken **after** the choice. The native `<select>` option list is
-  drawn by the operating system, so no browser-automation tool can capture it — the guide shows
-  the collapsed control with its new value, never the open list.
 - **`scroll` only produces its own page with text** — A `scroll` step always actually scrolls the
   page (screenshots are taken from the visible viewport, so scrolling is required for later steps
   to show the right part of the page), but it only creates its own PDF page when it also carries

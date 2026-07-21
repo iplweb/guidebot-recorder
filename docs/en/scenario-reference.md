@@ -638,9 +638,11 @@ the choice visible anyway, Guidebot injects a DOM shim (`config.selects`, descri
 below) that replaces the raw control with an overlay whose list genuinely opens
 downward in the page. During `render` the cursor glides to the control and clicks
 it, the list unfurls, the cursor glides to the chosen row, and clicks it — two
-visible beats instead of an invisible value change. During `compile` the value is
-set directly with no animation, since compilation is meant to be fast, not pretty.
-Either way the element ends on `option`, so later steps and the render agree.
+visible beats instead of an invisible value change. `guide` drives the same two
+beats and takes its PDF frame **between** them — list open, option row circled — so
+a printed guide shows the dropdown the way the video does. During `compile` the
+value is set directly with no animation, since compilation is meant to be fast, not
+pretty. Either way the element ends on `option`, so later steps and the render agree.
 
 **Widgets the page has already enhanced are deliberately left alone.** If the
 target application replaces its `<select>` with its own dropdown — select2, Tom

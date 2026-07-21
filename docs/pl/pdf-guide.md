@@ -1,8 +1,9 @@
 # Tworzenie przewodników PDF krok po kroku
 
 Guidebot potrafi wyrenderować skompilowany scenariusz jako krajobrazowy przewodnik PDF — jeden
-anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża kadr w momencie
-zakończenia interaktywnego kroku i nakłada na niego adnotacje: ruchy kursora, cel kliknięcia
+anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża ten kadr, który
+najlepiej tłumaczy dany krok — dla większości akcji moment jej zakończenia, dla `select` moment,
+w którym lista opcji jest rozwinięta — i nakłada na niego adnotacje: ruchy kursora, cel kliknięcia
 i wpisany tekst.
 
 Ta funkcja nie wymaga LLM ani dodatkowych zależności poza skompilowanym sidecarem.
@@ -30,6 +31,8 @@ TTS ani wideo.
 Jeden przewodnik PDF zawiera jedną lub więcej stron:
 
 - **Interaktywny krok (click, hover, type)** — Anotowany zrzut ekranu (lewo), tekst narracji (prawo).
+- **Krok z listą rozwijaną (`select`)** — Ten sam układ, ale kadr jest robiony **przy rozwiniętej
+  liście opcji**. Patrz [Listy rozwijane](#listy-rozwijane-select).
 - **Nawigacja** — Strona z tekstem „Otwórz adres:" i adresem URL (kroki `navigate`).
 - **Plansza podziału** — Karta w stylu slajdu wstawiona jako przerwa wizualna (kroki `slide`).
 - **Bramy wait/when** — Bez strony. Warunkowe czekania i tło nie produkują wyjścia.
@@ -42,6 +45,32 @@ Zrzuty ekranu są nakładane adnotacjami:
 - **Czerwone koło** — Cel kliknięcia myszy.
 - **Czerwona ramka** — Tekst wpisany do pola (z `enterText` lub literalnym `teach` pisaniem).
 - **Glow** (miękki halo) — Stan hover na elemencie.
+
+## Listy rozwijane (`select`)
+
+Strona kroku `select` jest fotografowana **w trakcie interakcji**: lista opcji jest rozwinięta,
+a opcja, którą krok wybiera, jest zakreślona tak samo jak cel kroku `click`. Na jednej stronie
+pojawiają się trzy znaki:
+
+- **czerwone koło** na wierszu opcji — to, co czytelnik ma kliknąć;
+- **czerwona ramka** wokół samej kontrolki, żeby było widać, w którym polu jesteśmy;
+- **strzałka** kończąca się na wierszu opcji, a nie na kontrolce.
+
+Strzałka kolejnego kroku zaczyna się od tego wiersza — tam, gdzie zostało oko czytelnika.
+
+Działa to dlatego, że Guidebot wstrzykuje nakładkę DOM zastępującą natywną listę opcji (tę samą,
+która pokazuje listy rozwijane na filmach z `render`) — listę natywnego `<select>` rysuje system
+operacyjny i żadne narzędzie do automatyzacji przeglądarki nie potrafi jej zrzucić. Strony, które
+ulepszają swoje selecty same (select2, Tom Select, Chosen), mają już listę w DOM i przewodnik
+steruje właśnie nią.
+
+`config.selects.mode: native`, albo `mode: native` na pojedynczym kroku, wyłącza nakładkę: kursor
+nadal dojeżdża do kontrolki, wartość nadal zostaje wybrana, ale kadr pokazuje zwiniętą kontrolkę,
+a strona niesie tylko czerwoną ramkę — nie ma czego rozwijać. Użyj tego dla widżetu, którego
+przewodnik nie potrafi obsłużyć; komunikat błędu mówi wprost, o którą sytuację chodzi, i podaje
+nazwę szukanej opcji.
+
+Obie opcje są opisane w [referencji scenariusza](scenario-reference.md).
 
 ## Tekst narracji: `say`, `teach` lub `caption`
 
@@ -94,10 +123,6 @@ Funkcja przewodnika ma następujący zakres:
 - **Brak grupowania wieloetapowego** — Kroki są renderowane indywidualnie. Przyszłe wersje mogą
   pozwolić na wizualne grupowanie sekwencji kroków lub numerowanie (np. „Krok 1 z 5").
 - **Brak dostosowania layoutu PDF** — Marginesy, czcionki, kolory i wymiary strony są ustalone.
-- **`select` bez podglądu rozwiniętej listy** — Krok `select` faktycznie wybiera opcję, a strona
-  PDF pokazuje zrzut zrobiony **po** wyborze. Natywna lista opcji `<select>` jest rysowana przez
-  system operacyjny, więc żadne narzędzie do automatyzacji przeglądarki nie potrafi jej zrzucić —
-  przewodnik pokazuje zwiniętą kontrolkę z już ustawioną wartością, nigdy rozwiniętą listę.
 - **`scroll` własną stronę produkuje tylko z tekstem** — Krok `scroll` zawsze faktycznie przewija
   stronę (zrzuty są robione z widocznego obszaru viewportu, więc przewinięcie jest konieczne, by
   kolejne kroki pokazywały właściwy fragment), ale własną stronę PDF tworzy tylko wtedy, gdy niesie

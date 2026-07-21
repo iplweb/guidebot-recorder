@@ -79,10 +79,13 @@ context that drives a page through compile or render:
 | `compile.py:230` | `run_compile_in_browser` | compile must see the same DOM as render |
 | `render.py:1977` | render context | the feature itself |
 | `session.py:248` | `replay_setup` | it calls `run_compile` (`session.py:255`) to replay the setup scenario; a setup scenario containing `select:` must behave identically |
+| `guide/guide.py` | `run_guide` | added by `2026-07-21-guide-select-reveal-design.md`. The PDF guide replays a compiled scenario and photographs it, so it drives pages exactly as render does; without the shim it was the one phase resolving frozen targets against a *different* DOM than compile froze, and its `select:` page showed a collapsed control that had silently changed value |
 
 Deliberately **not** installed at `session.py:304` (`check_logged_in`, a headless
 health probe that drives no steps) nor `session.py:487` (`_manual_finish`, where
-a human uses the browser and must get the real controls).
+a human uses the browser and must get the real controls). Both omissions are
+about *not driving scenario steps*; every phase that does drive them installs the
+widget.
 
 Installation lives in one helper (`selects.install_context(context, cfg)`) so
 the three call sites cannot drift apart.
@@ -189,7 +192,10 @@ a normal reasoner candidate.
 (resolved after the first classification pass). Compile and render await it
 before resolving or driving a select step, so no step can race the `settle_ms`
 debounce — otherwise compile could resolve at t=0.8 s against an unshimmed page
-while render drives at t=5 s against a shimmed one.
+while render drives at t=5 s against a shimmed one. The PDF guide awaits it once
+per navigation instead of once per step: it resolves nothing (every target is
+already frozen), so the only instant at which the shimmed DOM has to exist is
+after the document it will photograph has loaded.
 
 ### 4. Choreography — two beats instead of arrow keys
 
