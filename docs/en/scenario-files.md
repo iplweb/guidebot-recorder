@@ -247,7 +247,7 @@ Write `$${NAME}` when the literal output must be `${NAME}`.
 | Any `chrome` field or `navigate.type` only | Render only; no target or sidecar rebuild. |
 | Any `typing`, `sound`, `intro`, `desktop.color`, or `fade` field | Render only. |
 | `config.selects.settleMs`, `maxVisibleOptions`, or `openHoldMs` | Render only; cosmetic shim tuning. |
-| Target instruction in `teach`/`click`/`hover`/`into`/`until` | Compile. |
+| Target instruction in `teach`/`click`/`hover`/`into`/`select.from`/`highlight.what`/`until` | Compile. |
 | `viewport`, `locale`, or `tts.lang` | Compile; the target config hash changes. |
 | `config.selects.mode` (global) switched between `shim`/`native`, or a step's `select.mode` | Compile; the config hash or the step's own fingerprint changes. |
 | Application DOM/content drift | `compile --force`. |

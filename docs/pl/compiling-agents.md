@@ -117,6 +117,8 @@ zmiana modelu w konfiguracji użytkownika nie wybiera go dla tego wywołania.
 | `teach` | Przy braku aktualnego celu | Agent wybiera akcję i target; dla `type` zwraca niewrażliwy literal. |
 | `click` / `hover` | Przy braku aktualnego celu | Rodzaj akcji jest stały, agent rozwiązuje target. |
 | `enterText` | Przy braku aktualnego celu | Agent rozwiązuje tylko `into`. |
+| `select` | Przy braku aktualnego celu | Agent rozwiązuje tylko `from`; `option` jest sprawdzane wobec listy rozwiązanego elementu, nie trafia do reasonera. |
+| `highlight` | Przy braku aktualnego celu | Agent rozwiązuje `what`; krok nigdy nie dotyka strony. |
 | warunkowy `wait` | Przy braku aktualnego celu | Agent rozwiązuje `until`. |
 | aktualny target zweryfikowany na żywo | Nie | Compile może go ponownie użyć. |
 | `render` / `render-set` | Nigdy | Stary sidecar powoduje błąd zamiast auto-heal. |

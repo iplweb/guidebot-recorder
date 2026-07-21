@@ -126,6 +126,8 @@ the model response itself.
 | `teach` | Yes on cache miss | May resolve to click/hover or freeze a safe literal `type`; use explicit commands when the action must be fixed. |
 | `click` / `hover` | Yes on cache miss | Action is fixed; target is resolved. |
 | `enterText` | Yes on cache miss | Resolves `into`; never sends `text` directly, though later reflected page text can enter a snapshot. |
+| `select` | Yes on cache miss | Resolves `from`; `option` is validated against the resolved control's own list, not sent to the reasoner. |
+| `highlight` | Yes on cache miss | Resolves `what`; the step never touches the page. |
 | conditional `wait` | Yes on cache miss | Resolves `until`. |
 | any reusable target step | No | Static fast-path reuse opens no browser; during an incremental run live identity is checked before reuse. |
 | `compile-set` | Per stale target | Applies the same resolver independently to each stale localized scenario. |
