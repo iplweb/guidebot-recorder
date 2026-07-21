@@ -11,7 +11,7 @@ from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.guide.capture import capture_pages
 from guidebot_recorder.guide.layout import render_html
 from guidebot_recorder.guide.pdf import html_to_pdf
-from guidebot_recorder.guide.prolog import scan_for_blockers
+from guidebot_recorder.guide.prolog import GuideError, scan_for_blockers
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
@@ -38,10 +38,18 @@ async def run_guide(
     path = Path(path)
     out_pdf = Path(out_pdf)
     scenario = load_scenario(path, env)
-    compiled = load_compiled(compiled_path(path))
+    cpath = compiled_path(path)
+    try:
+        compiled = load_compiled(cpath)
+    except FileNotFoundError as exc:
+        raise GuideError(f"brak pliku compiled ({cpath.name}) — uruchom `compile`") from exc
+    if compiled.source != path.name:
+        raise GuideError(
+            f"compiled pochodzi z innego scenariusza ({compiled.source}) — uruchom `compile`"
+        )
     flat = scenario.flat_steps()
     if len(compiled.actions) != len(flat):
-        raise ValueError("compiled.yaml nie pasuje do scenariusza — uruchom `compile`")
+        raise GuideError("compiled niezgodny z liczbą kroków — uruchom `compile`")
     scan_for_blockers(flat, compiled.actions)
 
     cfg = scenario.config

@@ -74,7 +74,11 @@ async def capture_pages(
                     if verbose:
                         print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
                     continue
-                await recorder.wait_for(target, "visible", timeout)
+                # action is a CachedAction here (target came from it above); mirror the
+                # non-gate wait branch's state fallback and use the gate's own timeout.
+                state = action.state or "visible"
+                gate_timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else timeout
+                await recorder.wait_for(target, state, gate_timeout)
             except PlaywrightError:
                 skipped_branch = fs.branch  # branch element absent -> skip whole branch
                 if verbose:

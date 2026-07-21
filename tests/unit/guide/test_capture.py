@@ -11,7 +11,7 @@ from guidebot_recorder.guide.capture import capture_pages
 from guidebot_recorder.guide.prolog import GuideError
 from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, TtsConfig, Viewport
-from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
+from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil, WhenBlock
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.recorder import PointResult
 
@@ -147,6 +147,44 @@ async def test_type_with_no_frozen_text_raises(tmp_path, monkeypatch):
         await capture_pages(
             scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
         )
+
+
+async def test_gate_honors_hidden_state_and_the_gates_own_timeout(tmp_path, monkeypatch):
+    """A `when: {state: hidden}` gate must wait for hidden, not the hardcoded
+
+    "visible", and must use the gate's own WaitUntil timeout — not the guide's
+    overall step timeout. Regression for a branch that inverted `hidden` gates.
+    """
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[
+            WhenBlock(
+                when="a spinner", state="hidden", timeout=3.0, steps=[Step(click="ok")]
+            )
+        ],
+    )
+    gate_target = _target()
+    gate_action = CachedAction(
+        action="waitFor",
+        target=gate_target,
+        state="hidden",
+        expect="none",
+        fingerprint=_fp(command_kind="wait"),
+    )
+    child_action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    recorder = FakeRecorder()
+    await capture_pages(
+        scenario,
+        _compiled([gate_action, child_action]),
+        FakePage(),
+        recorder,
+        tmp_path / "shots",
+        timeout=15.0,  # deliberately different from the gate's own 3.0s timeout
+    )
+    assert recorder.wait_for_calls == [(gate_target, "hidden", 3.0)]
 
 
 async def _async_false(*_args, **_kwargs):
