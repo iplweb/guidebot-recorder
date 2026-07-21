@@ -21,7 +21,11 @@ from guidebot_recorder.recorder.render_set import (
     run_render_set,
 )
 from guidebot_recorder.resolver.reasoner import CodexReasoner
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import (
+    CompiledSidecarError,
+    guard_source_scenario,
+    load_scenario,
+)
 from guidebot_recorder.scenario.render_set import RenderSetPlan, load_render_set
 from guidebot_recorder.tts.edge import EdgeTtsProvider
 
@@ -71,6 +75,11 @@ def compile_cmd(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
 ) -> None:
     """Skompiluj intencje → `*.compiled.yaml` (faza AI)."""
+    try:
+        guard_source_scenario(path)
+    except CompiledSidecarError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
     if not force and compile_up_to_date(path):
         typer.echo("nic do skompilowania (aktualne)")
         return
@@ -178,6 +187,12 @@ def render_cmd(
     if auto_heal:
         typer.echo("BŁĄD: --auto-heal nie jest zaimplementowane w v1", err=True)
         raise typer.Exit(code=2)
+
+    try:
+        guard_source_scenario(path)
+    except CompiledSidecarError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
 
     scenario = load_scenario(path)
     cfg = scenario.config
