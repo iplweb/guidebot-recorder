@@ -40,7 +40,12 @@ READY_MARGIN = 5.0
 # :class:`SelectsNotReadyError`. Nothing user-facing is ever phrased here — a
 # page-side `Error` surfaces in English and as the wrong exception type,
 # contradicting the method's documented `Raises:`.
-_READY_TIMEOUT_MARKER = "guidebot selects ready timeout"
+#
+# ``READY_TIMEOUT_MARKER`` is public because ``recorder.py`` runs the same race
+# for its own, unrouted read of ``ready`` (see ``_SELECTS_READY_JS`` there) and
+# has to recognise the same rejection; a second spelling of the string is how
+# the two would drift into one of them hanging again.
+READY_TIMEOUT_MARKER = "guidebot selects ready timeout"
 _API_MISSING_MARKER = "guidebot selects api unavailable"
 
 _AWAIT_READY = f"""(timeoutMs) => {{
@@ -53,7 +58,7 @@ _AWAIT_READY = f"""(timeoutMs) => {{
     return Promise.race([
         api.ready,
         new Promise((_resolve, reject) => {{
-            window.setTimeout(() => reject(new Error({_READY_TIMEOUT_MARKER!r})), timeoutMs);
+            window.setTimeout(() => reject(new Error({READY_TIMEOUT_MARKER!r})), timeoutMs);
         }}),
     ]);
 }}"""
@@ -179,7 +184,7 @@ class Selects:
             message = str(exc)
             if _API_MISSING_MARKER in message:
                 raise self._not_installed(frame) from exc
-            if _READY_TIMEOUT_MARKER not in message:
+            if READY_TIMEOUT_MARKER not in message:
                 raise
             raise self._not_ready(frame, timeout) from exc
 
@@ -199,8 +204,11 @@ async def install_selects(context: BrowserContext, cfg: Config) -> Selects | Non
     ``config.selects.mode`` is ``native``: that escape hatch keeps the page's own
     control, so there is no widget to install and nothing to wait for.
 
-    Callers that also install ``chrome.js`` MUST call this first; see the
-    role-gating ordering contract documented in ``render.run_render``.
+    Registration order relative to ``chrome.js`` is *not* a constraint on this
+    installer, unlike ``cursor.js``/``slide.js``/``desktop.js``: see
+    :meth:`Selects.install_context` for why the shim's role gating survives a
+    shadowed ``window.top``, and ``render.run_render`` for the contract those
+    three do have.
     """
 
     if cfg.selects.mode == "native":

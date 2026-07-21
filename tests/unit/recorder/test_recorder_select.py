@@ -13,6 +13,7 @@ classified before the recorder drives it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from importlib.resources import files
@@ -24,6 +25,7 @@ from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder import recorder as recorder_module
 from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
+from guidebot_recorder.selects import SelectsNotReadyError
 from guidebot_recorder.selects.visibility import shape_prelude
 
 # Body plus the shared "already enhanced?" predicate the Python controller
@@ -203,11 +205,18 @@ async def _keys(page: Page) -> list[str]:
 async def test_native_with_overlay_sets_the_value_without_stepping(page):
     """`mode: native` travels the cursor to the control and sets the value at once.
 
-    Measured with this repo's pinned Playwright (headless and headed): pressing
-    `ArrowDown` on a focused native `<select>` never moves `selectedIndex` and
-    never fires `change`. The old stepping loop was theatre — every press a
-    no-op, the value landing only via its own final `select_option` guard — so
-    there is nothing left to animate: no arrow presses, no `key` SFX.
+    The old escape hatch stepped the value with `ArrowDown`/`ArrowUp` presses.
+    That is *platform-dependent*, which is why it is gone. Measured with this
+    repo's pinned Playwright on **macOS**, headless and headed: pressing
+    `ArrowDown` twice on a focused native `<select>` leaves `selectedIndex` at 0
+    and fires no `change` — macOS binds those keys on a closed menulist to
+    opening the OS popup instead. On Linux and Windows Chromium (this repo's CI
+    is `ubuntu-latest`) the same presses do step the value and do fire `change`.
+
+    An animation that exists on one platform and not another renders two
+    different films from one scenario, so the hatch keeps only what is portable:
+    the cursor travels, the ripple plays, the value is set at once. No arrow
+    presses, no `key` SFX, on any platform.
     """
     overlay = Overlay()
     await page.set_content(_PLAIN_SELECT)
@@ -525,6 +534,44 @@ async def test_unknown_option_on_a_shimmed_select_raises_naming_the_option(page)
         await rec.select(RoleTarget(role="combobox", name="Raport"), "nie ma takiej")
 
     assert "nie ma takiej" in str(excinfo.value)
+
+
+async def test_a_select_unshimmed_between_the_beats_says_so_instead_of_blaming_the_option(
+    page,
+):
+    """The two failures behind beat 2 want different fixes, so they get different words.
+
+    A select the page enhances late (select2 hydrating on first interaction)
+    loses its shim between beat 1 and beat 2: the marker class appears, the
+    observer unshims, and the rows the recorder was about to click are gone.
+    The option is still on the ``<select>`` — saying "the list does not contain
+    it" sends the author looking for a typo in a label that is spelled
+    perfectly. The message has to name the event that actually happened.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_RAW_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    # select2 hydrating on the first interaction: the marker class lands during
+    # beat 1, and the next classification pass unshims underneath the recorder.
+    await page.evaluate(
+        """() => {
+      document.querySelector("select").addEventListener("mousedown", () => {
+        document.querySelector("select").classList.add("select2-hidden-accessible");
+      }, true);
+    }"""
+    )
+    # Long enough for the (20 ms) settle window to run a pass between the beats.
+    rec = Recorder(page, overlay, open_hold_ms=300)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX")
+
+    message = str(excinfo.value)
+    assert "nie zawiera opcji" not in message  # the option was never the problem
+    assert "select2-hidden-accessible" in message  # what the page did instead
+    assert "BibTeX" in message
 
 
 async def test_two_beats_without_any_resolvable_control_raise(page):
@@ -849,3 +896,56 @@ async def test_compile_probe_is_skipped_for_native_mode(page):
     await rec.select(TestidTarget(testid="s"), "Beta", native=True)
 
     assert await page.locator("#s").input_value() == "Beta"
+
+
+# --- the readiness barrier is bounded here too ------------------------------
+
+
+async def test_select_gives_up_on_a_page_whose_readiness_never_settles(page, monkeypatch):
+    """`Recorder.select` must not be the one call that can wait forever.
+
+    Compile and render both take `Selects.wait_ready` — a bounded barrier —
+    before they get here, so today this await always finds a settled promise.
+    That invariant is enforced nowhere near this method, though, and an
+    unbounded await on a page-controlled promise is exactly the hang
+    `wait_ready` exists to prevent. A direct caller on a wedged page must get a
+    diagnosis, not silence.
+    """
+
+    monkeypatch.setattr(recorder_module, "READY_WAIT_MS", 300)
+    await page.set_content(_RAW_SELECT)
+    # A widget that never finishes its first classification pass.
+    await page.evaluate(
+        """() => {
+      window.__guidebot_selects = {
+        ready: new Promise(() => {}),
+        isShimmed: () => false,
+      };
+    }"""
+    )
+    rec = Recorder(page, overlay=None)
+
+    with pytest.raises(SelectsNotReadyError):
+        # `wait_for` so a regression fails the suite instead of hanging it.
+        await asyncio.wait_for(
+            rec.select(RoleTarget(role="combobox", name="Raport"), "tabela"),
+            timeout=10,
+        )
+
+    assert await page.locator("select").input_value() == "lista"  # value untouched
+
+
+async def test_select_still_treats_a_missing_widget_as_nothing_to_wait_for(page):
+    """No shim in this context is not a wedged page — it is a bare document.
+
+    The recorder is handed a page, not the controller that installed the
+    widget, so "the API is not here" has to degrade to "there is nothing to
+    wait for". Only a promise that never settles is a failure.
+    """
+
+    await page.set_content(_RAW_SELECT)
+    rec = Recorder(page, overlay=None)
+
+    await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert await page.locator("select").input_value() == "tabela"

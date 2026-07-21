@@ -53,14 +53,13 @@ from guidebot_recorder.models.config import (
     Viewport,
     config_hash,
 )
-from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil
+from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil, select_mode
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
     pause_for_inspection,
     redact_exception,
     scenario_sensitive_values,
 )
-from guidebot_recorder.recorder.compile import select_mode
 from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
 from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
@@ -1987,15 +1986,22 @@ async def run_render(
     # but registered first so it wraps the *native* function on every document.
     await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
     overlay = Overlay(cfg.cursor, cfg.viewport)
-    # Role-gating contract: cursor.js, slide.js and selects.js MUST be registered
-    # before chrome.js. Inside the site iframe, all of them rely on reading the
-    # real ``window.top`` to decide their role (cursor.js to skip mounting a
-    # duplicate cursor, slide.js's ``isTop`` guard to skip installing
-    # ``window.__guidebot_slide``, selects.js's ``isTop`` test to keep the shim
-    # out of the shell document, which holds no page content); chrome.js is what
+    # Role-gating contract: cursor.js, slide.js and desktop.js MUST be registered
+    # before chrome.js. Inside the site iframe, each of them decides its role by
+    # reading the real ``window.top`` (cursor.js to skip mounting a duplicate
+    # cursor, slide.js's ``isTop`` guard to skip installing
+    # ``window.__guidebot_slide``, desktop.js likewise); chrome.js is what
     # shadows ``top`` (frame-bust neutralization). If any of these init scripts
     # ran after chrome.js, it would read the shadowed ``top``, misidentify as the
     # top window, and mount inside the frame.
+    #
+    # selects.js reads ``top`` too but is deliberately NOT part of that contract:
+    # its only test is ``isTop && origin === SHELL_ORIGIN``, and chrome.js
+    # shadows ``top`` solely inside framed documents, whose origin is never the
+    # shell's — so the shim reaches the same verdict on either side of chrome.js.
+    # It is registered here anyway, next to the overlays it sits beside; nothing
+    # downstream may rely on that position. See the role-gating comment at the
+    # top of ``selects/selects.js``.
     await overlay.install_context(context)
     slide = SlideOverlay()
     await slide.install_context(context)

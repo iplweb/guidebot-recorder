@@ -184,8 +184,13 @@ async def validate_compile_time(
             # rule below; Tom Select sets display:none, which is not). What
             # matters for `select` is whether the viewer sees *some* control
             # for it, not whether this exact element is on screen.
-            if await user_visible_control(locator) is None:
+            control = await user_visible_control(locator)
+            if control is None:
                 return ValidationFail("not_visible", "The matched element is not visible.")
+            # Only its existence was the question; the handle would otherwise
+            # pin the element for the life of the context (see the ownership
+            # note on `associated_control`).
+            await control.dispose()
         elif not await locator.is_visible():
             return ValidationFail("not_visible", "The matched element is not visible.")
 

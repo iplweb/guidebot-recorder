@@ -361,3 +361,20 @@ def _validate_translations(step: Step, label: str, expected: set[str]) -> None:
     if unknown:
         languages = ", ".join(sorted(unknown))
         raise ValueError(f"krok {label}: niezdefiniowane tłumaczenia: {languages}")
+
+
+def select_mode(step: Step, cfg: Config) -> str:
+    """The effective select mode for one step (spec §5).
+
+    A per-step ``mode`` is the escape hatch for one stubborn widget in an
+    otherwise fine scenario, so it wins over ``config.selects.mode``; unset
+    (``None``) inherits the global setting.
+
+    Lives with the two models it reads rather than with either phase that
+    dispatches on it: it is a pure lookup over ``Step`` and ``Config``, and
+    homing it in ``compile.py`` made ``render.py`` import the compiler for it.
+    """
+
+    if step.select is not None and step.select.mode is not None:
+        return step.select.mode
+    return cfg.selects.mode

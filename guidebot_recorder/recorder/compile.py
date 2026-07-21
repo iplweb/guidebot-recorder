@@ -39,8 +39,8 @@ from guidebot_recorder.models.action import (
     validate_teach_instruction,
 )
 from guidebot_recorder.models.compiled import CompiledAction, CompiledScenario
-from guidebot_recorder.models.config import Config, config_hash, site_viewport
-from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil
+from guidebot_recorder.models.config import config_hash, site_viewport
+from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil, select_mode
 from guidebot_recorder.models.target import (
     LabelTarget,
     RoleTarget,
@@ -77,24 +77,10 @@ __all__ = [
     "heuristic_expect",
     "run_compile",
     "run_compile_in_browser",
-    "select_mode",
 ]
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
-
-
-def select_mode(step: Step, cfg: Config) -> str:
-    """The effective select mode for one step (spec §5).
-
-    A per-step ``mode`` is the escape hatch for one stubborn widget in an
-    otherwise fine scenario, so it wins over ``config.selects.mode``; unset
-    (``None``) inherits the global setting.
-    """
-
-    if step.select is not None and step.select.mode is not None:
-        return step.select.mode
-    return cfg.selects.mode
 
 
 def _resolve_url(scenario: Scenario, url: str) -> str:

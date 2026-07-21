@@ -21,6 +21,7 @@ from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
 from guidebot_recorder.resolver.widget import associated_control
+from guidebot_recorder.selects.selects import READY_TIMEOUT_MARKER, SelectsNotReadyError
 from guidebot_recorder.selects.visibility import SELECT_SHAPE_JS
 
 # WaitState → the state accepted by Playwright's locator.wait_for
@@ -129,12 +130,36 @@ _PIN_NATIVE_JS = """(el) => {
   }
 }"""
 
+#: Backstop bound, in milliseconds, on :meth:`Recorder._await_selects_ready`.
+#:
+#: Not the primary barrier — compile and render both take the bounded
+#: :meth:`guidebot_recorder.selects.Selects.wait_ready`, whose deadline tracks
+#: ``settle_ms``, long before a step reaches the recorder. This is the floor
+#: under a *direct* caller, which nothing near this module can force through
+#: that barrier first, so it is a flat, generous constant rather than something
+#: derived from a config the recorder is never handed.
+READY_WAIT_MS = 15_000
+
 #: The readiness barrier of spec §3, read straight off the page.
 #:
 #: Deliberately not routed through :class:`guidebot_recorder.selects.Selects`:
 #: the recorder is handed a page, not the controller that installed the widget,
 #: and a missing API must degrade to "nothing to wait for", not to an error.
-_SELECTS_READY_JS = "() => window.__guidebot_selects && window.__guidebot_selects.ready"
+#:
+#: Bounded by the same page-side ``Promise.race`` idiom ``Selects.wait_ready``
+#: uses, rejecting with the same marker: ``ready`` is a promise the *page*
+#: settles, so awaiting it bare makes a wedged page hang the caller — precisely
+#: the failure that barrier exists to prevent.
+_SELECTS_READY_JS = f"""(timeoutMs) => {{
+  const api = window.__guidebot_selects;
+  if (!api || !api.ready) return null;
+  return Promise.race([
+    api.ready,
+    new Promise((_resolve, reject) => {{
+      window.setTimeout(() => reject(new Error({READY_TIMEOUT_MARKER!r})), timeoutMs);
+    }}),
+  ]);
+}}"""
 
 #: A short, human-readable name for a control, for error messages.
 _DESCRIBE_JS = """(el) => {
@@ -355,17 +380,21 @@ class Recorder:
                 just opted out of.
 
         Without an overlay (compile) the value is set directly and nothing is
-        animated — compilation is meant to be fast, not pretty — but the
-        drivability of an enhanced widget is probed first, so an undriveable one
-        surfaces here instead of after a multi-minute render.
+        animated — compilation is meant to be fast, not pretty — but an enhanced
+        widget is probed first (:meth:`_probe_drivable`), so one with *nothing to
+        click* surfaces here instead of after a multi-minute render. That probe
+        is narrower than "drivable"; see its docstring for what it cannot see.
 
         Raises:
             SelectDriveError: nothing visible could be clicked for this select.
+            SelectsNotReadyError: the widget is installed in this frame but its
+                first classification pass never finished (see
+                :data:`READY_WAIT_MS`).
         """
 
         # The readiness barrier: the classification pass decides whether this
         # select is shimmed, and every branch below asks that question.
-        await self.frame.evaluate(_SELECTS_READY_JS)
+        await self._await_selects_ready()
         if self.overlay is None:
             locator = await self._point_and_prepare(target, click_sound=True)
             if native:
@@ -400,6 +429,47 @@ class Recorder:
             await self._select_in_listbox(locator, option)
             return
         await self._select_in_two_beats(locator, state, option)
+
+    async def _await_selects_ready(self) -> None:
+        """Wait for this frame's first classification pass — but not forever.
+
+        Both production callers (compile, render) take
+        :meth:`guidebot_recorder.selects.Selects.wait_ready` first, so this
+        normally finds a promise that has already settled. It is written as a
+        bound anyway because that ordering is an invariant of *those* call
+        sites, not of this one: a direct caller on a page whose widget is wedged
+        would otherwise get an ``evaluate`` that never returns, which is the one
+        outcome the barrier design rules out everywhere else.
+
+        Raises:
+            SelectsNotReadyError: the widget is in this frame and its ``ready``
+                promise did not settle within :data:`READY_WAIT_MS`.
+        """
+
+        try:
+            # The page-side race is the primary guard; the outer wait covers a
+            # document that has stopped running timers at all.
+            await asyncio.wait_for(
+                self.frame.evaluate(_SELECTS_READY_JS, READY_WAIT_MS),
+                timeout=READY_WAIT_MS / 1000 + 1.0,
+            )
+        except TimeoutError as exc:
+            raise self._not_ready_error() from exc
+        except PlaywrightError as exc:
+            if READY_TIMEOUT_MARKER not in str(exc):
+                raise
+            raise self._not_ready_error() from exc
+
+    def _not_ready_error(self) -> SelectsNotReadyError:
+        """Phrased like ``Selects._not_ready``: same failure, same two fixes."""
+
+        return SelectsNotReadyError(
+            f"widget select nie zgłosił gotowości w ciągu {READY_WAIT_MS / 1000:.1f} s "
+            f"dla ramki {getattr(self.frame, 'url', '') or '(nieznany adres)'}. "
+            f"Zwiększ selects.settleMs, jeśli strona długo się inicjalizuje, albo "
+            f"ustaw selects.mode: native, aby zrezygnować z podmiany list "
+            f"rozwijanych na tej stronie."
+        )
 
     async def _pin_native(self, locator: Locator) -> None:
         """Drop the shim from this select and keep it off (see :data:`_PIN_NATIVE_JS`)."""
@@ -466,6 +536,37 @@ class Recorder:
             f'opcja „{option}" (limit {OPTION_WAIT_MS} ms)'
         )
 
+    async def _unshimmed_mid_step_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """Beat 1 opened our list; by beat 2 the shim was no longer on this select.
+
+        The classification pass runs on every mutation, so a page that enhances
+        a select on first interaction (select2 hydrating on ``mousedown``) can
+        legitimately take the control over between the two beats: the marker
+        class appears, the observer unshims, and the rows the second beat was
+        about to click are gone with it.
+
+        Named as its own failure because the fix is not the one every other
+        beat-2 message points at. The option label is fine — the recording just
+        raced the page's own widget, and the answer is a longer
+        ``selects.openHoldMs`` (or ``settleMs``), or ``mode: native`` for that
+        step, not a corrected label.
+        """
+
+        state = await locator.evaluate(_SHIM_STATE_JS)
+        marker = state["markerClass"]
+        because = (
+            f"strona przejęła kontrolkę (klasa `{marker}`)"
+            if marker
+            else "strona zmieniła kontrolkę"
+        )
+        return SelectDriveError(
+            f"nakładka nad {await self._describe(locator)} zniknęła w trakcie kroku "
+            f"— {because} już po rozwinięciu listy, więc nie ma czego kliknąć dla "
+            f'opcji „{option}". Zwiększ selects.openHoldMs albo selects.settleMs, '
+            f"aby strona zdążyła się ulepszyć przed krokiem, albo ustaw dla tego "
+            f"kroku mode: native"
+        )
+
     async def _confirm_selected(self, locator: Locator, option: str) -> None:
         """Read the select back after the click, and fail if it did not take.
 
@@ -510,13 +611,35 @@ class Recorder:
         that as "the page must have enhanced this" is what used to send a
         perfectly filmable listbox into the association heuristic and fail the
         compile with a missing-widget error.
+
+        **What this does not catch.** It asks whether
+        :func:`associated_control` resolves *a visible element*, not whether that
+        element is the right one. The heuristic's last step is "nearest following
+        sibling with a box" (``resolver/widget.py``), so a hidden select whose
+        real widget sits elsewhere in the document can be blessed by an unrelated
+        neighbour. Compile passes regardless — its value-set goes through
+        ``select_option``, never through the widget — and the render is where it
+        shows: the cursor clicks that neighbour on camera and beat 2 waits for a
+        row that never appears. Deciding the *wrong control* case here would mean
+        opening the widget and inspecting what came up, which is the render
+        choreography itself; the honest boundary is "nothing to click", not
+        "undrivable".
         """
 
         state = await locator.evaluate(_SHIM_STATE_JS)
         if not state["installed"] or state["shimmed"] or state["listbox"]:
             return
         control = await associated_control(locator)
-        if control is not None and await control.is_visible():
+        if control is None:
+            raise await self._no_control_error(locator, option, state)
+        try:
+            drivable = await control.is_visible()
+        finally:
+            # The probe only ever asked a yes/no question, so the handle is
+            # released either way (see the ownership note on
+            # `associated_control`); compile runs this once per `select:` step.
+            await control.dispose()
+        if drivable:
             return
         raise await self._no_control_error(locator, option, state)
 
@@ -568,25 +691,36 @@ class Recorder:
             raise await self._no_control_error(locator, option, state)
         else:
             control = await self._page_widget(locator, state, option)
-        # Beat 2 of the page-widget path recognises the option rows by "appeared
-        # after the click", so the snapshot has to be taken before it.
-        await self.frame.evaluate(_SNAPSHOT_JS)
+        try:
+            # Beat 2 of the page-widget path recognises the option rows by
+            # "appeared after the click", so the snapshot has to be taken before
+            # it.
+            await self.frame.evaluate(_SNAPSHOT_JS)
 
-        await self._approach(control, click_sound=True)  # beat 1
-        await control.click()
-        await self.page.wait_for_timeout(self.open_hold_ms)
+            await self._approach(control, click_sound=True)  # beat 1
+            await control.click()
+            await self.page.wait_for_timeout(self.open_hold_ms)
 
-        if state["shimmed"]:  # beat 2
-            await self._click_shim_option(locator, option)
-        else:
-            await self._click_appeared_option(locator, option)
-        await self._confirm_selected(locator, option)
+            if state["shimmed"]:  # beat 2
+                await self._click_shim_option(locator, option)
+            else:
+                await self._click_appeared_option(locator, option)
+            await self._confirm_selected(locator, option)
+        finally:
+            # `control` is a `Locator` on the shimmed path (nothing to release)
+            # and a handle on the page-widget one, which this frame owns from
+            # here (see the ownership note on `associated_control`).
+            if isinstance(control, ElementHandle):
+                await control.dispose()
 
     async def _page_widget(self, locator: Locator, state: dict, option: str) -> ElementHandle:
         """The visible control a page's own dropdown widget puts in the select's place."""
 
         control = await associated_control(locator)
-        if control is None or not await control.is_visible():
+        if control is None:
+            raise await self._no_control_error(locator, option, state)
+        if not await control.is_visible():
+            await control.dispose()
             raise await self._no_control_error(locator, option, state)
         return control
 
@@ -600,7 +734,13 @@ class Recorder:
             "(el, label) => window.__guidebot_selects.optionIndexFor(el, label)", option
         )
         uid = await locator.get_attribute("data-guidebot-shimmed")
-        if uid is None or index is None or index < 0:
+        # Two different events, so two different messages. A missing `uid` means
+        # the shim was taken off this select between the beats — the option is
+        # very probably still there, and blaming the list for "not containing"
+        # it sends the author hunting for a typo in a label spelled perfectly.
+        if uid is None:
+            raise await self._unshimmed_mid_step_error(locator, option)
+        if index is None or index < 0:
             raise SelectDriveError(
                 f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
             )

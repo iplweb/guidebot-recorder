@@ -24,12 +24,11 @@ from pydantic import ValidationError
 import guidebot_recorder.recorder.compile as compile_module
 from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Viewport
-from guidebot_recorder.models.scenario import Scenario, Select, Step
+from guidebot_recorder.models.scenario import Scenario, Select, Step, select_mode
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
 from guidebot_recorder.recorder.compile import (
     run_compile,
     run_compile_in_browser,
-    select_mode,
 )
 from guidebot_recorder.recorder.recorder import SelectDriveError
 from guidebot_recorder.recorder.render import (

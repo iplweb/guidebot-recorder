@@ -107,6 +107,14 @@ async def associated_control(locator: Locator) -> ElementHandle | None:
     element. Returns ``None`` when none of the four steps finds anything —
     the caller (validation, or the render choreography) decides what that
     means for its own step.
+
+    **Ownership of the returned handle passes to the caller**, which must
+    ``dispose()`` it. A handle pins its element in the page's JS heap until
+    then, and this runs once per ``select:`` step on both the compile and the
+    render path, so a caller that only tests the result against ``None`` and
+    drops it leaks one element for the life of the browser context. Only the
+    "evaluation produced a non-element" path is disposed here, because that one
+    hands the caller nothing to dispose.
     """
 
     handle = await locator.evaluate_handle(ASSOCIATED_CONTROL_JS)
@@ -142,14 +150,18 @@ async def user_visible_control(locator: Locator) -> ElementHandle | None:
     camera (the button is ``pointer-events: none``).
 
     Returns ``None`` when nothing in that list is visible — nothing the user
-    could see qualifies as "the control".
+    could see qualifies as "the control". As with :func:`associated_control`,
+    a returned handle belongs to the caller and must be disposed; a control
+    this function rejects is disposed here, since the caller never sees it.
     """
 
     if (await select_shape(locator))["visible"]:
         return await locator.element_handle()
 
     control = await associated_control(locator)
-    if control is not None and await control.is_visible():
+    if control is None:
+        return None
+    if await control.is_visible():
         return control
-
+    await control.dispose()
     return None

@@ -528,8 +528,24 @@ selectem, select widoczny, ale bez listy opcji, którą Guidebot potrafiłby otw
 brak nakładki w tym kontekście w ogóle, albo brak wiersza pasującego do `option` po
 otwarciu listy — przebieg kończy się **błędem**, zamiast po cichu ustawić wartość.
 Komunikat błędu mówi, o którą z tych sytuacji chodzi, i nazywa klasę markerową, jeśli
-to ona jest przyczyną. `compile` sprawdza też z góry, czy ulepszony widżet da się
-sterować, więc niesterowalny widżet wychodzi na jaw tam, a nie w połowie renderu.
+to ona jest przyczyną.
+
+`compile` sprawdza ulepszony widżet również z góry, ale jego test odpowiada na
+węższe pytanie niż „czy da się tym sterować": pyta, czy z ukrytym selectem da się
+powiązać *jakąkolwiek* widoczną kontrolkę, a nie czy znaleziona kontrolka jest tą
+właściwą. Wyłapuje więc przypadek **braku widocznej kontrolki** — ukryty oryginał
+w stylu Tom Selecta bez swojego widżetu nie przejdzie kompilacji, zamiast wysypać
+się kilka minut w render. Nie wyłapuje natomiast przypadku **niewłaściwej
+kontrolki**: ostatnim krokiem heurystyki powiązania jest „najbliższe następne
+rodzeństwo z niezerowym pudełkiem", więc select, którego prawdziwy widżet leży
+gdzie indziej w dokumencie, może zostać skojarzony z przypadkowym sąsiadem.
+`compile` i tak przejdzie — wartość ustawia przez `select_option`, nigdy przez
+widżet — a błąd wyjdzie dopiero w renderze: kursor kliknie ten obcy element na
+filmie, poczeka na wiersz opcji, który nigdy się nie pojawi, i krok się wywali.
+Jeśli krok `select` kompiluje się, ale wywala w połowie renderu z komunikatem, że
+opcja się nie pojawiła, lekarstwem jest `aria-controls` (albo `aria-owns`) na
+`<select>` wskazujące jego prawdziwy widżet — to pierwszy i najsilniejszy sygnał
+heurystyki.
 
 **Kliknięcie, które w nic nie trafiło, też kończy się błędem.** Po kliknięciu
 wiersza Guidebot odczytuje `<select>` z powrotem i sprawdza, czy naprawdę pokazuje
@@ -544,6 +560,18 @@ doszukującej opcje przez sieć w miarę pisania — użyj furtki na poziomie kr
 **`mode: native`**. Lista nigdy się nie rozwija: kursor nadal dojeżdża do zwiniętej
 kontrolki i ją klika, a wartość zmienia się od razu, w chwili gdy kursor dojeżdża —
 nie ma żadnej pośredniej animacji przełączania do obejrzenia, tylko dojazd i zmiana.
+
+Wcześniejsze wersje animowały tę zmianę, wciskając `ArrowDown`/`ArrowUp` na
+zwiniętej kontrolce. Zniknęło to dlatego, że jest **zależne od systemu**, a nie
+dlatego, że strzałki są bezużyteczne: zmierzone na przypiętym w tym projekcie
+Playwrighcie na macOS, headless i headed — ustawienie fokusu na natywnym
+`<select>` i dwukrotne `ArrowDown` zostawia `selectedIndex` na `0` i nie wywołuje
+żadnego `change`, bo macOS przypisuje tym klawiszom na zwiniętej liście otwarcie
+popupu systemowego. Na Chromium linuksowym i windowsowym te same wciśnięcia
+przestawiają wartość i wywołują `change`. Jeden scenariusz dawałby więc jeden film
+na Macu, a inny na linuksowym CI — z tego samego skompilowanego artefaktu. Dlatego
+`mode: native` zachowuje się dziś wszędzie tak samo: dojazd, ripple, wartość.
+
 `mode` ma też formę globalną, `config.selects.mode` (patrz sekcja `selects` niżej);
 wartość na poziomie kroku domyślnie ją dziedziczy i nadpisuje ją dla jednej upartej
 kontrolki w reszcie poprawnego scenariusza. Przy globalnym `shim` nadpisanie
@@ -831,9 +859,27 @@ render jak zwykle.
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
 | Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) lub własne `select.mode` kroku | Tak |
 | Zmiana rodzaju komendy kroku | Tak |
+| Zamrożony cel `text=` pasujący do napisu z `<option label="…">` albo `<optgroup label="…">` | Rzadko — patrz niżej |
 
 Pełną listę, łącznie z `viewport`/`locale`/`tts.lang` i driftem aplikacji, znajdziesz
 w [Plikach scenariusza](scenario-files.md#co-uniewaznia-sidecar).
+
+**Jeden wąski przypadek, w którym artefakt skompilowany przed nakładką na selecty
+wymaga jednak ponownej kompilacji.** Nakładka rysuje listę opcji — i etykietę
+samej zwiniętej kontrolki — jako prawdziwy tekst DOM na poziomie `<body>`. Dla
+*treści tekstowej* opcji nic to nie zmienia: ten sam napis był już w DOM-ie,
+wewnątrz `<select>`, więc żaden cel nie zacznie przez to pasować dwa razy.
+Wyjątkiem jest **atrybut** `label`: `<option label="Krótko">` renderuje się przez
+atrybut, a nie przez swój tekst, a nagłówki `<optgroup label="…">` wyprowadzają
+swój atrybut na ekran jako tekst, którego wcześniej w DOM-ie nie było. Krok
+zamrożony jako cel `text=`, którego napis akurat równa się takiemu atrybutowi,
+może teraz pasować w dwóch miejscach, oblać sprawdzenie ponownego użycia z
+powodem `not_unique` i wymagać jednorazowego `guidebot compile`. Nic poza tym nie
+jest narażone: cele `role=` są bezpieczne, bo każda nakładka jest `aria-hidden` i
+nie istnieje w drzewie dostępności, a cele `testid=` i `label=` — bo nakładki nie
+mają ani `data-testid`, ani powiązanej etykiety formularza. Ponowne `guidebot
+compile` załatwia sprawę: krok zamraża się wtedy względem DOM-u, który render
+naprawdę zobaczy.
 
 ## `translations`
 

@@ -7,12 +7,14 @@
   // top-level popup site documents, but never in the shell, which holds no page
   // content — only the address bar and the site iframe.
   //
-  // The registration order relative to chrome.js (recorder/render.py:1989-1995)
-  // is a real contract for those overlays, but NOT for this file: the only test
-  // here is `isTop && origin === SHELL_ORIGIN`, and chrome.js shadows `top` only
-  // in its framed branch (chrome.js:18-27), where the origin is never the
-  // shell's. Reading `top` before chrome.js can shadow it is therefore
+  // The registration order relative to chrome.js (the role-gating contract in
+  // `render.run_render`) is real for those overlays, but NOT for this file: the
+  // only test here is `isTop && origin === SHELL_ORIGIN`, and chrome.js shadows
+  // `top` only in its framed branch (chrome.js:18-27), where the origin is never
+  // the shell's. Reading `top` before chrome.js can shadow it is therefore
   // defensive, not load-bearing — the outcome is the same in either order.
+  // `Selects.install_context` and `render.run_render` say the same on the
+  // Python side; if one of the three ever changes, all three must.
   const SHELL_ORIGIN = "https://guidebot.shell";
   const isTop = window === window.top;
   let documentOrigin = "";

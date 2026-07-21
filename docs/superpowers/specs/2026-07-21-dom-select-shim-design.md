@@ -249,26 +249,52 @@ is meant to be fast, not pretty.
 of retaining it: `_step_option_visibly` (`recorder.py:442-484` before this
 change) pressed `ArrowDown`/`ArrowUp` in a loop with a 140 ms pause and a `key`
 SFX per press, on the premise that this drives the collapsed native control
-visibly. Measured with the repo's own pinned Playwright, in both headless and
-headed Chromium: focusing a native `<select>` and pressing `ArrowDown` leaves
-`selectedIndex` unchanged and fires zero `change` events. Synthesized key events
-do not drive the native select widget at all — every press was a no-op, and the
-value only ever landed via the method's own final `select_option` guard. What a
-recording actually showed was the cursor arriving, then N × 140 ms of nothing
-while keyboard SFX played, then the value jumping — the sound track asserted
-typing that never happened. There was nothing here for an escape hatch to
+visibly.
+
+**What was measured, and where.** On **macOS**, with the repo's own pinned
+Playwright and in both headless and headed Chromium: focusing a native
+`<select>` and pressing `ArrowDown` twice leaves `selectedIndex` at `0` and
+fires zero `change` events. Every press was a no-op there, and the value only
+ever landed via the method's own final `select_option` guard. That result is
+**platform-specific and must not be read as "arrow keys never drive a
+`<select>`"**: macOS binds arrow keys on a closed menulist `<select>` to
+*opening the OS popup*, not to stepping the selection, whereas Linux and Windows
+Chromium do step it and do fire `change`. This project's CI runs
+`ubuntu-latest`, so the same scenario stepped on CI and did nothing on the
+author's Mac.
+
+That split is the reason the animation goes, and it is a stronger reason than
+"it never worked" would have been: a stepping animation that only exists on some
+platforms produces a *different film* from the same scenario depending on where
+it was rendered, which is worse than producing no animation anywhere. On macOS
+the recording showed the cursor arriving, then N × 140 ms of nothing while
+keyboard SFX played, then the value jumping — a sound track asserting keystrokes
+that did nothing. There was no *portable* behaviour here for an escape hatch to
 preserve. `mode: native` now does what the choreography's first beat already
-does honestly: the cursor travels to the control, ripples (SFX `click`), and the
-value is set directly, with no intervening animation and no `key` SFX. The list
-still never unfurls under `native` — that part of the trade-off is real, since
-the option list is exactly what an OS-drawn popup cannot show.
+does honestly, and does it identically everywhere: the cursor travels to the
+control, ripples (SFX `click`), and the value is set directly, with no
+intervening animation and no `key` SFX. The list still never unfurls under
+`native` — that part of the trade-off is real, since the option list is exactly
+what an OS-drawn popup cannot show.
 
 Compile does, however, **probe drivability** of
 an enhanced widget (can the association heuristic resolve a visible control?)
-and fails there, so an undriveable widget surfaces before a multi-minute render
-is paid for. The probe skips a shimmed select (drivable by construction), a
-context with no shim installed (nothing to conclude) **and a natively-visible
-listbox** (drivable by construction too — its rows are on screen).
+and fails there, so a widget with *nothing to click* surfaces before a
+multi-minute render is paid for. The probe skips a shimmed select (drivable by
+construction), a context with no shim installed (nothing to conclude) **and a
+natively-visible listbox** (drivable by construction too — its rows are on
+screen).
+
+The probe's reach is exactly one question, and it is worth being precise about
+which: it asks whether `associated_control` resolves *a visible element*, not
+whether that element is the right one. Step 3 of the heuristic is "nearest
+following sibling with a box", so for a hidden select whose real widget sits
+elsewhere in the document the probe can bless an unrelated element and pass.
+Compile then succeeds anyway — its value-set goes through `select_option`
+directly, never through the widget — and the failure lands mid-render, where the
+cursor clicks that unrelated element on camera and beat 2 waits for a row that
+never appears. Catching the *wrong control* case would need compile to open the
+widget and look at what came up, which is the render choreography itself.
 
 **Re-selecting the current option**: when the clicked option is already
 `select.selectedIndex`, the shim updates nothing and dispatches **no** `input`
@@ -305,6 +331,18 @@ because §3 changes no ancestry, so `reuse_is_valid` still passes on a
 `*.compiled.yaml` produced before this feature. Switching to `native` changes
 the hash and forces a re-resolve, which is correct: it changes what the resolver
 drives.
+
+One bounded exception, worth stating rather than discovering. The shim renders
+option labels as real DOM text at `<body>` level, and `optionLabel` prefers the
+`label` **attribute** over the option's text (`selects.js:198-201`); optgroup
+headings render that attribute too. Option *text content* duplicates a string
+already in the DOM and so creates no new collisions, but a `label` attribute was
+not DOM text before. A frozen `TextTarget` whose string equals such an attribute
+can therefore match twice, fail `reuse_is_valid` with `not_unique`, and need one
+`guidebot compile`. The exposure stops there: `RoleTarget` is unaffected (every
+overlay is `aria-hidden`, so it is not in the accessibility tree), and so are
+`TestidTarget` and `LabelTarget` (the overlays carry neither a test id nor a form
+label). Documented in both `scenario-reference.md` recompile matrices.
 
 `settle_ms` and the cosmetic fields stay out of the hash, consistent with the
 cosmetic chrome fields (`config.py:381-385`). This is safe only because identity
@@ -436,13 +474,22 @@ silence — and compile-time drivability probing.
 An earlier revision of this document argued that `mode: native` had to retain
 the pre-shim arrow-key stepping verbatim, on the principle that "an escape hatch
 must never be less visible than what shipped before." That principle assumed
-the arrow-key stepping was visible in the first place. Measured directly (see
-§4), it was not: no press ever moved `selectedIndex` or fired `change` on a
-native `<select>`, in either headless or headed Chromium. There was no visible
-behaviour for the escape hatch to preserve — only a sound effect asserting
-keystrokes that did nothing. The escape hatch keeps what was real (cursor
-travel, ripple, click SFX) and drops what was theatre (the stepping loop and its
-`key` SFX).
+the arrow-key stepping was visible *wherever the scenario is rendered*. Measured
+directly (see §4), it is not: on **macOS**, in both headless and headed
+Chromium, no press ever moved `selectedIndex` or fired `change` on a native
+`<select>`, because macOS binds those keys on a closed menulist to opening the
+OS popup. On Linux and Windows Chromium — including this project's
+`ubuntu-latest` CI — the same presses do step the value and do fire `change`.
+
+So the honest statement is not "it never worked" but "it worked on some
+platforms and not others", and that is the disqualifying property: the escape
+hatch would render one film on a developer's Mac and a different one on CI, from
+one scenario and one compiled artifact. A step whose animation depends on the
+renderer's operating system is worse than a step with no animation, because the
+difference is invisible until someone compares two recordings. The escape hatch
+therefore keeps what was real *and portable* (cursor travel, ripple, click SFX)
+and drops what was neither (the stepping loop and its `key` SFX, which on macOS
+also asserted keystrokes that did nothing).
 
 ## Testing
 

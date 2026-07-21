@@ -401,19 +401,24 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
 ):
     """Locks in render.py's context init-script ordering contract.
 
-    cursor.js, slide.js and selects.js all rely on reading the real
-    ``window.top`` to decide whether they are running in the top document or a
-    framed site; chrome.js is what shadows ``top`` for frame-bust
-    neutralization. If any of them ran after chrome.js, it would read the
-    shadowed ``top`` and misidentify its role. This spies on
-    ``install_context`` (rather than asserting on ``window.top`` behavior
-    directly) because modern Chromium already makes
+    cursor.js and slide.js rely on reading the real ``window.top`` to decide
+    whether they are running in the top document or a framed site; chrome.js is
+    what shadows ``top`` for frame-bust neutralization. If either ran after
+    chrome.js, it would read the shadowed ``top`` and misidentify its role. This
+    spies on ``install_context`` (rather than asserting on ``window.top``
+    behavior directly) because modern Chromium already makes
     ``Object.defineProperty(window, "top", ...)`` a no-op for cross-origin
     frames, so a black-box DOM assertion can't distinguish a correct order
     from a swapped one — only the registration order itself can.
 
-    Doubling as the render half of the spec §1 installation table: the render
-    context is one of the three that drive pages, so the widget must be
+    ``selects`` appears in the expected sequence as a record of where it is
+    registered, *not* as a constraint on it: the shim's role gating is
+    ``isTop && origin === SHELL_ORIGIN``, and chrome.js shadows ``top`` only
+    inside framed documents, whose origin is never the shell's, so it reaches
+    the same verdict on either side of chrome.js (see the role-gating comment in
+    ``selects.js`` and ``Selects.install_context``). What this test does assert
+    about the shim is the render half of the spec §1 installation table: the
+    render context is one of the three that drive pages, so the widget must be
     installed on it at all.
     """
     path = tmp_path / "chrome.scenario.yaml"

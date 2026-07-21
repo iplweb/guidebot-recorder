@@ -653,8 +653,23 @@ no shim installed in that context at all, or no row matching `option` after
 opening the list — the run **fails** rather than silently setting the value; a
 widget the shim cannot drive is not one Guidebot will pretend to have shown. The
 error message says which of those situations it is in, naming the marker class
-where one is the cause. `compile` also probes an enhanced widget's drivability up
-front, so an undriveable one is caught there instead of partway through a render.
+where one is the cause.
+
+`compile` probes an enhanced widget up front as well, but the probe answers a
+narrower question than "is this drivable": it asks whether *any* visible control
+can be associated with the hidden select, not whether the one it found is the
+right one. So it does catch the **no visible control** case — a Tom Select-style
+hidden original whose widget is missing fails at compile, not several minutes
+into a render. It does **not** catch the **wrong control** case: the last step of
+the association heuristic is "the nearest following sibling with a box", so a
+select whose real widget lives elsewhere in the document can be matched to an
+unrelated neighbouring element. Compile still passes — it sets the value with
+`select_option`, never through the widget — and the render is where the mistake
+shows: the cursor clicks that unrelated element on camera, waits for an option
+row that never appears, and the step fails there. If a `select` step compiles but
+fails partway through a render with "the option did not appear", an
+`aria-controls` (or `aria-owns`) on the `<select>` naming its real widget is the
+fix: that is the heuristic's first and strongest signal.
 
 **A click that lands on nothing fails too.** After clicking the row, Guidebot
 reads the `<select>` back and checks that it really shows `option`; if it does
@@ -669,7 +684,20 @@ loads its options over the network, for instance — use the per-step **`mode:
 native`** escape hatch. The list never unfurls: the cursor still glides to the
 collapsed control and clicks it, and the value changes at once, the moment the
 cursor arrives — there is no intermediate stepping animation to watch, only the
-travel and the change. `mode` also has a global form, `config.selects.mode` (see
+travel and the change.
+
+Earlier versions animated that change by pressing `ArrowDown`/`ArrowUp` on the
+collapsed control. That is gone because it is **platform-dependent**, not because
+arrow keys are useless: measured with this project's pinned Playwright on macOS,
+headless and headed, focusing a native `<select>` and pressing `ArrowDown` twice
+leaves `selectedIndex` at `0` and fires no `change` — macOS binds those keys on a
+closed dropdown to opening the OS popup. On Linux and Windows Chromium they do
+step the value and do fire `change`. One scenario would therefore have produced
+one film on a Mac and a different one on a Linux CI runner, from the same
+compiled artifact — so `mode: native` now behaves identically everywhere: travel,
+ripple, value.
+
+`mode` also has a global form, `config.selects.mode` (see
 the `selects` config block below); the per-step value defaults to it and overrides
 it for one stubborn control in an otherwise fine scenario. Under a global `shim`
 the override also *removes* the shim from that one control before driving it, and
@@ -947,9 +975,26 @@ use explicit waits and verify the result.
 | Adding, removing, or reordering a `slide` step | Yes |
 | A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
 | Switching a step's command kind | Yes |
+| A frozen `text=` target that matches an `<option label="…">` or `<optgroup label="…">` string | Rarely — see below |
 
 See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
 including `viewport`/`locale`/`tts.lang` and application drift.
+
+**One narrow case where an artifact compiled before the select shim can need a
+recompile.** The shim draws the option list — and the collapsed control's own
+label — as real DOM text at `<body>` level. For an option's *text content* that
+changes nothing: the same string was already in the DOM, inside the `<select>`,
+so no target can start matching twice because of it. The exception is the `label`
+**attribute**: `<option label="Short">` is rendered by its attribute rather than
+its text, and `<optgroup label="…">` headings put their attribute on screen as
+text that was never DOM text before. A
+step frozen as a `text=` target whose string happens to equal one of those
+attributes can now match in two places, fail its reuse check with `not_unique`,
+and need `guidebot compile` once. Nothing else is exposed: `role=` targets are
+unaffected because every shim overlay is `aria-hidden` and invisible to the
+accessibility tree, and `testid=` and `label=` targets are unaffected because the
+overlays carry neither a test id nor a form label. Re-running `guidebot compile`
+resolves it; the step then freezes against the DOM the render will actually see.
 
 ## Environment substitution
 
