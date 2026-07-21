@@ -133,9 +133,9 @@ narration text, audio, and recorded application frames.
   independent scenario; there is no way to declare a shared base and let one
   variant override only its differences.
 - **No automatic translation** — every variant's canonical `teach`/`click`/`hover`
-  instructions, `enterText.into`, and `select.from`/`option` are authored (or
-  agent-drafted) directly against that variant's own localized page, not derived
-  from another variant or from `translations`.
+  instructions, `enterText.into`, `select.from`/`option`, and `highlight.what` are
+  authored (or agent-drafted) directly against that variant's own localized page,
+  not derived from another variant or from `translations`.
 - **Exactly one audio track per variant, one provider per set** — `config.audioTracks`
   must stay empty on every variant, and the stock CLI requires the same configured
   TTS provider across the whole manifest.

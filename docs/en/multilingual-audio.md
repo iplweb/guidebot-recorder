@@ -73,8 +73,9 @@ The `translations` mapping contains alternate narration only. Its keys must matc
   translations correspond to that `say` text.
 
 Translations are never used to resolve or change browser actions. The canonical
-`teach`, `click`, `hover`, `enterText.into`, and `wait.until` still control the one
-shared flow. They are also not subject to `${ENV_VAR}` substitution.
+`teach`, `click`, `hover`, `enterText.into`, `select.from`, `highlight.what`, and
+`wait.until` still control the one shared flow. They are also not subject to
+`${ENV_VAR}` substitution.
 
 ## Compile once, render all tracks
 

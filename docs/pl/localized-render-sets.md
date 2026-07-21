@@ -19,8 +19,9 @@ scenarios/
 ```
 
 Każdy scenariusz jest kompletny. Wariant angielski zawiera angielskie `teach`,
-`click`, `hover`, `wait.until` i `enterText.into`; nie są one pobierane z
-`translations` ani automatycznie tłumaczone.
+`click`, `hover`, `wait.until`, `enterText.into`, `select.from`/`option` i
+`highlight.what`; nie są one pobierane z `translations` ani automatycznie
+tłumaczone.
 
 Przykłady:
 
