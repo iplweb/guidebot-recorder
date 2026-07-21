@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import math
 from pathlib import Path
 
 from guidebot_recorder.guide.model import Annotation, GuidePage
@@ -26,8 +27,8 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
 .slide .title { font-size: 40px; font-weight: 800; }
 .slide .subtitle { font-size: 24px; color: #555; margin-top: 4mm; }
 .arrow { stroke: #e11; stroke-width: 4; fill: none; marker-end: url(#ah); }
-.circle { stroke: #e11; stroke-width: 4; fill: none; }
-.rect { stroke: #e11; stroke-width: 4; fill: rgba(238,17,17,0.08); }
+.star { stroke: #e11; stroke-width: 4; fill: none; stroke-linecap: round; }
+.frame { stroke: #e11; stroke-width: 4; fill: rgba(238,17,17,0.08); }
 /* The marker colour is per step, so only the shape lives here — `stroke` is set
    on the element itself. */
 .highlight { stroke-width: 5; fill: none; stroke-linecap: round; }
@@ -39,6 +40,30 @@ _ARROW_MARKER = (
 )
 
 
+_STAR_ARMS = 8
+
+
+def _star(a: Annotation) -> list[str]:
+    """Eight arms every 45°, each spanning `r_inner`..`r_outer` around (`cx`, `cy`).
+
+    Coordinates are rounded to two decimals so the HTML does not swell with
+    17-digit floats.
+    """
+
+    cx, cy = a.cx or 0.0, a.cy or 0.0
+    inner, outer = a.r_inner or 0.0, a.r_outer or 0.0
+    lines = []
+    for i in range(_STAR_ARMS):
+        angle = 2 * math.pi * i / _STAR_ARMS
+        dx, dy = math.cos(angle), math.sin(angle)
+        lines.append(
+            f'<line class="star" x1="{round(cx + dx * inner, 2)}" '
+            f'y1="{round(cy + dy * inner, 2)}" x2="{round(cx + dx * outer, 2)}" '
+            f'y2="{round(cy + dy * outer, 2)}"/>'
+        )
+    return lines
+
+
 def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
     w, h = size
     parts = [f'<svg viewBox="0 0 {w} {h}" preserveAspectRatio="none">', _ARROW_MARKER]
@@ -46,10 +71,10 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
         if a.kind == "arrow":
             parts.append(f'<line class="arrow" x1="{a.x1}" y1="{a.y1}" x2="{a.x2}" y2="{a.y2}"/>')
         elif a.kind == "click":
-            parts.append(f'<circle class="circle" cx="{a.cx}" cy="{a.cy}" r="{a.r}"/>')
-        elif a.kind in ("typed", "hover", "selected"):
+            parts.extend(_star(a))
+        elif a.kind == "frame":
             parts.append(
-                f'<rect class="rect" x="{a.x}" y="{a.y}" width="{a.w}" height="{a.h}" rx="4"/>'
+                f'<rect class="frame" x="{a.x}" y="{a.y}" width="{a.w}" height="{a.h}" rx="4"/>'
             )
         elif a.kind == "highlight":
             # The colour comes from the scenario, so it is escaped like any other

@@ -142,7 +142,7 @@ uv run guidebot guide ŚCIEŻKA --out WYNIK.pdf [OPCJE]
 
 Wczytuje źródło i sąsiedni sidecar, następnie buduje krajobrazowy przewodnik PDF z jednym
 anotowanym zrzutem ekranu na znaczący krok, tekstem narracji obok i legendą wizualną
-(strzałkami, kołami, ramkami, glow).
+(strzałkami, ramkami i gwiazdkami).
 
 | Opcja | Domyślnie | Znaczenie |
 |---|---:|---|

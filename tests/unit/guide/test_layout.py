@@ -12,7 +12,7 @@ def test_one_section_per_page_and_title():
             screenshot=Path("/tmp/shot.png"),
             text="Kliknij tu",
             heading=None,
-            annotations=[Annotation(kind="click", cx=60.0, cy=40.0, r=22.0)],
+            annotations=[Annotation(kind="click", cx=60.0, cy=40.0, r_inner=16.0, r_outer=30.0)],
             screenshot_size=(800, 600),
         ),
     ]
@@ -21,20 +21,39 @@ def test_one_section_per_page_and_title():
     assert "Mój przewodnik" in html
 
 
-def test_screenshot_page_has_svg_viewbox_and_circle():
-    pages = [
-        GuidePage(
-            kind="step",
-            screenshot=Path("/tmp/shot.png"),
-            text="t",
-            heading=None,
-            annotations=[Annotation(kind="click", cx=1.0, cy=2.0, r=22.0)],
-            screenshot_size=(800, 600),
-        )
-    ]
+def _shot_page(annotations):
+    return GuidePage(
+        kind="step",
+        screenshot=Path("/tmp/shot.png"),
+        text="t",
+        heading=None,
+        annotations=annotations,
+        screenshot_size=(800, 600),
+    )
+
+
+def test_screenshot_page_has_svg_viewbox_and_star():
+    pages = [_shot_page([Annotation(kind="click", cx=100.0, cy=200.0, r_inner=16.0, r_outer=30.0)])]
     html = render_html(pages, title="x")
     assert 'viewBox="0 0 800 600"' in html
-    assert "<circle" in html
+    assert html.count('<line class="star"') == 8
+    assert '<circle class="circle"' not in html
+
+
+def test_click_star_arms_run_from_inner_to_outer_radius():
+    pages = [_shot_page([Annotation(kind="click", cx=100.0, cy=200.0, r_inner=16.0, r_outer=30.0)])]
+    html = render_html(pages, title="x")
+    # Ramię o kącie 0° biegnie poziomo w prawo, od cx+16 do cx+30.
+    assert '<line class="star" x1="116.0" y1="200.0" x2="130.0" y2="200.0"/>' in html
+    # Ramię o kącie 45° — obie współrzędne przesunięte o r/sqrt(2), zaokrąglone do 2 miejsc.
+    assert '<line class="star" x1="111.31" y1="211.31" x2="121.21" y2="221.21"/>' in html
+
+
+def test_frame_annotation_renders_rounded_rect():
+    pages = [_shot_page([Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0)])]
+    html = render_html(pages, title="x")
+    assert '<rect class="frame" x="10.0" y="20.0" width="300.0" height="40.0" rx="4"/>' in html
+    assert '<rect class="rect"' not in html
 
 
 def test_text_page_has_no_svg():

@@ -307,7 +307,7 @@ async def test_select_step_picks_option_then_screenshots(tmp_path, monkeypatch):
     # only after the value is chosen, so the frame must be taken afterwards.
     assert events == ["select:Zakres lat", "screenshot"]
     assert len(pages) == 1
-    assert any(a.kind == "selected" for a in pages[0].annotations)
+    assert any(a.kind == "frame" for a in pages[0].annotations)
 
 
 def _recording_reuse_failure(calls, reason=None):
@@ -710,6 +710,102 @@ async def test_cursor_resets_after_scroll(tmp_path, monkeypatch):
     )
     assert len(pages) == 2
     assert all(a.kind != "arrow" for a in pages[1].annotations)
+
+
+class SequenceRecorder(FakeRecorder):
+    """`point` walks a list of boxes, so consecutive targets sit apart on the page.
+
+    `FakeRecorder` puts every target in the same 10x10 box, which is enough for
+    "is there an arrow?" but not for "where does it start?" — two targets in the
+    same spot overlap, and an arrow between them is dropped as degenerate.
+    """
+
+    def __init__(self, boxes: list[dict], events: list[str] | None = None):
+        super().__init__(events)
+        self._boxes = list(boxes)
+
+    async def point(self, target, ripple=False):
+        box = self._boxes[len(self.point_calls)]
+        self.point_calls.append(target)
+        locator = FakeLocator(self.events)
+        self.last_locator = locator
+        return PointResult(
+            locator=locator,
+            box=box,
+            center=(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2),
+        )
+
+
+#: Two targets far enough apart that the clipped arrow between them survives
+#: `MIN_ARROW`; the gap runs along x, so the clipped ends are the vertical edges.
+_TWO_BOXES = [
+    {"x": 0.0, "y": 0.0, "width": 100.0, "height": 100.0},
+    {"x": 400.0, "y": 0.0, "width": 100.0, "height": 100.0},
+]
+
+
+async def test_arrow_starts_at_the_edge_of_the_previous_target(tmp_path, monkeypatch):
+    """The next step's arrow needs the *shape* of the previous target, not just its centre.
+
+    Started in the middle of the previous target the arrow crosses all of it and
+    reads as a strikethrough, so capture remembers `prev_shape` alongside
+    `prev_cursor` and hands it to `annotations_for`, which clips the start
+    against it.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(), steps=[Step(click="pierwszy przycisk"), Step(click="drugi przycisk")]
+    )
+    actions = [
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        )
+        for _ in range(2)
+    ]
+    recorder = SequenceRecorder(_TWO_BOXES)
+    pages = await capture_pages(
+        scenario, _compiled(actions), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert len(pages) == 2
+    arrow = next(a for a in pages[1].annotations if a.kind == "arrow")
+    # 50.0 would be the centre of the first target — the pre-clipping behaviour.
+    assert arrow.x1 == pytest.approx(100.0)  # right edge of the first box
+    assert arrow.x2 == pytest.approx(400.0)  # left edge of the second box
+
+
+async def test_shape_memory_resets_after_navigate(tmp_path, monkeypatch):
+    """A navigate clears the remembered shape together with the cursor.
+
+    Kept across a page load, `prev_shape` would clip the next arrow against a
+    box that belongs to a screenshot the reader never sees. Both are dropped, so
+    the step after the navigate opens a fresh arrow-less page.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[
+            Step(click="pierwszy przycisk"),
+            Step(navigate="https://example.com/inna"),
+            Step(click="drugi przycisk"),
+        ],
+    )
+    actions = [
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        ),
+        None,
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        ),
+    ]
+    recorder = SequenceRecorder(_TWO_BOXES)
+    pages = await capture_pages(
+        scenario, _compiled(actions), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert [p.kind for p in pages] == ["step", "navigate", "step"]
+    assert all(a.kind != "arrow" for a in pages[2].annotations)
 
 
 async def _async_none(*_args, **_kwargs):
