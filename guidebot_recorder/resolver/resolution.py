@@ -28,6 +28,7 @@ from guidebot_recorder.models.scenario import Step, WaitUntil
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.resolver.identity_capture import capture_identity
 from guidebot_recorder.resolver.page_context import candidate_roles_for, collect_candidates
+from guidebot_recorder.resolver.positional import PinFail, Pinned, pin_position
 from guidebot_recorder.resolver.reasoner import (
     ErrorReason,
     Reasoner,
@@ -41,8 +42,11 @@ from guidebot_recorder.resolver.validate import (
     validate_compile_time,
 )
 
-#: how many times the Reasoner may be asked again after a rejected answer
-MAX_REPROMPT = 2
+#: how many times the Reasoner may be asked in total for one step. Three, not the
+#: original two: `for _ in range(MAX_REPROMPT)` means "attempts altogether", so at
+#: two the feedback built from a failed pin would get exactly one corrective shot
+#: — too few for a harder task whose every failure is now a hard compile error.
+MAX_REPROMPT = 3
 
 #: the only resolver verdicts that mean "the element is not on the page".
 #: ``multiple_actions`` is deliberately excluded — an ambiguous description is an
@@ -75,6 +79,14 @@ class ResolvedTarget:
     input_text: str | None
     state: WaitState | None
     identity: Identity | None
+    #: How the index in ``target`` was measured, when one was. ``None`` when the
+    #: target resolved uniquely on its own — the common case. The default is
+    #: mandatory: this is a ``frozen``/``slots`` dataclass built with keyword
+    #: arguments in test doubles that know nothing of pinning. It carries the
+    #: whole :class:`Pinned` rather than a bare flag because the compile banner
+    #: has to say "2 of 11 matching", and neither a ``bool`` nor ``target.nth``
+    #: can be turned back into a match count.
+    pinned: Pinned | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +210,60 @@ def _relaxed_exact(target: Target) -> Target | None:
     return None
 
 
+#: The only thing said back to the model about an unknown candidate id. Model
+#: output may carry page text, so the id itself is *not* quoted here — echoing it
+#: would smuggle text around the prompt's untrusted-data fence. A count is a
+#: number, and numbers are what this channel is allowed to carry.
+_UNKNOWN_CANDIDATE_FEEDBACK = (
+    "the previous answer named a candidateId that was not among the {count} "
+    "candidates provided; answer with an id taken from the candidate list"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Accepted:
+    """A target variant that validated, plus how its index was measured (if it was)."""
+
+    target: Target
+    validation: ValidationOk
+    pinned: Pinned | None
+
+
+async def _accept_variant(
+    root: Page | Frame,
+    target: Target,
+    action: ActionKind,
+    option: str | None,
+    candidate_id: str | None,
+    may_pin: bool,
+) -> _Accepted | ValidationFail | PinFail:
+    """Validate one target variant, measuring an index when that is what stands in the way.
+
+    Returns the accepted variant, or the failure that stopped it: a
+    :class:`ValidationFail` when the target does not resolve at all, or a
+    :class:`PinFail` when it resolves to several elements and the index could not
+    be measured — the one failure the model can act on, and the only one whose
+    wording is safe to route back into a prompt.
+    """
+
+    validation = await validate_compile_time(root, target, action, option=option)
+    if isinstance(validation, ValidationOk):
+        return _Accepted(target=target, validation=validation, pinned=None)
+    if validation.reason != "not_unique" or not may_pin:
+        return validation
+
+    pinned = await pin_position(root, target, candidate_id)
+    if isinstance(pinned, PinFail):
+        return pinned
+    # `Pinned(index=None)` is reachable only through a DOM race — validation saw
+    # ≥ 2 matches, the pin saw 1. It is a success like any other: revalidate the
+    # target it produced (here, the `nth`-less one) and accept it if it stands.
+    revalidated = await validate_compile_time(root, pinned.target, action, option=option)
+    if isinstance(revalidated, ValidationOk):
+        return _Accepted(target=pinned.target, validation=revalidated, pinned=pinned)
+    return revalidated
+
+
 async def resolve_step_target(
     root: Page | Frame,
     step: Step,
@@ -213,18 +279,37 @@ async def resolve_step_target(
     :class:`TargetResolutionError`, because those are authoring or resolver bugs
     rather than a missing element. Whatever the injected ``Reasoner`` itself
     raises passes through unchanged and keeps its own type.
+
+    An ambiguous target is no longer an automatic re-prompt: when the reasoner
+    named the candidate it meant, the index that pins the target to that exact
+    element is *measured* here (:func:`pin_position`) and reported back on
+    :attr:`ResolvedTarget.pinned`. Only a failure to measure it becomes feedback
+    for another round — and only the wording of that failure, which by
+    construction holds nothing but counts and ids this function itself minted,
+    ever reaches a prompt.
     """
 
     instruction = step_instruction(step)
     # `highlight` points at a region, so its candidate set includes containers a
     # clicking command has no use for; every other kind gets today's set.
     candidates = await collect_candidates(root, roles=candidate_roles_for(kind))
+    candidate_ids = {candidate.id for candidate in candidates}
     option = step.select.option if step.select is not None else None
     resolution_error: str | None = None
     last_rejection: ValidationFail | None = None
+    last_pin_failure: PinFail | None = None
+    feedback: str | None = None
 
     for _ in range(MAX_REPROMPT):
-        result = await reasoner.resolve(instruction, candidates)
+        # Passed only when non-empty: roughly forty test doubles implement the
+        # protocol as `resolve(self, instruction, candidates)` with no `**kwargs`,
+        # so an unconditional keyword would break every one of them.
+        result = (
+            await reasoner.resolve(instruction, candidates, feedback=feedback)
+            if feedback
+            else await reasoner.resolve(instruction, candidates)
+        )
+        feedback = None
         if isinstance(result, ReasonerError):
             if result.reason in ABSENT_REASONS:
                 return TargetAbsent(reason=result.reason, message=result.message)
@@ -232,6 +317,16 @@ async def resolve_step_target(
         assert isinstance(result, ReasonerResult)
 
         action = action_for(kind, result.action)
+        if result.candidate_id is not None and result.candidate_id not in candidate_ids:
+            # Fail-closed. An id we never sent cannot key a pin, and it is model
+            # output, so it may carry page text — hence it is neither quoted back
+            # to the model nor put in the error. Rejecting it here also buys a
+            # guarantee downstream: every id that reaches `pin_position`, and
+            # therefore every id inside a `PinFail.message`, is one we minted.
+            feedback = _UNKNOWN_CANDIDATE_FEEDBACK.format(count=len(candidates))
+            resolution_error = "reasoner wskazał candidateId spoza listy kandydatów"
+            continue
+
         infers_text = action == "type" and kind == "teach"
         input_text = result.input_text if infers_text else None
         if infers_text:
@@ -247,55 +342,84 @@ async def resolve_step_target(
                 continue
 
         resolution_error = None
-        target = result.target
-        validation = await validate_compile_time(root, target, action, option=option)
-        if not isinstance(validation, ValidationOk):
-            # An exact name the reasoner copied from a candidate can miss under
-            # Playwright's matcher over insignificant whitespace. Retry once with
-            # exact matching relaxed, accepting it only if it still resolves
-            # uniquely; persist the relaxed target so render agrees with compile.
-            relaxed = _relaxed_exact(target)
-            if relaxed is not None:
-                relaxed_validation = await validate_compile_time(
-                    root, relaxed, action, option=option
+        state = step_state(step)
+        # A hidden wait is the one thing never pinned. Its `identity` is `None` by
+        # design, so there is nowhere to freeze the DOM path a drift check would
+        # need; and `reuse_failure` returns early for `hidden` on `count() <= 1`,
+        # which a locator carrying `.nth(n)` always satisfies. A pinned hidden wait
+        # would therefore be unremovable — neither `wait_ambiguous` nor drift could
+        # ever invalidate it. Ambiguity there keeps today's behaviour: re-prompt.
+        may_pin = not (action == "waitFor" and state == "hidden")
+
+        # An exact name the reasoner copied from a candidate can miss under
+        # Playwright's matcher over insignificant whitespace, so the relaxed
+        # variant is tried too — and it is a full variant, pinning included:
+        # "exact → not_found, relaxed → not_unique" is precisely the shape
+        # `_relaxed_exact` exists for. Whichever variant passes is the one frozen,
+        # relaxed or not, so render agrees with compile.
+        variants = [result.target]
+        relaxed = _relaxed_exact(result.target)
+        if relaxed is not None:
+            variants.append(relaxed)
+
+        accepted: _Accepted | None = None
+        rejection: ValidationFail | None = None
+        pin_failure: PinFail | None = None
+        for variant in variants:
+            outcome = await _accept_variant(
+                root, variant, action, option, result.candidate_id, may_pin
+            )
+            if isinstance(outcome, _Accepted):
+                accepted = outcome
+                break
+            if isinstance(outcome, PinFail):
+                pin_failure = outcome
+            elif rejection is None:
+                rejection = outcome
+
+        if accepted is None:
+            last_rejection = rejection if rejection is not None else last_rejection
+            last_pin_failure = pin_failure if pin_failure is not None else last_pin_failure
+            # Only a pin failure is safe to quote to the model: it is built from
+            # match counts and ids we minted. A `ValidationFail.message` may carry
+            # page text (`_option_missing_message` pastes <option> labels), so it
+            # stays on the human-facing path.
+            if pin_failure is not None:
+                feedback = pin_failure.message
+            if action == "select" and rejection is not None and rejection.reason == "not_visible":
+                # Not a reasoner miss to be re-prompted away silently: the page
+                # has no control a viewer could see for this select, so the
+                # choice cannot be filmed at all. Re-prompting may still find a
+                # *different* select, so the loop continues — but if it does not,
+                # the run must say which situation this is rather than "could not
+                # validate the target".
+                resolution_error = (
+                    f"nie znaleziono widocznej kontrolki dla listy {instruction!r} "
+                    "— strona ukryła <select> i nic widocznego go nie zastępuje, "
+                    "więc nie da się pokazać wyboru na filmie"
                 )
-                if isinstance(relaxed_validation, ValidationOk):
-                    target, validation = relaxed, relaxed_validation
-            if not isinstance(validation, ValidationOk):
-                last_rejection = validation
-                if action == "select" and validation.reason == "not_visible":
-                    # Not a reasoner miss to be re-prompted away silently: the
-                    # page has no control a viewer could see for this select, so
-                    # the choice cannot be filmed at all. Re-prompting may still
-                    # find a *different* select, so the loop continues — but if
-                    # it does not, the run must say which situation this is
-                    # rather than "could not validate the target".
-                    resolution_error = (
-                        f"nie znaleziono widocznej kontrolki dla listy {instruction!r} "
-                        "— strona ukryła <select> i nic widocznego go nie zastępuje, "
-                        "więc nie da się pokazać wyboru na filmie"
-                    )
-                continue
-        if infers_text and await is_sensitive_type_target(validation.locator):
+            continue
+
+        if infers_text and await is_sensitive_type_target(accepted.validation.locator):
             resolution_error = (
                 "pole wygląda na przeznaczone dla wartości wrażliwej; użyj enterText z ENV"
             )
             continue
 
-        state = step_state(step)
         # freeze identity BEFORE the action (the DOM may change); waitFor:hidden has none
         identity = (
             None
             if action == "waitFor" and state == "hidden"
-            else await capture_identity(validation.locator)
+            else await capture_identity(accepted.validation.locator)
         )
         return ResolvedTarget(
             action=action,
-            target=target,
-            locator=validation.locator,
+            target=accepted.target,
+            locator=accepted.validation.locator,
             input_text=input_text,
             state=state,
             identity=identity,
+            pinned=accepted.pinned,
         )
 
     if resolution_error is not None:
@@ -306,4 +430,9 @@ async def resolve_step_target(
         # The reason — an absent option, a non-select, an ambiguous name — is the
         # one piece of information that says what to fix in the scenario.
         message += f" (ostatnie odrzucenie: {last_rejection.message})"
+    if last_pin_failure is not None:
+        # The other half of "why": the target matched several elements and the
+        # index could not be measured. Without it the author reads "ambiguous"
+        # and never learns what was missing. This string is human-facing only.
+        message += f" (nie udało się zmierzyć indeksu: {last_pin_failure.message})"
     raise TargetResolutionError(message)

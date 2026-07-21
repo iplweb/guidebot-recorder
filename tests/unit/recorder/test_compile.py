@@ -18,6 +18,7 @@ from guidebot_recorder.recorder.compile import (
 )
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.reasoner import ReasonerResult
+from guidebot_recorder.resolver.resolution import MAX_REPROMPT
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
@@ -389,7 +390,7 @@ async def test_teach_type_rejects_missing_or_invented_text_after_reprompts(
     with pytest.raises(RuntimeError, match=message):
         await run_compile(path, page, reasoner, selects=None)
 
-    assert reasoner.calls == 2
+    assert reasoner.calls == MAX_REPROMPT
     assert await page.locator("#email").input_value() == ""
 
 
@@ -461,7 +462,7 @@ async def test_teach_type_rejects_password_dom_target_before_typing(tmp_path, pa
     with pytest.raises(RuntimeError, match="pole wygląda na przeznaczone"):
         await run_compile(path, page, reasoner, selects=None)
 
-    assert reasoner.calls == 2
+    assert reasoner.calls == MAX_REPROMPT
     assert await page.locator("#value").input_value() == ""
 
 
