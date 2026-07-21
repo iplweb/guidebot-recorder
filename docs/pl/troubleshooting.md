@@ -210,6 +210,25 @@ zestawu WAV jest atomowa; błąd nie powinien zastąpić poprzedniego mastera.
 - `enabled` obecnie czeka na widoczność, a nie osobno na stan aktywności.
 - Dla przejścia SPA bez zmiany URL dodaj jawny wait po akcji.
 
+## Syntetyczny pasek zmienia układ albo URL
+
+`config.chrome` wstrzykuje nakładkę DOM wyłącznie podczas renderu — to nie jest
+prawdziwy interfejs Chromium. Kropki okna są dekoracyjne, a cała nakładka ma
+`pointer-events: none`.
+
+Pasek zajmuje `chrome.height` pikseli, zwiększając górny padding `<html>` w
+obrębie tego samego viewportu — wymiary MP4 się nie zmieniają. Elementy `sticky`/
+`fixed` albo breakpoint RWD mogą więc wyglądać inaczej niż podczas `compile`, które
+nigdy nie wstrzykuje paska, nawet z `--headed`. Zmień viewport albo wyłącz pasek,
+jeśli to psuje przebieg.
+
+Adres synchronizuje się przy nawigacji i przy najbliższym `ensure` nakładki, nie
+przy każdej zmianie History API czy hasha — przez chwilę narracji może być więc
+widoczny `about:blank`, zanim padnie pierwszy `navigate`. Pełny URL, łącznie z
+query i fragmentem, trafia do filmu — dla adresów z sekretem ustaw `showUrl: false`.
+Kłódka jest czysto dekoracyjna i pojawia się dla każdego `https:`, niezależnie od
+faktycznego bezpieczeństwa strony.
+
 ## Obecne ograniczenia
 
 - Codex CLI jest jedynym wbudowanym reasonerem; brak `--reasoner` i `--model`.
