@@ -56,6 +56,29 @@ def test_classify_scroll_is_its_own_kind_regardless_of_say():
     assert classify_step_of(Step(scroll="down", say="Przewijamy w dół")) == "scroll"
 
 
+def test_scan_rejects_a_command_the_guide_cannot_replay(monkeypatch):
+    """Komenda spoza `SUPPORTED_KINDS` pada w preflighcie, a nie po cichu.
+
+    Tą cichą ścieżką przeszedł brak `select`: `classify` mapował nieznaną
+    komendę na stronę tekstową, przeglądarka nigdy nie dostawała akcji, a błąd
+    wychodził dopiero kilka kroków dalej — jako niezgodna tożsamość na stronie,
+    której kompilator nigdy nie widział. Symulujemy przyszłą komendę, bo dziś
+    każda istniejąca jest już obsłużona.
+    """
+
+    scen = Scenario(config=_cfg(), steps=[Step(say="cokolwiek")])
+    monkeypatch.setattr(Step, "command_kind", lambda self: "teleport")
+    with pytest.raises(GuideError, match="teleport"):
+        scan_for_blockers(scen.flat_steps(), [None])
+
+
+def test_scan_allows_a_visual_only_command():
+    """`desktop` to ozdobnik filmu (jak `slide`) — w PDF-ie zostaje narracja."""
+
+    scen = Scenario(config=_cfg(), steps=[Step(desktop={"icon": "chrome"}, say="otwieram")])
+    scan_for_blockers(scen.flat_steps(), [None])  # no raise
+
+
 def test_scan_raises_on_popup():
     scen = Scenario(config=_cfg(), steps=[Step(click="opens something")])
     with pytest.raises(GuideError, match="popup"):
