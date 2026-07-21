@@ -76,6 +76,23 @@ steps:
     say: "Wybieram format BibTeX."
 """
 
+#: Height of the chrome shell's address bar in `CHROME_SCENARIO`, which is also
+#: the y offset between the site iframe's own viewport and the screenshot.
+CHROME_HEIGHT = 56
+
+CHROME_SCENARIO = f"""\
+config:
+  title: Przewodnik w ramce
+  viewport: {{{{width: 800, height: 600}}}}
+  tts: {{{{provider: fake, voice: v, lang: pl-PL}}}}
+  chrome: {{{{enabled: true, showUrl: true, typeOnNavigate: false, height: {CHROME_HEIGHT}}}}}
+  selects: {{{{settleMs: 20, openHoldMs: 30}}}}
+steps:
+  - navigate: "{{url}}"
+  - select: {{{{from: "lista formatów raportu", option: "BibTeX"}}}}
+    say: "Wybieram format BibTeX."
+"""
+
 _SELECT_TARGETS = {"formatów": "format", "miast": "miasto"}
 
 
@@ -409,3 +426,36 @@ async def test_native_mode_keeps_todays_collapsed_frame(
     reference = _read_png(closed)[2]
     band = range(int(_backdrop["y"]) + 5, int(_backdrop["y"]) + 60)
     assert all(rows[y][400] == reference[y][400] == BACKDROP for y in band)
+
+
+async def test_the_marks_are_page_coordinates_when_the_site_runs_in_the_chrome_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `chrome.enabled`, the option row lives inside the site iframe but the
+    screenshot is of the whole shell.
+
+    The marks are drawn over that screenshot, so row geometry read from inside
+    the iframe has to arrive already offset by the address bar's height. If it
+    ever came back iframe-relative, every mark on a chrome render would sit one
+    bar too high — and nothing else in this suite would notice, because every
+    other scenario here runs chrome-less, where the two frames coincide.
+    """
+
+    path = _write(tmp_path, "chrome.scenario.yaml", CHROME_SCENARIO)
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            await run_compile_in_browser(path, browser, SelectReasoner())
+            pages = await _guide_with_pages(path, tmp_path / "chrome.pdf", browser, monkeypatch)
+        finally:
+            await browser.close()
+
+    click = _only(pages[1].annotations, "click")
+    selected = _only(pages[1].annotations, "selected")
+    # The control sits at the very top of the fixture, so an un-offset mark would
+    # land above the bar; both marks must be below it and inside the viewport.
+    assert selected.y > CHROME_HEIGHT
+    assert CHROME_HEIGHT < click.cy < 600
+    # ...and the row is still below the control it belongs to, list-open order.
+    assert click.cy > selected.y + selected.h
