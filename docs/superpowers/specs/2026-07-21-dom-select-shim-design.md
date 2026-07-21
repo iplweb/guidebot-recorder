@@ -96,7 +96,7 @@ sorts it:
 
 | Class | Detected by | Action |
 | --- | --- | --- |
-| **enhanced** | bounding box smaller than 8×8 px, **or** `display: none`, **or** a known marker class (`select2-hidden-accessible`, `tomselected`, `chosen-select`) | leave alone — its list is already DOM |
+| **enhanced** | bounding box smaller than 8×8 px, **or** `display: none`, **or** `visibility: hidden`, **or** a known marker class (`select2-hidden-accessible`, `tomselected`, `chosen-select`) | leave alone — its list is already DOM |
 | **raw** | has a real on-screen box | attach the shim |
 
 The geometric test is library-agnostic on purpose: select2, Chosen and Tom Select
@@ -217,7 +217,14 @@ equals the option label; ties are resolved by document order.
 
 Without an overlay — i.e. during `compile` — the existing direct path stays:
 `locator.select_option(label=…)` sets the value with no animation. Compilation
-is meant to be fast, not pretty. Compile does, however, **probe drivability** of
+is meant to be fast, not pretty.
+
+`mode: native` (global or per-step) keeps **today's arrow-key stepping** under an
+overlay — `_step_option_visibly` is retained, not deleted. An escape hatch must
+never be *less* visible than what shipped before this branch; falling back to a
+silent `select_option` would make the escape worse than the problem.
+
+Compile does, however, **probe drivability** of
 an enhanced widget (can the association heuristic resolve a visible control?)
 and fails there, so an undriveable widget surfaces before a multi-minute render
 is paid for.
@@ -235,9 +242,9 @@ render than in real use — and differently from compile, which goes through
 config:
   selects:
     mode: shim            # shim (default) | native — global escape hatch
-    settle_ms: 1000       # wait for the page to enhance its own selects
-    max_visible_options: 8
-    open_hold_ms: 350     # pause after unfurling, before the cursor moves
+    settleMs: 1000        # wait for the page to enhance its own selects
+    maxVisibleOptions: 8
+    openHoldMs: 350       # pause after unfurling, before the cursor moves
 ```
 
 Per-step override, for one stubborn widget in an otherwise fine scenario:
@@ -286,7 +293,8 @@ would do so unobservably: the run would succeed, the file would look fine, and
 only a viewer would ever discover the step is unwatchable. This matches the
 codebase's fail-loud posture everywhere else in `render.py`. The cost of a hard
 failure is bounded by the two mitigations above: the per-step `mode: native`
-override, and compile-time drivability probing.
+override — which restores the pre-branch arrow-key animation, not silence — and
+compile-time drivability probing.
 
 ## Testing
 

@@ -2,14 +2,17 @@
   "use strict";
 
   // --- Role gating -----------------------------------------------------------
-  // Read the REAL `window.top` here, before chrome.js can shadow it. The
-  // registration order is a documented contract (recorder/render.py:1989-1995):
-  // this script is installed alongside cursor.js/slide.js, ahead of chrome.js.
-  //
-  // Unlike those overlays, the shim belongs to the *site*, not to the top
+  // Unlike cursor.js/slide.js, the shim belongs to the *site*, not to the top
   // window: it must run inside the framed site (isTop === false) and inside
   // top-level popup site documents, but never in the shell, which holds no page
   // content — only the address bar and the site iframe.
+  //
+  // The registration order relative to chrome.js (recorder/render.py:1989-1995)
+  // is a real contract for those overlays, but NOT for this file: the only test
+  // here is `isTop && origin === SHELL_ORIGIN`, and chrome.js shadows `top` only
+  // in its framed branch (chrome.js:18-27), where the origin is never the
+  // shell's. Reading `top` before chrome.js can shadow it is therefore
+  // defensive, not load-bearing — the outcome is the same in either order.
   const SHELL_ORIGIN = "https://guidebot.shell";
   const isTop = window === window.top;
   let documentOrigin = "";
@@ -35,6 +38,16 @@
   const OPTGROUP_ATTRIBUTE = "data-guidebot-optgroup";
   const ACTIVE_ATTRIBUTE = "data-guidebot-option-active";
   const OVERLAY_SELECTOR = "[" + BUTTON_ATTRIBUTE + "],[" + LIST_ATTRIBUTE + "]";
+
+  // The one selector callers may address an option row with. Every shimmed
+  // select on the page owns a row per index, so the bare
+  // `[data-guidebot-option-index="N"]` matches once *per select* and trips
+  // Playwright's strict mode; the uid scope is what makes it unique:
+  //
+  //   [data-guidebot-select-list][data-guidebot-for="<uid>"]
+  //     [data-guidebot-option-index="<n>"]
+  //
+  // where `<uid>` is the value of `data-guidebot-shimmed` on the select.
 
   // Strictly below the cursor's 2147483647 (overlay/cursor.js:18) and its ripple
   // ring/disc, so the synthetic cursor is never buried under the option list.
@@ -66,6 +79,12 @@
   const MODE = CFG.mode === "native" ? "native" : "shim";
   const SETTLE_MS = Math.max(0, Number(CFG.settleMs ?? 1000) || 0);
   const MAX_VISIBLE_OPTIONS = Math.max(1, Number(CFG.maxVisibleOptions ?? 8) || 8);
+  // A debounce that only ever re-arms can be starved forever by a page that
+  // mutates every frame — and our own overlays do exactly that: `cursor.js`
+  // writes `left`/`top` on every frame of a glide, `chrome.js` rewrites its bar
+  // every 24 ms while typing a URL. Past this many settle windows the pending
+  // classification runs regardless of further mutations.
+  const MAX_DEFERRAL_FACTOR = 3;
 
   // Belt-and-braces only: the geometric test below is the primary signal,
   // because it is library-agnostic (select2 clips the original to 1x1 px,
@@ -128,12 +147,33 @@
   let uidCounter = 0;
   let rafHandle = null;
   let settleTimer = null;
+  let settleDeadline = 0;
+  let guaranteedTimer = null;
 
   function css(element, declarations) {
     for (const property of Object.keys(declarations)) {
       element.style.setProperty(property, declarations[property], "important");
     }
   }
+
+  /**
+   * The properties a page rule could otherwise use to make the overlay invisible
+   * or unreadable — the same defence `cursor.js` mounts (overlay/cursor.js:257).
+   *
+   * Inline `!important` outranks author `!important`, so every property the
+   * overlay declares wins; a property it *omits* is the page's to set, and
+   * `div {opacity: .25 !important}` alone is enough to fade the whole widget out
+   * of the recording. Anything that must show on camera declares all of these.
+   */
+  const VISIBILITY_RESET = {
+    visibility: "visible",
+    opacity: "1",
+    transform: "none",
+    filter: "none",
+    "clip-path": "none",
+    // Never `paint`: that would clip the list's own drop shadow.
+    contain: "layout style",
+  };
 
   function normalizeLabel(text) {
     return String(text == null ? "" : text)
@@ -143,6 +183,20 @@
 
   function asElement(node) {
     return node && node.nodeType === 1 ? node : null;
+  }
+
+  /**
+   * The label of an `<option>`, the way `select_option(label=…)` sees it.
+   *
+   * Playwright matches on `option.label`, which is the `label` *attribute* when
+   * present and the option's text otherwise. Reading `textContent` instead would
+   * make `<option label="Krótko">długi tekst</option>` resolve differently in
+   * compile than in render — and show text on camera the native control never
+   * displays. `textContent` stays as the fallback for the empty-label case.
+   */
+  function optionLabel(option) {
+    const label = option.label;
+    return normalizeLabel(label ? label : option.textContent);
   }
 
   // --- Classification --------------------------------------------------------
@@ -234,11 +288,18 @@
       computed.paddingLeft && computed.paddingLeft !== "0px" ? computed.paddingLeft : "8px";
     css(button, {
       ...entry.font,
+      ...VISIBILITY_RESET,
       position: "fixed",
       left: "0px",
       top: "0px",
       width: "0px",
       height: "0px",
+      // A page `min-height`/`min-width` would otherwise win over the pinned
+      // size and inflate the button past the control it stands in for.
+      "min-width": "0",
+      "max-width": "none",
+      "min-height": "0",
+      "max-height": "none",
       margin: "0",
       display: "none",
       "align-items": "center",
@@ -260,7 +321,17 @@
 
     const label = document.createElement("span");
     css(label, {
+      ...VISIBILITY_RESET,
       flex: "1 1 auto",
+      position: "static",
+      margin: "0",
+      padding: "0",
+      border: "0",
+      "font-size": "inherit",
+      "line-height": "normal",
+      height: "auto",
+      "min-height": "0",
+      "max-height": "none",
       overflow: "hidden",
       "white-space": "nowrap",
       "text-overflow": "ellipsis",
@@ -271,13 +342,19 @@
     // the selected label.
     const caret = document.createElement("span");
     css(caret, {
+      ...VISIBILITY_RESET,
       flex: "0 0 auto",
-      "margin-left": "6px",
+      position: "static",
+      display: "block",
+      padding: "0",
+      margin: "0 0 0 6px",
       width: "0",
       height: "0",
+      "min-height": "0",
       "border-left": "4px solid transparent",
       "border-right": "4px solid transparent",
       "border-top": "5px solid " + (computed.color || "#4b5563"),
+      "border-bottom": "0",
     });
     button.appendChild(caret);
 
@@ -293,10 +370,14 @@
     list.setAttribute("role", "listbox");
     css(list, {
       ...entry.font,
+      ...VISIBILITY_RESET,
       position: "fixed",
       left: "0px",
       top: "0px",
       width: "0px",
+      "min-width": "0",
+      "max-width": "none",
+      "min-height": "0",
       display: "none",
       margin: "0",
       padding: "0",
@@ -329,6 +410,7 @@
       select: select,
       open: false,
       rect: null,
+      collapsed: false,
       activeIndex: -1,
       lastIndex: -1,
       font: readFont(select),
@@ -364,11 +446,28 @@
 
   // --- Option rows -----------------------------------------------------------
 
+  /**
+   * Rows carry the full reset too: `layoutList` derives the list's `max-height`
+   * from a measured row, so a page `div` rule that resizes rows would silently
+   * push options past `max_visible_options`.
+   */
   function rowStyle(row, disabled) {
     css(row, {
+      ...VISIBILITY_RESET,
       display: "block",
+      position: "static",
+      float: "none",
       padding: "6px 8px",
       margin: "0",
+      border: "0",
+      width: "auto",
+      "min-width": "0",
+      "max-width": "none",
+      height: "auto",
+      "min-height": "0",
+      "max-height": "none",
+      "font-size": "inherit",
+      "line-height": "normal",
       "box-sizing": "border-box",
       "white-space": "nowrap",
       overflow: "hidden",
@@ -391,7 +490,7 @@
     if (option.disabled) {
       row.setAttribute(OPTION_DISABLED_ATTRIBUTE, "");
     }
-    row.textContent = normalizeLabel(option.textContent);
+    row.textContent = optionLabel(option);
     rowStyle(row, option.disabled);
     return row;
   }
@@ -402,9 +501,22 @@
     heading.setAttribute("role", "presentation");
     heading.textContent = normalizeLabel(group.getAttribute("label") || "");
     css(heading, {
+      ...VISIBILITY_RESET,
       display: "block",
+      position: "static",
+      float: "none",
       padding: "6px 8px 2px 8px",
       margin: "0",
+      border: "0",
+      width: "auto",
+      "min-width": "0",
+      "max-width": "none",
+      height: "auto",
+      "min-height": "0",
+      "max-height": "none",
+      "font-size": "inherit",
+      "line-height": "normal",
+      "box-sizing": "border-box",
       "font-weight": "700",
       color: GROUP_COLOR,
       cursor: "default",
@@ -415,8 +527,46 @@
     return heading;
   }
 
+  /**
+   * A cheap fingerprint of everything `buildOptions` renders.
+   *
+   * Rebuilding unconditionally on every classification pass would reset the
+   * highlight and the scroll position of an open list; rebuilding only when this
+   * changes keeps the rows fresh without the churn.
+   */
+  function optionsSignature(select) {
+    const parts = [];
+    for (const child of Array.from(select.children)) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === "option") {
+        parts.push("o:" + optionLabel(child) + (child.disabled ? ":d" : ""));
+      } else if (tag === "optgroup") {
+        parts.push("g:" + normalizeLabel(child.getAttribute("label") || ""));
+        for (const option of Array.from(child.children)) {
+          if (option.tagName.toLowerCase() === "option") {
+            parts.push("go:" + optionLabel(option) + (option.disabled ? ":d" : ""));
+          }
+        }
+      }
+    }
+    return parts.join("");
+  }
+
+  /** Rebuild the rows if — and only if — the option set actually changed. */
+  function syncOptions(entry) {
+    const signature = optionsSignature(entry.select);
+    if (signature === entry.signature) {
+      return;
+    }
+    buildOptions(entry);
+    if (entry.open) {
+      setActive(entry, entry.select.selectedIndex);
+    }
+  }
+
   function buildOptions(entry) {
     const list = entry.list;
+    entry.signature = optionsSignature(entry.select);
     list.textContent = "";
     for (const child of Array.from(entry.select.children)) {
       const tag = child.tagName.toLowerCase();
@@ -465,7 +615,7 @@
   function updateLabel(entry) {
     const select = entry.select;
     const option = select.options[select.selectedIndex];
-    entry.label.textContent = option ? normalizeLabel(option.textContent) : "";
+    entry.label.textContent = option ? optionLabel(option) : "";
     entry.lastIndex = select.selectedIndex;
   }
 
@@ -479,11 +629,20 @@
    * select2 appends its own list to <body>.
    */
   function pin(entry, force) {
-    const rect = entry.select.getBoundingClientRect();
+    const select = entry.select;
+    const rect = select.getBoundingClientRect();
+    // A detached or collapsed select must lose its dropdown *this frame*: the
+    // debounced `classify()` is what eventually unshims it, and a whole
+    // `settle_ms` of a ghost list pinned to a zero rect lands on camera.
+    const collapsed = !select.isConnected || rect.width < 1 || rect.height < 1;
+    if (collapsed && entry.open) {
+      closeList(select);
+    }
     const last = entry.rect;
     if (
       !force &&
       last &&
+      collapsed === entry.collapsed &&
       last.left === rect.left &&
       last.top === rect.top &&
       last.width === rect.width &&
@@ -492,7 +651,7 @@
       return;
     }
     entry.rect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    const collapsed = rect.width < 1 || rect.height < 1;
+    entry.collapsed = collapsed;
     css(entry.button, {
       display: collapsed ? "none" : "flex",
       left: rect.left + "px",
@@ -512,22 +671,35 @@
    * available — floored at MIN_LIST_HEIGHT — and the list scrolls internally.
    * It never flips above the control.
    */
+  /**
+   * Height that shows the first MAX_VISIBLE_OPTIONS *options*.
+   *
+   * Optgroup headings are counted but do not consume the budget: counting only
+   * option rows (as this once did) lets every heading push a real option out of
+   * sight, so a grouped select shows fewer choices than configured.
+   */
+  function preferredHeight(list) {
+    let shown = 0;
+    let total = 0;
+    for (const row of list.children) {
+      const isOption = row.hasAttribute(OPTION_INDEX_ATTRIBUTE);
+      if (isOption && shown >= MAX_VISIBLE_OPTIONS) {
+        break;
+      }
+      const measured = row.getBoundingClientRect().height;
+      total += measured > 0 ? measured : FALLBACK_ROW_HEIGHT;
+      if (isOption) {
+        shown += 1;
+      }
+    }
+    return Math.ceil(total) + LIST_CHROME_PX;
+  }
+
   function layoutList(entry, rect) {
     const list = entry.list;
     const top = rect.top + rect.height + LIST_GAP;
     const available = Math.max(0, window.innerHeight - top - VIEWPORT_MARGIN);
-    let rowHeight = FALLBACK_ROW_HEIGHT;
-    for (const row of list.children) {
-      if (row.hasAttribute(OPTION_INDEX_ATTRIBUTE)) {
-        const measured = row.getBoundingClientRect().height;
-        if (measured > 0) {
-          rowHeight = measured;
-        }
-        break;
-      }
-    }
-    const preferred = Math.ceil(rowHeight * MAX_VISIBLE_OPTIONS) + LIST_CHROME_PX;
-    const maxHeight = Math.max(MIN_LIST_HEIGHT, Math.min(preferred, available));
+    const maxHeight = Math.max(MIN_LIST_HEIGHT, Math.min(preferredHeight(list), available));
     css(list, {
       left: rect.left + "px",
       top: top + "px",
@@ -573,9 +745,8 @@
         closeList(other.select);
       }
     }
-    // Rebuild every time: the page may have replaced the option set since the
-    // shim was attached.
-    buildOptions(entry);
+    // The page may have replaced the option set since the last pass.
+    syncOptions(entry);
     updateLabel(entry);
     entry.open = true;
     css(entry.list, { display: "block" });
@@ -643,18 +814,40 @@
 
   // --- Input handling --------------------------------------------------------
 
-  function shimmedSelectFrom(target) {
-    const element = asElement(target);
-    if (!element) {
-      return null;
+  /**
+   * The elements an event actually travelled through, shadow boundaries included.
+   *
+   * `event.target` is retargeted to the shadow *host* for anything inside an
+   * open shadow root, so `closest()` on it can never find the select the user
+   * pressed. `composedPath()` is what sees through the boundary.
+   */
+  function eventPath(event) {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : null;
+    return path && path.length > 0 ? path : [event.target];
+  }
+
+  function shimmedSelectFrom(event) {
+    for (const node of eventPath(event)) {
+      const element = asElement(node);
+      if (element && shims.has(element)) {
+        return element;
+      }
     }
-    const select = element.closest("select[" + MARKER_ATTRIBUTE + "]");
-    return select && shims.has(select) ? select : null;
+    return null;
+  }
+
+  function overlayFrom(event) {
+    for (const node of eventPath(event)) {
+      const element = asElement(node);
+      if (element && element.closest && element.closest(OVERLAY_SELECTOR)) {
+        return element;
+      }
+    }
+    return null;
   }
 
   function onMouseDown(event) {
-    const element = asElement(event.target);
-    if (element && element.closest(OVERLAY_SELECTOR)) {
+    if (overlayFrom(event)) {
       // Keep focus (and therefore the open list) while the click lands.
       event.preventDefault();
       return;
@@ -662,7 +855,7 @@
     if (event.button !== 0) {
       return;
     }
-    const select = shimmedSelectFrom(event.target);
+    const select = shimmedSelectFrom(event);
     if (!select) {
       closeAll();
       return;
@@ -688,7 +881,7 @@
   }
 
   function onKeyDown(event) {
-    const select = shimmedSelectFrom(event.target);
+    const select = shimmedSelectFrom(event);
     if (!select) {
       return;
     }
@@ -719,10 +912,38 @@
 
   // --- Classification pass and observer --------------------------------------
 
+  /**
+   * Every `<select>` in the document, descending into **open** shadow roots.
+   *
+   * Closed roots are unreachable by design and stay native. Each root found is
+   * also handed to the observer, so a select added to it later is classified
+   * like any other. A root attached *after* this sweep produces no mutation
+   * record of its own (`attachShadow` is invisible to a MutationObserver); it is
+   * picked up by the next pass the host's own mutations trigger.
+   */
+  function collectSelects() {
+    const found = [];
+    const pending = [document];
+    while (pending.length > 0) {
+      const root = pending.pop();
+      for (const element of root.querySelectorAll("*")) {
+        if (element.shadowRoot) {
+          pending.push(element.shadowRoot);
+          observeRoot(element.shadowRoot);
+        }
+        if (element.tagName.toLowerCase() === "select") {
+          found.push(element);
+        }
+      }
+    }
+    return found;
+  }
+
   function classify() {
     if (!document.body) {
-      // Nothing to append to yet; try again rather than resolving `ready` early.
-      scheduleClassify();
+      // Nothing to append to yet; retry on the uncancellable timer rather than
+      // resolving `ready` early or handing the retry to the starvable debounce.
+      scheduleGuaranteedPass();
       return;
     }
     for (const select of Array.from(shims.keys())) {
@@ -739,8 +960,12 @@
       if (!entry.list.isConnected) {
         document.body.appendChild(entry.list);
       }
+      // Rows read stale text until the next `open()` otherwise; the page may
+      // have swapped the whole option set in the meantime.
+      syncOptions(entry);
+      updateLabel(entry);
     }
-    for (const select of Array.from(document.querySelectorAll("select"))) {
+    for (const select of collectSelects()) {
       if (shims.has(select) || !isShimmable(select)) {
         continue;
       }
@@ -748,19 +973,53 @@
     }
     scheduleFrame();
     markReady();
+    // A pass has now completed, so the fallback timer has served its purpose;
+    // from here the capped debounce is enough to keep classification alive.
+    if (guaranteedTimer !== null) {
+      window.clearTimeout(guaranteedTimer);
+      guaranteedTimer = null;
+    }
   }
 
+  /**
+   * Debounced classification, with a hard ceiling on how long it may be deferred.
+   *
+   * Every re-arm still restarts the settle window, but never past
+   * `MAX_DEFERRAL_FACTOR` windows from the moment the current chain started, so
+   * an every-frame mutation slows the pass down instead of cancelling it forever.
+   */
   function scheduleClassify(delay) {
-    if (settleTimer !== null) {
+    const requested = delay === undefined ? SETTLE_MS : delay;
+    const now = Date.now();
+    if (settleTimer === null) {
+      settleDeadline = now + Math.max(requested, SETTLE_MS * MAX_DEFERRAL_FACTOR);
+    } else {
       window.clearTimeout(settleTimer);
     }
-    settleTimer = window.setTimeout(
-      () => {
-        settleTimer = null;
-        classify();
-      },
-      delay === undefined ? SETTLE_MS : delay,
-    );
+    const wait = Math.max(0, Math.min(requested, settleDeadline - now));
+    settleTimer = window.setTimeout(() => {
+      settleTimer = null;
+      classify();
+    }, wait);
+  }
+
+  /**
+   * The first pass, on a timer nothing cancels — not the debounce above, not
+   * `refresh()`. `ready` is the barrier compile and render block on, so it must
+   * settle even when the page never stops mutating.
+   *
+   * It fires at the same ceiling the debounce is capped at, so on a quiet page
+   * the debounce still runs the first pass one settle window in — the head start
+   * a widget library needs — and only a churning page falls back to this.
+   */
+  function scheduleGuaranteedPass() {
+    if (guaranteedTimer !== null) {
+      return;
+    }
+    guaranteedTimer = window.setTimeout(() => {
+      guaranteedTimer = null;
+      classify();
+    }, SETTLE_MS * MAX_DEFERRAL_FACTOR);
   }
 
   const OWN_ATTRIBUTES = [
@@ -793,9 +1052,6 @@
   function isRelevant(records) {
     for (const record of records) {
       if (record.type === "attributes") {
-        if (record.attributeName === MARKER_ATTRIBUTE) {
-          continue;
-        }
         if (isOurNode(record.target)) {
           continue;
         }
@@ -826,13 +1082,25 @@
     }
   });
 
+  const OBSERVER_OPTIONS = {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "style", "hidden", "multiple", "size", "disabled"],
+  };
+
+  /** Observe a root once. Shadow roots need their own registration. */
+  const observedRoots = new Set();
+  function observeRoot(root) {
+    if (observedRoots.has(root)) {
+      return;
+    }
+    observedRoots.add(root);
+    observer.observe(root, OBSERVER_OPTIONS);
+  }
+
   function startObserving() {
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["class", "style", "hidden", "multiple", "size", "disabled"],
-    });
+    observeRoot(document.documentElement);
   }
 
   // --- Public API ------------------------------------------------------------
@@ -876,13 +1144,13 @@
     const wanted = normalizeLabel(label);
     const options = select.options;
     for (let index = 0; index < options.length; index += 1) {
-      if (normalizeLabel(options[index].textContent) === wanted) {
+      if (optionLabel(options[index]) === wanted) {
         return index;
       }
     }
     const lowered = wanted.toLowerCase();
     for (let index = 0; index < options.length; index += 1) {
-      if (normalizeLabel(options[index].textContent).toLowerCase() === lowered) {
+      if (optionLabel(options[index]).toLowerCase() === lowered) {
         return index;
       }
     }
@@ -936,25 +1204,36 @@
     },
     optionIndexFor: optionIndexFor,
     scrollOptionIntoView: scrollOptionIntoView,
-    /** Force an immediate classification pass, skipping the settle debounce. */
+    /**
+     * Re-arm the settle debounce — deliberately *not* an immediate pass.
+     *
+     * The re-injection guard calls this, and injection happens at t≈0 of a
+     * document (`add_init_script` plus an explicit `evaluate`, the idiom
+     * `Overlay.install` sets). Classifying there would beat the page's own
+     * widget initialisation, which is the race `settle_ms` exists to prevent.
+     */
     refresh: () => {
-      if (settleTimer !== null) {
-        window.clearTimeout(settleTimer);
-        settleTimer = null;
-      }
-      classify();
+      scheduleClassify();
     },
   });
 
   document.addEventListener("mousedown", onMouseDown, true);
   document.addEventListener("keydown", onKeyDown, true);
-  // Capture phase, so a select inside an internally scrolling container counts.
-  window.addEventListener("scroll", () => pinAll(true), true);
+  // Capture phase, so a select inside an internally scrolling container counts
+  // (`scroll` does not bubble). Unforced: a scroll that moved no shim must cost
+  // no style writes — the rect comparison in `pin` is the whole point, and the
+  // rAF loop would re-pin the same frame anyway.
+  window.addEventListener("scroll", () => pinAll(false), true);
+  // Forced, unlike scroll: `layoutList` reads `window.innerHeight`, so the list
+  // needs a new clamp even when the control itself has not moved.
   window.addEventListener("resize", () => pinAll(true));
 
   function start() {
     startObserving();
+    // Both: the debounce gives the page its settle window, the fallback timer
+    // guarantees the pass happens even if that window never closes.
     scheduleClassify();
+    scheduleGuaranteedPass();
   }
 
   if (document.readyState === "loading") {

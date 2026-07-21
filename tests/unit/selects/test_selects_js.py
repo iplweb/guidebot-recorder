@@ -14,6 +14,7 @@ frozen target under it.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from importlib.resources import files
 
@@ -108,6 +109,128 @@ async def test_shimming_does_not_touch_the_ancestor_chain(page: Page) -> None:
         " return out; }"
     )
     assert polluted == [], polluted
+
+
+# --- Shadow DOM ------------------------------------------------------------
+# The same fixture as NESTED, but behind an open shadow root. `identity_capture`
+# and `page_context` both walk *composed* parents, so such a select compiles
+# today and must keep working after this branch.
+_ATTACH_SHADOW = """() => {
+  const root = document.getElementById('host').attachShadow({mode: 'open'});
+  root.innerHTML =
+    "<div class='row' id='row'><label for='s'>Województwo</label>"
+    + "<select id='s' style='width:220px'>"
+    + "<option>Mazowieckie</option><option>Lubelskie</option><option>Śląskie</option>"
+    + "</select><span class='hint'>podpowiedź</span></div>";
+}"""
+
+# Mirrors `identity_capture.py`'s `composedParent`: parentElement, else the
+# shadow host. This is the chain whose hash freezes every compiled target.
+_SNAPSHOT_COMPOSED = """() => {
+  const root = document.getElementById('host').shadowRoot;
+  const el = root.getElementById('s');
+  const composedParent = (node) =>
+    node.assignedSlot || node.parentElement ||
+    (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
+  const chain = [];
+  for (let a = composedParent(el); a; a = composedParent(a)) {
+    chain.push([a.tagName.toLowerCase(), a.getAttribute('role') || '', a.id || '']);
+  }
+  const parent = el.parentElement;
+  return {
+    chain: chain,
+    siblingIndex: Array.prototype.indexOf.call(parent.children, el),
+    siblingTags: Array.from(parent.children).map((n) => n.tagName.toLowerCase()),
+    nextSiblingClass: el.nextElementSibling ? el.nextElementSibling.className : null,
+    structuralSelectorMatches: root.querySelector('select + .hint') !== null,
+    shadowChildCount: root.childNodes.length,
+  };
+}"""
+
+
+async def test_a_select_in_an_open_shadow_root_is_shimmed(page: Page) -> None:
+    """I3: skipping shadow roots turns a shipped, working case into a hard failure."""
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await page.evaluate(_ATTACH_SHADOW)
+    await _inject(page)
+    state = await page.evaluate(
+        """() => {
+      const s = document.getElementById('host').shadowRoot.getElementById('s');
+      const api = window.__guidebot_selects;
+      return {
+        isShimmed: api.isShimmed(s),
+        marker: s.hasAttribute('data-guidebot-shimmed'),
+        buttonHost: api.buttonFor(s) ? api.buttonFor(s).parentElement.tagName.toLowerCase() : null,
+        listHost: api.listFor(s) ? api.listFor(s).parentElement.tagName.toLowerCase() : null,
+        optionIndex: api.optionIndexFor(s, 'Śląskie'),
+      };
+    }"""
+    )
+    assert state == {
+        "isShimmed": True,
+        "marker": True,
+        "buttonHost": "body",
+        "listHost": "body",
+        "optionIndex": 2,
+    }
+
+
+async def test_shimming_a_shadow_root_select_does_not_touch_its_ancestor_chain(page: Page) -> None:
+    """The no-wrapper invariant, verified across the shadow boundary too."""
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await page.evaluate(_ATTACH_SHADOW)
+    before = await page.evaluate(_SNAPSHOT_COMPOSED)
+    await _inject(page)
+    await page.evaluate(
+        "() => window.__guidebot_selects.open("
+        "document.getElementById('host').shadowRoot.getElementById('s'))"
+    )
+    after = await page.evaluate(_SNAPSHOT_COMPOSED)
+    assert after == before, "shimming restructured the composed ancestor chain"
+    polluted = await page.evaluate(
+        """() => {
+      const root = document.getElementById('host').shadowRoot;
+      return Array.from(root.querySelectorAll(
+        '[data-guidebot-select-button],[data-guidebot-select-list]')).length;
+    }"""
+    )
+    assert polluted == 0, "the overlay was mounted inside the shadow root"
+
+
+async def test_mousedown_inside_a_shadow_root_opens_the_list(page: Page) -> None:
+    """I3: the listener sees the retargeted host, so it must use `composedPath()`."""
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await page.evaluate(_ATTACH_SHADOW)
+    await _inject(page)
+    result = await page.evaluate(
+        """() => {
+      const s = document.getElementById('host').shadowRoot.getElementById('s');
+      const ev = new MouseEvent(
+        'mousedown', {bubbles: true, cancelable: true, composed: true, button: 0});
+      s.dispatchEvent(ev);
+      return {
+        prevented: ev.defaultPrevented,
+        display: getComputedStyle(window.__guidebot_selects.listFor(s)).display,
+      };
+    }"""
+    )
+    assert result["prevented"] is True, "native OS popup was not suppressed"
+    assert result["display"] != "none", "mousedown inside the shadow root did not open the list"
+
+
+async def test_a_late_select_in_an_observed_shadow_root_is_shimmed(page: Page) -> None:
+    """I3: shadow roots must be observed, not only swept once."""
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await page.evaluate("() => { document.getElementById('host').attachShadow({mode: 'open'}); }")
+    await _inject(page)
+    await page.evaluate(
+        "() => { document.getElementById('host').shadowRoot.innerHTML = "
+        '\'<select id="s" style="width:200px"><option>a</option><option>b</option></select>\'; }'
+    )
+    await page.wait_for_function(
+        "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
+        timeout=3000,
+    )
 
 
 async def test_only_mutation_on_the_select_is_the_marker_attribute(page: Page) -> None:
@@ -278,15 +401,22 @@ async def test_mousedown_opens_the_list_and_suppresses_the_native_popup(page: Pa
 async def test_keyboard_opens_the_list(page: Page, key: str) -> None:
     await page.set_content(NESTED)
     await _inject(page)
-    display = await page.evaluate(
+    result = await page.evaluate(
         """(key) => {
       const s = document.getElementById('s');
-      s.dispatchEvent(new KeyboardEvent('keydown', {key: key, bubbles: true, cancelable: true}));
-      return getComputedStyle(window.__guidebot_selects.listFor(s)).display;
+      const ev = new KeyboardEvent('keydown', {key: key, bubbles: true, cancelable: true});
+      s.dispatchEvent(ev);
+      return {
+        prevented: ev.defaultPrevented,
+        display: getComputedStyle(window.__guidebot_selects.listFor(s)).display,
+      };
     }""",
         key,
     )
-    assert display != "none"
+    assert result["display"] != "none"
+    # Same reason as mousedown: unprevented, the key would also open Chromium's
+    # native, un-recordable popup (and ' ' would scroll the page).
+    assert result["prevented"] is True, "the native key handling was not suppressed"
 
 
 async def test_real_click_on_the_select_unfurls_the_list(page: Page) -> None:
@@ -299,8 +429,44 @@ async def test_real_click_on_the_select_unfurls_the_list(page: Page) -> None:
     await page.wait_for_selector(list_selector, state="visible", timeout=3000)
 
 
+# Two shimmed selects on one page — the normal case, not an edge case. The bare
+# `[data-guidebot-option-index="N"]` selector then matches one row per select.
+NESTED_AND_A_SECOND_SELECT = NESTED.replace(
+    "</main></body>",
+    "</main><select id='other' style='width:220px'>"
+    "<option>Mazowieckie</option><option>Lubelskie</option><option>Śląskie</option>"
+    "</select></body>",
+)
+
+
+def option_selector(uid: str, index: int) -> str:
+    """The documented, uid-scoped way to address one shimmed select's option row.
+
+    The bare attribute selector is ambiguous the moment a page has two shimmed
+    selects, and Playwright's strict mode rejects it.
+    """
+    return (
+        f'[data-guidebot-select-list][data-guidebot-for="{uid}"] '
+        f'[data-guidebot-option-index="{index}"]'
+    )
+
+
+async def test_option_rows_must_be_addressed_scoped_to_their_own_select(page: Page) -> None:
+    """M6: the bare selector is a Playwright strict-mode violation."""
+    await page.set_content(NESTED_AND_A_SECOND_SELECT)
+    await _inject(page)
+    await page.evaluate("() => window.__guidebot_selects.open(document.getElementById('s'))")
+    assert await page.locator('[data-guidebot-option-index="2"]').count() == 2
+    with pytest.raises(Exception, match="strict mode violation"):
+        await page.locator('[data-guidebot-option-index="2"]').click(timeout=1500)
+    uid = await page.get_attribute("#s", "data-guidebot-shimmed")
+    assert await page.locator(option_selector(uid, 2)).count() == 1
+    await page.locator(option_selector(uid, 2)).click()
+    assert await page.evaluate("() => document.getElementById('s').selectedIndex") == 2
+
+
 async def test_choosing_an_option_sets_value_and_fires_input_and_change(page: Page) -> None:
-    await page.set_content(NESTED)
+    await page.set_content(NESTED_AND_A_SECOND_SELECT)
     await _inject(page)
     await page.evaluate(
         """() => {
@@ -312,11 +478,13 @@ async def test_choosing_an_option_sets_value_and_fires_input_and_change(page: Pa
       window.__guidebot_selects.open(s);
     }"""
     )
-    await page.click('[data-guidebot-option-index="2"]')
+    uid = await page.get_attribute("#s", "data-guidebot-shimmed")
+    await page.click(option_selector(uid, 2))
     state = await page.evaluate(
         """() => ({
       value: document.getElementById('s').value,
       index: document.getElementById('s').selectedIndex,
+      otherIndex: document.getElementById('other').selectedIndex,
       events: window.__events,
       display: getComputedStyle(
         window.__guidebot_selects.listFor(document.getElementById('s'))).display,
@@ -324,6 +492,7 @@ async def test_choosing_an_option_sets_value_and_fires_input_and_change(page: Pa
     )
     assert state["index"] == 2
     assert state["value"] == "Śląskie"
+    assert state["otherIndex"] == 0, "the click leaked into the other shimmed select"
     assert state["events"] == [["input", True], ["change", True]]
     assert state["display"] == "none", "choosing an option must close the list"
 
@@ -343,7 +512,8 @@ async def test_rechoosing_the_current_option_fires_nothing(page: Page) -> None:
       window.__guidebot_selects.open(s);
     }"""
     )
-    await page.click('[data-guidebot-option-index="1"]')
+    uid = await page.get_attribute("#s", "data-guidebot-shimmed")
+    await page.click(option_selector(uid, 1))
     state = await page.evaluate(
         "() => ({events: window.__events, index: document.getElementById('s').selectedIndex})"
     )
@@ -410,6 +580,89 @@ async def test_list_never_flips_upward_and_keeps_a_floor_height(page: Page) -> N
     assert abs(geo["maxHeight"] - 120) < 1.0, geo["maxHeight"]
 
 
+# Everything `cursor.js:257-277` defends against, plus what breaks the list's
+# row-height maths. Inline `!important` outranks author `!important`, so every
+# property the overlay declares itself already wins; these are the ones it must
+# declare in the first place.
+HOSTILE_CSS = (
+    "<style>div,span{opacity:.25!important;visibility:hidden!important;"
+    "transform:scale(3)!important;filter:blur(4px)!important;clip-path:inset(50%)!important;"
+    "contain:paint!important;font-size:44px!important;border:7px solid red!important;"
+    "height:120px!important;min-height:120px!important;position:absolute!important;"
+    "float:left!important}</style>"
+)
+
+_READ_OVERLAY_STYLES = """() => {
+  const api = window.__guidebot_selects;
+  const s = document.getElementById('s');
+  const button = api.buttonFor(s);
+  const list = api.listFor(s);
+  const row = list.querySelector('[data-guidebot-option-index="0"]');
+  const read = (el) => {
+    const cs = getComputedStyle(el);
+    return {
+      opacity: cs.opacity,
+      visibility: cs.visibility,
+      transform: cs.transform,
+      filter: cs.filter,
+      clipPath: cs.clipPath,
+    };
+  };
+  const rect = (el) => {
+    const r = el.getBoundingClientRect();
+    return [r.left, r.top, r.width, r.height];
+  };
+  return {
+    button: read(button),
+    list: read(list),
+    row: read(row),
+    label: read(button.firstElementChild),
+    buttonContain: getComputedStyle(button).contain,
+    listContain: getComputedStyle(list).contain,
+    rowPosition: getComputedStyle(row).position,
+    rowFontSize: getComputedStyle(row).fontSize,
+    listFontSize: getComputedStyle(list).fontSize,
+    rowHeight: row.getBoundingClientRect().height,
+    buttonRect: rect(button),
+    selectRect: rect(s),
+    maxHeight: Number.parseFloat(getComputedStyle(list).maxHeight),
+  };
+}"""
+
+
+async def test_page_css_cannot_bleed_into_the_overlay(page: Page) -> None:
+    """I4: for a feature whose whole point is on-camera visibility, this is silent.
+
+    Measured before the fix: a page rule `div {opacity:.25!important}` renders the
+    shim button at 25 % opacity.
+    """
+    labels = [f"Opcja {i}" for i in range(30)]
+    await page.set_content(
+        f"<body style='margin:0'>{HOSTILE_CSS}"
+        f"<select id='s' style='width:220px'>{_options(labels)}</select></body>"
+    )
+    await _inject(page)
+    await page.evaluate("() => window.__guidebot_selects.open(document.getElementById('s'))")
+    styles = await page.evaluate(_READ_OVERLAY_STYLES)
+
+    for part in ("button", "list", "row", "label"):
+        assert styles[part]["opacity"] == "1", (part, styles[part])
+        assert styles[part]["visibility"] == "visible", (part, styles[part])
+        assert styles[part]["transform"] == "none", (part, styles[part])
+        assert styles[part]["filter"] == "none", (part, styles[part])
+        assert styles[part]["clipPath"] == "none", (part, styles[part])
+    assert "paint" not in styles["buttonContain"], styles["buttonContain"]
+    assert "paint" not in styles["listContain"], styles["listContain"]
+
+    # The row-height maths behind `layoutList` must survive a hostile `div` rule.
+    assert styles["rowPosition"] == "static", styles["rowPosition"]
+    assert styles["rowFontSize"] == styles["listFontSize"], styles
+    assert styles["rowHeight"] < 40, styles["rowHeight"]
+    drift = zip(styles["buttonRect"], styles["selectRect"], strict=True)
+    assert max(abs(a - b) for a, b in drift) < 1.0, styles
+    assert styles["maxHeight"] < 400, styles["maxHeight"]
+
+
 async def test_geometry_repins_after_a_scroll(page: Page) -> None:
     await page.set_content(
         "<body style='margin:0'><div style='height:300px'></div>"
@@ -436,6 +689,102 @@ async def test_geometry_repins_after_a_scroll(page: Page) -> None:
     assert abs(after["button"] - after["select"]) < 1.0, "the overlay lost its pin"
 
 
+async def test_a_scroll_that_moves_nothing_writes_no_styles(page: Page) -> None:
+    """M10: the scroll handler forced a write per shim per event, and the rAF loop repins anyway."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    writes = await page.evaluate(
+        """() => {
+      const proto = CSSStyleDeclaration.prototype;
+      const original = proto.setProperty;
+      let count = 0;
+      proto.setProperty = function (...args) {
+        count += 1;
+        return original.apply(this, args);
+      };
+      try {
+        // Synchronous dispatch: no animation frame can run in between.
+        for (let i = 0; i < 5; i += 1) {
+          document.getElementById('row').dispatchEvent(new Event('scroll'));
+        }
+      } finally {
+        proto.setProperty = original;
+      }
+      return count;
+    }"""
+    )
+    assert writes == 0, f"{writes} style writes for a scroll that moved nothing"
+
+
+async def test_scroll_inside_a_container_repins_through_the_capture_phase(page: Page) -> None:
+    """`scroll` does not bubble, so only a capture-phase listener sees this one."""
+    await page.set_content(
+        "<body style='margin:0'><div id='box' style='height:150px;overflow:auto'>"
+        "<div style='height:60px'></div>"
+        f"<select id='s' style='width:220px'>{_options(['a', 'b', 'c'])}</select>"
+        "<div style='height:600px'></div></div></body>"
+    )
+    await _inject(page)
+    moved = await page.evaluate(
+        """() => {
+      const box = document.getElementById('box');
+      const s = document.getElementById('s');
+      const button = window.__guidebot_selects.buttonFor(s);
+      const before = button.getBoundingClientRect().top;
+      box.scrollTop = 50;
+      // The browser fires the real `scroll` asynchronously, so nothing has
+      // repinned yet at this point.
+      const beforeEvent = button.getBoundingClientRect().top;
+      box.dispatchEvent(new Event('scroll'));
+      return {
+        before: before,
+        beforeEvent: beforeEvent,
+        after: button.getBoundingClientRect().top,
+        selectTop: s.getBoundingClientRect().top,
+      };
+    }"""
+    )
+    assert abs(moved["beforeEvent"] - moved["before"]) < 1.0, "something else repinned first"
+    assert abs(moved["selectTop"] - moved["before"]) > 10, "the select did not actually move"
+    assert abs(moved["after"] - moved["selectTop"]) < 1.0, "the capture-phase listener never ran"
+
+
+async def test_max_visible_options_counts_options_not_optgroup_headings(page: Page) -> None:
+    """M10: headings pushed real options below the configured visible count."""
+    groups = "".join(
+        f"<optgroup label='Grupa {g}'>"
+        + _options([f"Opcja {g}-{i}" for i in range(5)])
+        + "</optgroup>"
+        for g in range(3)
+    )
+    await page.set_content(
+        f"<body style='margin:0'><select id='s' style='width:220px'>{groups}</select></body>"
+    )
+    await _inject(page, {"maxVisibleOptions": 8})
+    geo = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      api.open(s);
+      const list = api.listFor(s);
+      const lr = list.getBoundingClientRect();
+      const rows = Array.from(list.querySelectorAll('[data-guidebot-option-index]'));
+      return {
+        visible: rows.filter((row) => {
+          const rr = row.getBoundingClientRect();
+          return rr.top >= lr.top - 1 && rr.bottom <= lr.bottom + 1;
+        }).length,
+        scrolls: list.scrollHeight > list.clientHeight + 1,
+        listBottom: lr.bottom,
+        innerHeight: window.innerHeight,
+      };
+    }"""
+    )
+    assert geo["visible"] >= 8, f"only {geo['visible']} options fit, maxVisibleOptions was 8"
+    assert geo["scrolls"] is True, "15 options must still scroll inside the list"
+    assert geo["listBottom"] <= geo["innerHeight"] + 0.5
+
+
 async def test_observer_shims_a_late_select(page: Page) -> None:
     await page.set_content("<body style='margin:0'><div id='host'></div></body>")
     await _inject(page)
@@ -453,6 +802,67 @@ async def test_observer_shims_a_late_select(page: Page) -> None:
         "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
         timeout=3000,
     )
+
+
+_ROW_TEXTS = """() => {
+  const s = document.getElementById('s');
+  const api = window.__guidebot_selects;
+  return {
+    rows: Array.from(api.listFor(s).querySelectorAll('[data-guidebot-option-index]'))
+      .map((n) => n.textContent),
+    button: api.buttonFor(s).textContent.trim(),
+  };
+}"""
+
+
+async def test_option_rows_follow_a_replaced_option_set_while_the_list_is_closed(
+    page: Page,
+) -> None:
+    """M7: rows were rebuilt only in `open()`, so they read stale text until then."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    assert (await page.evaluate(_ROW_TEXTS))["rows"] == ["Mazowieckie", "Lubelskie", "Śląskie"]
+    await page.evaluate(
+        "() => { document.getElementById('s').innerHTML = "
+        "'<option>Alfa</option><option>Beta</option>'; }"
+    )
+    await page.wait_for_function(
+        "() => Array.from(window.__guidebot_selects"
+        ".listFor(document.getElementById('s'))"
+        ".querySelectorAll('[data-guidebot-option-index]'))"
+        ".map((n) => n.textContent).join('|') === 'Alfa|Beta'",
+        timeout=3000,
+    )
+    assert (await page.evaluate(_ROW_TEXTS))["button"] == "Alfa"
+
+
+async def test_rebuilding_rows_keeps_an_open_lists_highlight(page: Page) -> None:
+    """The rebuild must not drop the active row out from under an open list."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      s.selectedIndex = 1;
+      window.__guidebot_selects.open(s);
+    }"""
+    )
+    await page.evaluate(
+        "() => { document.getElementById('s').insertAdjacentHTML("
+        "'beforeend', '<option>Pomorskie</option>'); }"
+    )
+    await page.wait_for_function(
+        "() => window.__guidebot_selects.listFor(document.getElementById('s'))"
+        ".querySelectorAll('[data-guidebot-option-index]').length === 4",
+        timeout=3000,
+    )
+    active = await page.evaluate(
+        "() => { const list = window.__guidebot_selects"
+        ".listFor(document.getElementById('s'));"
+        " const row = list.querySelector('[data-guidebot-option-active]');"
+        " return row ? row.getAttribute('data-guidebot-option-index') : null; }"
+    )
+    assert active == "1"
 
 
 async def test_observer_unshims_a_select_that_gains_a_marker_class(page: Page) -> None:
@@ -478,6 +888,45 @@ async def test_observer_unshims_a_select_that_gains_a_marker_class(page: Page) -
     assert left is False, "the marker attribute survived unshimming"
 
 
+async def test_overlays_are_reattached_when_an_spa_replaces_the_body(page: Page) -> None:
+    """The select survives the swap; the overlays go with the old <body>."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    uid_before = await page.get_attribute("#s", "data-guidebot-shimmed")
+    await page.evaluate(
+        """() => {
+      const select = document.getElementById('s');
+      const body = document.createElement('body');
+      body.setAttribute('style', 'margin:0');
+      body.appendChild(select);
+      document.documentElement.replaceChild(body, document.body);
+    }"""
+    )
+    assert (
+        await page.evaluate(
+            "() => document.querySelectorAll('[data-guidebot-select-button]').length"
+        )
+        == 0
+    ), "the fixture did not actually strip the overlays"
+    await page.wait_for_function(
+        "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1"
+        " && document.querySelectorAll('[data-guidebot-select-list]').length === 1",
+        timeout=3000,
+    )
+    state = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      return {
+        uid: s.getAttribute('data-guidebot-shimmed'),
+        isShimmed: api.isShimmed(s),
+        buttonHost: api.buttonFor(s).parentElement.tagName.toLowerCase(),
+      };
+    }"""
+    )
+    assert state == {"uid": uid_before, "isShimmed": True, "buttonHost": "body"}
+
+
 async def test_observer_unshims_a_select_that_loses_its_box(page: Page) -> None:
     await page.set_content(NESTED)
     await _inject(page)
@@ -498,6 +947,69 @@ async def test_observer_drops_the_overlay_of_a_removed_select(page: Page) -> Non
         "'[data-guidebot-select-button],[data-guidebot-select-list]').length === 0",
         timeout=3000,
     )
+
+
+_TWO_FRAMES = "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
+
+_OVERLAY_GEOMETRY = """() => {
+  const list = window.__list;
+  const button = window.__button;
+  const lr = list.getBoundingClientRect();
+  return {
+    listDisplay: getComputedStyle(list).display,
+    buttonDisplay: getComputedStyle(button).display,
+    listRect: [lr.left, lr.top, lr.width, lr.height],
+    isOpen: window.__guidebot_selects.isOpen(list),
+  };
+}"""
+
+
+async def test_removing_a_select_hides_its_open_list_within_a_frame(page: Page) -> None:
+    """I2: a detached select must not leave a ghost dropdown on camera.
+
+    `unshim` only runs from the debounced `classify()`; with the shipped
+    `settle_ms=1000` that leaves the list painted — and pinned to the detached
+    select's zero rect, i.e. a sliver in the corner — for a whole second.
+    """
+    await page.set_content(NESTED)
+    await _inject(page, {"settleMs": 1000})
+    await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      api.open(s);
+      window.__list = api.listFor(s);
+      window.__button = api.buttonFor(s);
+    }"""
+    )
+    assert (await page.evaluate(_OVERLAY_GEOMETRY))["listDisplay"] == "block"
+    await page.evaluate("() => document.getElementById('s').remove()")
+    await page.evaluate(_TWO_FRAMES)
+    state = await page.evaluate(_OVERLAY_GEOMETRY)
+    assert state["listDisplay"] == "none", "the removed select left its list on camera"
+    assert state["buttonDisplay"] == "none", "the removed select left its button on camera"
+    assert state["isOpen"] is False
+
+
+async def test_a_select_that_collapses_to_nothing_closes_its_list(page: Page) -> None:
+    """I2: same story for a select a widget library hides while the list is open."""
+    await page.set_content(NESTED)
+    await _inject(page, {"settleMs": 1000})
+    await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      api.open(s);
+      window.__list = api.listFor(s);
+      window.__button = api.buttonFor(s);
+      s.style.display = 'none';
+    }"""
+    )
+    await page.evaluate(_TWO_FRAMES)
+    state = await page.evaluate(_OVERLAY_GEOMETRY)
+    assert state["listDisplay"] == "none"
+    assert state["buttonDisplay"] == "none"
+    assert state["isOpen"] is False
 
 
 async def test_optgroups_are_headings_and_disabled_options_are_not_clickable(page: Page) -> None:
@@ -571,6 +1083,47 @@ async def test_option_index_for_normalizes_whitespace_and_falls_back_to_case_ins
     assert found == [1, 1, 1, 0, -1]
 
 
+async def test_the_label_attribute_wins_over_the_option_text_like_select_option_does(
+    page: Page,
+) -> None:
+    """M8: compile drives via `locator.select_option(label=…)`, which reads `option.label`.
+
+    Resolving the row text or the index off `textContent` would make compile and
+    render disagree about the same option, and put text on camera that the native
+    control never shows.
+    """
+    await page.set_content(
+        "<body style='margin:0'><select id='s' style='width:220px'>"
+        "<option>Pierwszy</option>"
+        "<option label='Krótko'>bardzo długi tekst opcji</option>"
+        "</select></body>"
+    )
+    await _inject(page)
+    # Exactly what compile does — the reference behaviour render must match.
+    await page.select_option("#s", label="Krótko")
+    await page.evaluate(_TWO_FRAMES)
+    state = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      api.open(s);
+      const list = api.listFor(s);
+      return {
+        selectedIndex: s.selectedIndex,
+        indexForLabel: api.optionIndexFor(s, 'Krótko'),
+        indexForText: api.optionIndexFor(s, 'bardzo długi tekst opcji'),
+        rowText: list.querySelector('[data-guidebot-option-index="1"]').textContent,
+        buttonText: api.buttonFor(s).textContent.trim(),
+      };
+    }"""
+    )
+    assert state["selectedIndex"] == 1
+    assert state["indexForLabel"] == 1, "optionIndexFor ignored the label attribute"
+    assert state["indexForText"] == -1, "textContent resolved an option select_option would not"
+    assert state["rowText"] == "Krótko", "the on-camera row text differs from the native control"
+    assert state["buttonText"] == "Krótko"
+
+
 async def test_scroll_option_into_view_brings_a_far_row_into_the_list_box(page: Page) -> None:
     labels = [f"Opcja {i}" for i in range(40)]
     await page.set_content(
@@ -631,6 +1184,83 @@ async def test_native_mode_installs_no_shim_but_still_resolves_ready(page: Page)
     assert state == {"overlays": 0, "isShimmed": False, "marker": False}
 
 
+async def test_native_mode_offers_the_whole_api_as_no_ops(page: Page) -> None:
+    """compile/render call this surface unconditionally — no `mode` branch of their own."""
+    await page.set_content(NESTED)
+    await _inject(page, {"mode": "native"})
+    surface = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      const missing = [
+        'ready', 'isShimmed', 'buttonFor', 'listFor', 'isOpen', 'open', 'close',
+        'optionIndexFor', 'scrollOptionIntoView', 'refresh',
+      ].filter((name) => api[name] === undefined);
+      api.open(s);
+      api.close(s);
+      api.refresh();
+      api.scrollOptionIntoView(s, 1);
+      return {
+        missing: missing,
+        readyIsShared: api.ready === window.__guidebot_selects_ready,
+        isShimmed: api.isShimmed(s),
+        buttonFor: api.buttonFor(s),
+        listFor: api.listFor(s),
+        isOpen: api.isOpen(s),
+        optionIndexFor: api.optionIndexFor(s, 'Mazowieckie'),
+        selectedIndex: s.selectedIndex,
+      };
+    }"""
+    )
+    assert surface == {
+        "missing": [],
+        "readyIsShared": True,
+        "isShimmed": False,
+        "buttonFor": None,
+        "listFor": None,
+        "isOpen": False,
+        "optionIndexFor": -1,
+        "selectedIndex": 0,
+    }
+
+
+async def test_the_role_gate_does_not_depend_on_the_registration_order(page: Page) -> None:
+    """G1: `chrome.js` shadows `top` only where the origin is never the shell's.
+
+    So the shim installs identically whether it ran before or after that
+    shadowing — the ordering comment used to claim otherwise.
+    """
+    await page.set_content("<body style='margin:0'><iframe id='f' srcdoc=\"\"></iframe></body>")
+    await page.evaluate(
+        """() => new Promise((resolve) => {
+      const frame = document.getElementById('f');
+      frame.addEventListener('load', resolve, {once: true});
+      frame.srcdoc = "<body style='margin:0'><select id='s' style='width:200px'>"
+        + "<option>a</option><option>b</option></select></body>";
+    })"""
+    )
+    child = page.frames[1]
+    # Exactly what chrome.js:18-27 does inside a framed document, run *first* —
+    # including its tolerance for a `top` that cannot be redefined at all.
+    shadowed = await child.evaluate(
+        """() => {
+      try {
+        const selfWindow = window;
+        Object.defineProperty(window, 'top', {configurable: true, get: () => selfWindow});
+      } catch (_error) {
+        /* `top` is LegacyUnforgeable here; chrome.js swallows this too */
+      }
+      return window === window.top;
+    }"""
+    )
+    await child.evaluate('window.__guidebot_selects_config = {"settleMs": 20};')
+    await child.evaluate(SELECTS_JS)
+    await child.evaluate("window.__guidebot_selects.ready")
+    assert await child.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('s'))"
+    ), f"the shim skipped a framed site document (top shadowed: {shadowed})"
+
+
 async def test_script_bails_out_in_the_shell_document(page: Page) -> None:
     """The shell holds no page content; shimming there would be nonsense."""
 
@@ -674,6 +1304,49 @@ async def test_reinjection_does_not_duplicate_overlays(page: Page) -> None:
     assert counts == {"buttons": 1, "lists": 1}
 
 
+async def test_reinjection_rearms_the_debounce_instead_of_classifying_immediately(
+    page: Page,
+) -> None:
+    """I5: `Overlay.install`'s add_init_script + evaluate idiom must not race.
+
+    A second injection at t≈0 that classified straight away would beat select2
+    (or any other widget library) to the select — the exact race `settle_ms`
+    exists to prevent.
+    """
+    await page.set_content(
+        "<body style='margin:0'>"
+        f"<select id='s' style='width:220px'>{_options(['a', 'b'])}</select></body>"
+    )
+    await page.evaluate('window.__guidebot_selects_config = {"settleMs": 500};')
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate(SELECTS_JS)  # the re-injection guard path
+    immediate = await page.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('s'))"
+    )
+    assert immediate is False, "re-injection classified without waiting for settle_ms"
+    await page.evaluate("window.__guidebot_selects.ready")
+    assert await page.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('s'))"
+    ), "the settle window elapsed without classifying"
+
+
+def test_is_relevant_does_not_guard_against_undelivered_mutations() -> None:
+    """M9: the marker attribute is not in `attributeFilter`, so skipping it was dead code.
+
+    A source check rather than a behavioural one: the branch could never run, so
+    only the source can say whether it came back.
+    """
+    filtered = re.search(r"attributeFilter: \[([^\]]*)\]", SELECTS_JS)
+    assert filtered is not None, "attributeFilter moved; update this test"
+    names = [part.strip().strip('"') for part in filtered.group(1).split(",") if part.strip()]
+    assert "data-guidebot-shimmed" not in names, names
+    body = re.search(r"function isRelevant\(records\) \{(.*?)\n  \}\n", SELECTS_JS, re.S)
+    assert body is not None, "isRelevant moved; update this test"
+    assert "MARKER_ATTRIBUTE" not in body.group(1), (
+        "isRelevant still guards against a mutation the observer never delivers"
+    )
+
+
 async def test_the_observer_does_not_react_to_the_shims_own_mutations(page: Page) -> None:
     """The overlay writes styles every frame; that must not re-arm the debounce.
 
@@ -694,6 +1367,71 @@ async def test_the_observer_does_not_react_to_the_shims_own_mutations(page: Page
     })"""
     )
     assert counts == {"buttons": 1, "lists": 1}
+
+
+# A page that writes an inline style on every animation frame. Not a hostile
+# construct: in popup documents `cursor.js` writes `left`/`top` every frame for
+# the whole length of a glide, and `chrome.js` mutates its bar every 24 ms while
+# a URL is being typed. Both re-arm the shim's settle debounce.
+_EVERY_FRAME_STYLE_STORM = """() => {
+  const el = document.getElementById('storm');
+  let n = 0;
+  const step = () => {
+    el.style.transform = 'translateX(' + (n++ % 7) + 'px)';
+    window.requestAnimationFrame(step);
+  };
+  window.requestAnimationFrame(step);
+}"""
+
+_WATCH_READY = """() => {
+  window.__ready = false;
+  window.__guidebot_selects.ready.then(() => {
+    window.__ready = true;
+  });
+}"""
+
+
+async def test_ready_settles_even_when_the_page_mutates_every_frame(page: Page) -> None:
+    """C1: an every-frame style write must not starve the first pass forever.
+
+    `ready` never settling is not a cosmetic failure: `Selects.wait_ready` awaits
+    that promise, so compile and render would hang indefinitely.
+    """
+    await page.set_content(
+        "<body style='margin:0'><div id='storm'>x</div>"
+        f"<select id='s' style='width:220px'>{_options(['a', 'b'])}</select></body>"
+    )
+    await page.evaluate(_EVERY_FRAME_STYLE_STORM)
+    await page.evaluate('window.__guidebot_selects_config = {"settleMs": 200};')
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate(_WATCH_READY)
+    await page.wait_for_function("() => window.__ready === true", timeout=5000)
+    assert await page.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('s'))"
+    ), "the first pass resolved `ready` without ever shimming anything"
+
+
+async def test_a_late_select_is_shimmed_while_the_page_mutates_every_frame(page: Page) -> None:
+    """C1: the observer's debounce needs a cap, not just an uncancellable first pass.
+
+    The storm starts *after* `ready`, so only the maximum-deferral cap can keep
+    this classification pass from being postponed forever.
+    """
+    await page.set_content("<body style='margin:0'><div id='storm'>x</div></body>")
+    await page.evaluate('window.__guidebot_selects_config = {"settleMs": 200};')
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate("window.__guidebot_selects.ready")
+    await page.evaluate(_EVERY_FRAME_STYLE_STORM)
+    await page.evaluate(
+        "() => { const s = document.createElement('select');"
+        " s.id = 's'; s.style.width = '220px';"
+        " s.innerHTML = '<option>a</option><option>b</option>';"
+        " document.body.appendChild(s); }"
+    )
+    await page.wait_for_function(
+        "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
+        timeout=5000,
+    )
 
 
 async def test_button_shows_the_selected_label_and_follows_external_changes(page: Page) -> None:

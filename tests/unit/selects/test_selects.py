@@ -11,6 +11,7 @@ from playwright.async_api import BrowserContext, async_playwright
 
 from guidebot_recorder.models.config import SelectsConfig
 from guidebot_recorder.selects import Selects
+from guidebot_recorder.selects.selects import SelectsNotReadyError
 
 
 def _prelude(script: str) -> dict:
@@ -98,3 +99,24 @@ async def test_wait_ready_fails_loudly_when_the_widget_is_absent(
     await page.set_content("<div></div>")
     with pytest.raises(Exception, match="guidebot selects API is unavailable"):
         await Selects().wait_ready(page)
+
+
+async def test_wait_ready_times_out_instead_of_hanging_forever(context: BrowserContext) -> None:
+    """C1: a `ready` that never settles must fail loudly, not hang the render."""
+    page = await context.new_page()
+    await page.set_content("<div></div>")
+    await page.evaluate(
+        "() => { window.__guidebot_selects = {ready: new Promise(() => {})}; }",
+    )
+    with pytest.raises(SelectsNotReadyError, match="nie zgłosił gotowości"):
+        await Selects().wait_ready(page, timeout=0.4)
+
+
+async def test_wait_ready_timeout_leaves_a_working_page(context: BrowserContext) -> None:
+    """The timeout must not wedge the connection: the frame stays usable."""
+    page = await context.new_page()
+    await page.set_content("<div></div>")
+    await page.evaluate("() => { window.__guidebot_selects = {ready: new Promise(() => {})}; }")
+    with pytest.raises(SelectsNotReadyError):
+        await Selects().wait_ready(page, timeout=0.4)
+    assert await page.evaluate("() => 1 + 1") == 2
