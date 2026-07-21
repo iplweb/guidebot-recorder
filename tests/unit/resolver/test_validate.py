@@ -94,6 +94,83 @@ async def test_validate_compile_time_select_rejects_non_native_combobox(page):
     assert result.reason == "not_select"
 
 
+async def test_validate_compile_time_select_rejects_a_dropdown_without_the_wanted_option(page):
+    """The wrong-but-plausible combobox must fail here, not time out in execution."""
+
+    await page.set_content(
+        '<select aria-label="Rodzaj raportu">'
+        "<option>Raport jednostki</option><option>Raport autora</option>"
+        "</select>"
+    )
+
+    result = await validate_compile_time(
+        page,
+        RoleTarget(role="combobox", name="Rodzaj raportu"),
+        "select",
+        option="Artykuł w czasopismie",
+    )
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "option_missing"
+    # the message has to carry both halves of the mismatch for a useful re-prompt
+    assert "Artykuł w czasopismie" in result.message
+    assert "Raport jednostki" in result.message
+    assert "Raport autora" in result.message
+
+
+async def test_validate_compile_time_select_accepts_option_despite_whitespace_and_case(page):
+    """Validation must never be stricter than ``Recorder._step_option_visibly``."""
+
+    await page.set_content(
+        '<select aria-label="Charakter">\n'
+        "  <option>\n    Artykuł   w\n    czasopismie\n  </option>\n"
+        "  <option>Rozdział</option>\n"
+        "</select>"
+    )
+
+    result = await validate_compile_time(
+        page,
+        RoleTarget(role="combobox", name="Charakter"),
+        "select",
+        option="  artykuł W czasopismie ",
+    )
+
+    assert isinstance(result, ValidationOk)
+
+
+async def test_validate_compile_time_select_without_an_option_keeps_checking_only_the_element(page):
+    """``reuse_is_valid`` has no option to pass; that path must not start failing."""
+
+    await page.set_content('<select aria-label="Rodzaj"><option>lista</option></select>')
+
+    result = await validate_compile_time(page, RoleTarget(role="combobox", name="Rodzaj"), "select")
+
+    assert isinstance(result, ValidationOk)
+
+
+async def test_validate_compile_time_reports_an_empty_select_as_option_missing(page):
+    await page.set_content('<select aria-label="Rodzaj"></select>')
+
+    result = await validate_compile_time(
+        page, RoleTarget(role="combobox", name="Rodzaj"), "select", option="cokolwiek"
+    )
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "option_missing"
+
+
+async def test_validate_compile_time_ignores_the_option_for_non_select_actions(page):
+    """An option label is meaningless for a click and must not be checked."""
+
+    await page.set_content("<button>Zaloguj</button>")
+
+    result = await validate_compile_time(
+        page, RoleTarget(role="button", name="Zaloguj"), "click", option="nie ma takiej opcji"
+    )
+
+    assert isinstance(result, ValidationOk)
+
+
 async def test_build_locator_supports_all_structural_strategies(page):
     await page.set_content(
         """
