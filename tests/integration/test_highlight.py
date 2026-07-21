@@ -64,7 +64,7 @@ async def test_highlight_compiles_and_marks_the_target_without_touching_it(tmp_p
         browser = await pw.chromium.launch(headless=True)
         try:
             compile_page = await browser.new_page()
-            await run_compile(path, compile_page, HighlightMockReasoner())
+            await run_compile(path, compile_page, HighlightMockReasoner(), selects=None)
             await compile_page.context.close()
 
             scenario = load_scenario(path, None)
@@ -133,7 +133,7 @@ async def test_optional_highlight_of_an_absent_target_is_skipped(tmp_path):
                         return ReasonerError("no_action", "nie ma takiego elementu")
                     return await super().resolve(instruction, candidates)
 
-            await run_compile(path, compile_page, WithAbsentBanner())
+            await run_compile(path, compile_page, WithAbsentBanner(), selects=None)
             await compile_page.context.close()
 
             out = tmp_path / "raport.pdf"
