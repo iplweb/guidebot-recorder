@@ -3,7 +3,8 @@
 Guidebot can render a compiled scenario as a landscape PDF guide — one annotated step per page,
 side-by-side with narration text. Each guide page freezes the frame at the moment that best explains
 its step — for most actions the moment the step completes, for a `select` the moment its option list
-is open — and overlays it with visual annotations of the cursor movement, click target, and text input.
+is open — and overlays it with visual annotations: an arrow for the cursor movement, a frame
+around the action's target, a star where the mouse clicks, and the `highlight` ellipse.
 
 This feature is LLM-free and requires no additional dependencies beyond the compiled sidecar.
 
@@ -39,10 +40,12 @@ A single PDF guide contains one or more pages:
 
 Screenshots are overlaid with visual markers:
 
-- **Arrow** (curved line) — Cursor movement from point A to point B.
-- **Red circle** — Mouse click target.
-- **Red frame** — Text entered into a field (from `enterText` or literal `teach` typing).
-- **Glow** (soft halo) — Hover state on an element.
+- **Arrow** (straight segment) — Cursor movement from the previous target to the current
+  one. It runs between the frames, not through their centres. When the targets overlap or
+  sit less than 12 px apart, no arrow is drawn at all.
+- **Red frame** — The action's target: a click, text entry, hover, or a pick from a list.
+- **Star** — Where the mouse clicks: an eight-pointed star around the cursor, with a gap
+  in the middle so the cursor itself stays visible.
 - **Ellipse** — A `highlight` step's mark, in the colour the scenario chose. Instead of
   the circling cursor the film shows, the guide draws the finished ellipse around the
   control or area being pointed at.
@@ -50,13 +53,19 @@ Screenshots are overlaid with visual markers:
 ## Dropdowns (`select`)
 
 A `select` page is photographed **mid-interaction**: the option list is unfurled, and the option the
-step chooses is circled the way a `click` step's target is. Three marks appear together:
+step chooses is starred the way a `click` step's target is. It is the one action whose marks are
+split across two boxes:
 
-- a **red circle** on the option row — the thing the reader is being told to click;
-- a **red frame** around the control itself, so the reader can see which field they are in;
-- the **arrow** ending on the option row rather than on the control.
+- the **star** on the option row — the thing the reader is being told to click, drawn exactly as on
+  a `click` page;
+- the **red frame** around the control itself, so the reader can see which field they are in;
+- the **arrow** ending at the option row's edge rather than at the control's.
 
 The next step's arrow starts from that row, where the reader's eye was left.
+
+Under `mode: native` (below) there is no row, so a `select` page is marked like any other framed
+action: an arrow to the control's frame and the frame itself, with no star — nothing visible is
+being clicked.
 
 This works because Guidebot injects a DOM replacement for the native option list (the same one that
 makes dropdowns visible in `render` videos) — a native `<select>`'s list is drawn by the operating

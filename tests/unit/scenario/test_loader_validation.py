@@ -138,6 +138,30 @@ def test_step_validator_reports_the_offending_line(tmp_path):
     assert "`optional: true` nie ma zastosowania" in message
 
 
+def test_expect_on_a_step_gives_one_banner_at_the_step_line(tmp_path):
+    """`expect:` on an authored step is rejected loudly, not swallowed by `extra="forbid"`.
+
+    The banner must carry the targeted message (mentioning the compiler derives
+    readiness on its own), not the generic "Extra inputs are not permitted".
+    """
+
+    message, path = _error(
+        tmp_path,
+        HEAD
+        + """\
+      - click: "Zapisz"
+        expect: none
+""",
+    )
+
+    assert _banners(message) == 1
+    assert f"{path}:7" in message
+    assert "krok 2/2" in message
+    assert "kompilator" in message
+    assert "Extra inputs" not in message
+    assert "WhenBlock" not in message
+
+
 def test_scenario_validator_reaches_a_child_of_a_when_block(tmp_path):
     """`_complete_audio_translations` ma `loc == ()`; linię daje `StepPathError.path`."""
 

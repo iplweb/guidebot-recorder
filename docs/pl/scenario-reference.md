@@ -679,9 +679,22 @@ niezwiązanego.
 
 Zakreślenie kontrolki lub obszaru — jedyna komenda, która wskazuje element, **nie
 dotykając strony**: bez kliknięcia, bez najechania, bez zdarzeń DOM. `what` to
-semantyczny opis celu wysyłany do reasonera; obszar (tabela, sekcja, formularz) jest z
-jego punktu widzenia zwykłym elementem-kontenerem, więc opisuje się go tak samo jak
-przycisk.
+semantyczny opis celu wysyłany do reasonera; obszar (tabela, sekcja, formularz)
+opisuje się tak samo jak przycisk.
+
+!!! note "Który obszar da się wskazać"
+
+    `highlight` jako jedyna komenda dostaje do wyboru — obok kontrolek — role
+    kontenerów: `table`, `grid`, `form`, `region`, `list`, `article`, `figure`,
+    `img` i `group`. Pozostałe komendy widzą wyłącznie elementy interaktywne, bo
+    kontenera i tak nie da się kliknąć.
+
+    Praktyczny wniosek: **goły `<div>` nie jest celem**. Ma rolę `generic`, więc
+    reasoner go nie zobaczy i krok skończy się błędem „nie ma takiego elementu".
+    Wskazuj `<table>`, `<form>`, `<ul>`, `<figure>`, `<article>` albo `<section>`
+    z `aria-label` (dopiero etykieta czyni z sekcji `region`). Nazwa dostępna
+    kontenera bardzo pomaga: bez niej reasoner umie go namierzyć tylko
+    pozycyjnie, a numeracja przesuwa się razem z DOM-em.
 
 Podczas `render` kursor dojeżdża do celu, przechodzi na prawy skraj elipsy opisanej na
 elemencie i okrąża ją `loops` razy, zostawiając za sobą narastający ślad zakreślacza;
@@ -840,9 +853,12 @@ dystrybuowane z pakietem.
 
 ### `expect`
 
-Model przyjmuje pole `expect`, lecz compiler sam wyprowadza gotowość z obserwowanej
-zmiany URL i nie traktuje źródłowej wartości jako stabilnego sterowania. Nie używaj
-`expect` w scenariuszach; dla SPA dodaj jawny `wait`.
+Kompilator sam wylicza gotowość (`navigation`/`idle`/`none`) z obserwowanej zmiany URL
+i zamraża ten wynik w skompilowanym sidecarze (`CachedAction`/`Fingerprint`) — nigdy nie
+czyta wartości z kroku źródłowego. Pole `expect` na kroku scenariusza jest odrzucane już
+przy wczytywaniu pliku, z komunikatem tłumaczącym dlaczego i co usunąć; usunięcie niczego
+nie zmienia w zachowaniu, bo pole nigdy nie było brane pod uwagę. Dla aktualizacji SPA pod
+tym samym adresem URL użyj jawnego `wait`.
 
 ## Gałęzie opcjonalne {#galezie-opcjonalne}
 

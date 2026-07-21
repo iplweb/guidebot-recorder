@@ -1126,10 +1126,14 @@ class Recorder:
         """Lap an ellipse around the target, leaving a marker trail — touching nothing.
 
         The one command that points at the page without changing it: no click, no
-        hover, no DOM event. Only ``render`` calls this (``compile`` freezes the
-        target without acting, and the PDF guide draws its own still ellipse), so
-        the overlay is present in practice; without one, or without a bounding
-        box, the step degrades to the plain cursor move rather than failing.
+        hover, no DOM event. Only ``render`` calls this — ``compile`` freezes the
+        target without acting, and the PDF guide draws its own still ellipse — so
+        an overlay is always present in practice.
+
+        The guard below is defensive rather than a real degradation path: every
+        route here passes validation that rejects ``not_visible``, and a visible
+        element has a bounding box. If that ever stops holding, drawing nothing
+        beats failing a render over a decorative mark.
         """
 
         result = await self.point(target, ripple=False)

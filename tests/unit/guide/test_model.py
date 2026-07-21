@@ -16,7 +16,7 @@ def test_page_text_empty_when_no_text():
 
 
 def test_annotation_and_page_construct():
-    a = Annotation(kind="click", cx=1.0, cy=2.0, r=18.0)
+    a = Annotation(kind="click", cx=1.0, cy=2.0, r_inner=16.0, r_outer=30.0)
     page = GuidePage(
         kind="step",
         screenshot=None,

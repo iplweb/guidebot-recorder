@@ -371,10 +371,10 @@ async def test_select_marks_the_option_row_and_frames_the_control(tmp_path, monk
         timeout=15.0,
     )
     annotations = {a.kind: a for a in pages[0].annotations}
-    assert set(annotations) == {"selected", "click"}
-    # The rectangle is the control the reader is in — NOT the row, and not the
-    # box the cursor approach measured, which by frame time is stale.
-    rect = annotations["selected"]
+    assert set(annotations) == {"frame", "click"}
+    # The frame is the control the reader is in — NOT the row, and not the box
+    # the cursor approach measured, which by frame time is stale.
+    rect = annotations["frame"]
     assert (rect.x, rect.y, rect.w, rect.h) == (
         FAKE_CONTROL["x"],
         FAKE_CONTROL["y"],
@@ -410,11 +410,16 @@ async def test_the_next_steps_arrow_starts_from_the_option_row(tmp_path, monkeyp
         timeout=15.0,
     )
     arrow = next(a for a in pages[1].annotations if a.kind == "arrow")
-    assert (arrow.x1, arrow.y1) == FAKE_ROW_CENTER
+    # Arrows are clipped to the rim of the shape each end sits in, so the start
+    # is on the *row's* boundary — leaving it through the top edge, since the
+    # next target is above and to the left. The control's own box (`FAKE_CONTROL`,
+    # y=60) shares no edge with it, so this cannot pass for the wrong shape.
+    assert arrow.y1 == pytest.approx(FAKE_ROW["y"])
+    assert FAKE_ROW["x"] <= arrow.x1 <= FAKE_ROW["x"] + FAKE_ROW["width"]
 
 
 async def test_native_mode_keeps_the_collapsed_frame_and_its_single_mark(tmp_path, monkeypatch):
-    """A `select` with nothing to unfurl must not become an error or grow a circle."""
+    """A `select` with nothing to unfurl must not become an error or grow a star."""
 
     monkeypatch.setattr(capture, "reuse_failure", _async_none)
     scenario, action = _select_scenario_and_action(mode="native")
@@ -424,7 +429,7 @@ async def test_native_mode_keeps_the_collapsed_frame_and_its_single_mark(tmp_pat
         scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
     )
     assert [call[2] for call in recorder.select_calls] == [True]  # `native=True`
-    assert {a.kind for a in pages[0].annotations} == {"selected"}
+    assert {a.kind for a in pages[0].annotations} == {"frame"}
 
 
 async def test_the_still_capture_asks_for_no_click_ring(tmp_path, monkeypatch):
@@ -1010,6 +1015,102 @@ async def test_cursor_resets_after_scroll(tmp_path, monkeypatch):
     )
     assert len(pages) == 2
     assert all(a.kind != "arrow" for a in pages[1].annotations)
+
+
+class SequenceRecorder(FakeRecorder):
+    """`point` walks a list of boxes, so consecutive targets sit apart on the page.
+
+    `FakeRecorder` puts every target in the same 10x10 box, which is enough for
+    "is there an arrow?" but not for "where does it start?" — two targets in the
+    same spot overlap, and an arrow between them is dropped as degenerate.
+    """
+
+    def __init__(self, boxes: list[dict], events: list[str] | None = None):
+        super().__init__(events)
+        self._boxes = list(boxes)
+
+    async def point(self, target, ripple=False):
+        box = self._boxes[len(self.point_calls)]
+        self.point_calls.append(target)
+        locator = FakeLocator(self.events)
+        self.last_locator = locator
+        return PointResult(
+            locator=locator,
+            box=box,
+            center=(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2),
+        )
+
+
+#: Two targets far enough apart that the clipped arrow between them survives
+#: `MIN_ARROW`; the gap runs along x, so the clipped ends are the vertical edges.
+_TWO_BOXES = [
+    {"x": 0.0, "y": 0.0, "width": 100.0, "height": 100.0},
+    {"x": 400.0, "y": 0.0, "width": 100.0, "height": 100.0},
+]
+
+
+async def test_arrow_starts_at_the_edge_of_the_previous_target(tmp_path, monkeypatch):
+    """The next step's arrow needs the *shape* of the previous target, not just its centre.
+
+    Started in the middle of the previous target the arrow crosses all of it and
+    reads as a strikethrough, so capture remembers `prev_shape` alongside
+    `prev_cursor` and hands it to `annotations_for`, which clips the start
+    against it.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(), steps=[Step(click="pierwszy przycisk"), Step(click="drugi przycisk")]
+    )
+    actions = [
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        )
+        for _ in range(2)
+    ]
+    recorder = SequenceRecorder(_TWO_BOXES)
+    pages = await capture_pages(
+        scenario, _compiled(actions), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert len(pages) == 2
+    arrow = next(a for a in pages[1].annotations if a.kind == "arrow")
+    # 50.0 would be the centre of the first target — the pre-clipping behaviour.
+    assert arrow.x1 == pytest.approx(100.0)  # right edge of the first box
+    assert arrow.x2 == pytest.approx(400.0)  # left edge of the second box
+
+
+async def test_shape_memory_resets_after_navigate(tmp_path, monkeypatch):
+    """A navigate clears the remembered shape together with the cursor.
+
+    Kept across a page load, `prev_shape` would clip the next arrow against a
+    box that belongs to a screenshot the reader never sees. Both are dropped, so
+    the step after the navigate opens a fresh arrow-less page.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[
+            Step(click="pierwszy przycisk"),
+            Step(navigate="https://example.com/inna"),
+            Step(click="drugi przycisk"),
+        ],
+    )
+    actions = [
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        ),
+        None,
+        CachedAction(
+            action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+        ),
+    ]
+    recorder = SequenceRecorder(_TWO_BOXES)
+    pages = await capture_pages(
+        scenario, _compiled(actions), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+    )
+    assert [p.kind for p in pages] == ["step", "navigate", "step"]
+    assert all(a.kind != "arrow" for a in pages[2].annotations)
 
 
 async def _async_none(*_args, **_kwargs):

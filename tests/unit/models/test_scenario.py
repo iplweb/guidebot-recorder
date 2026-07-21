@@ -653,3 +653,35 @@ def test_close_window_rejects_optional():
     # No target, not a numeric wait -> `_optional_only_where_it_can_be_honoured` rejects it.
     with pytest.raises(ValidationError):
         Step.model_validate({"closeWindow": True, "optional": True})
+
+
+# --- `expect:` is not an authoring control ------------------------------------
+
+
+def test_expect_on_a_step_is_rejected():
+    """`expect:` never reached a reader — the compiler derives it and overwrites it.
+
+    Nothing in the package ever consulted the authored value: `heuristic_expect`
+    freezes its own observation into the compiled sidecar's `CachedAction`/
+    `Fingerprint`, which is where every real `.expect` read in the package
+    happens. Setting it on a step used to load fine and silently do nothing;
+    now it fails loudly, the same way `closeWindow: false` does.
+    """
+
+    with pytest.raises(ValidationError) as excinfo:
+        Step.model_validate({"say": "Cześć.", "expect": "none"})
+
+    message = str(excinfo.value)
+    assert "expect" in message
+    assert "kompilator" in message
+
+
+def test_expect_is_rejected_regardless_of_its_value():
+    for value in ("navigation", "idle", "none"):
+        with pytest.raises(ValidationError):
+            Step.model_validate({"click": "Zapisz", "expect": value})
+
+
+def test_expect_is_rejected_even_alongside_a_valid_command():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"navigate": "https://example.test", "expect": "navigation"})

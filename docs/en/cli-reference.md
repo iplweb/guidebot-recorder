@@ -201,7 +201,7 @@ uv run guidebot guide PATH --out OUTPUT.pdf [OPTIONS]
 
 Loads the source and adjacent compiled sidecar, then builds a landscape PDF guide with
 one annotated screenshot per meaningful step, side-by-side narration text, and a visual
-legend (arrows, circles, frames, glows).
+legend (arrows, frames, and click stars).
 
 | Option | Default | Meaning |
 |---|---:|---|

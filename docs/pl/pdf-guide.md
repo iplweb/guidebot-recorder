@@ -3,8 +3,8 @@
 Guidebot potrafi wyrenderować skompilowany scenariusz jako krajobrazowy przewodnik PDF — jeden
 anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża ten kadr, który
 najlepiej tłumaczy dany krok — dla większości akcji moment jej zakończenia, dla `select` moment,
-w którym lista opcji jest rozwinięta — i nakłada na niego adnotacje: ruchy kursora, cel kliknięcia
-i wpisany tekst.
+w którym lista opcji jest rozwinięta — i nakłada na niego adnotacje: strzałkę ruchu kursora, ramkę
+wokół celu akcji, gwiazdkę w miejscu kliknięcia i elipsę zakreślenia.
 
 Ta funkcja nie wymaga LLM ani dodatkowych zależności poza skompilowanym sidecarem.
 
@@ -41,10 +41,13 @@ Jeden przewodnik PDF zawiera jedną lub więcej stron:
 
 Zrzuty ekranu są nakładane adnotacjami:
 
-- **Strzałka** (linia zakrzywiona) — Ruch kursora z punktu A do punktu B.
-- **Czerwone koło** — Cel kliknięcia myszy.
-- **Czerwona ramka** — Tekst wpisany do pola (z `enterText` lub literalnym `teach` pisaniem).
-- **Glow** (miękki halo) — Stan hover na elemencie.
+- **Strzałka** (prosty odcinek) — Ruch kursora z poprzedniego celu do obecnego. Biegnie
+  między ramkami, a nie przez ich środki. Gdy cele nachodzą na siebie albo dzieli je mniej
+  niż 12 px, strzałki nie ma wcale.
+- **Czerwona ramka** — Cel akcji: kliknięcia, wpisania tekstu, najechania lub wyboru
+  z listy.
+- **Gwiazdka** — Miejsce kliknięcia myszą: ośmioramienna gwiazdka wokół kursora,
+  z przerwą w środku, żeby sam kursor pozostał widoczny.
 - **Elipsa** — Zakreślenie z kroku `highlight`, w kolorze ustawionym w scenariuszu.
   Zamiast okrężnego ruchu kursora, który widać w filmie, przewodnik pokazuje samą
   gotową elipsę wokół wskazanego elementu lub obszaru.
@@ -52,14 +55,19 @@ Zrzuty ekranu są nakładane adnotacjami:
 ## Listy rozwijane (`select`)
 
 Strona kroku `select` jest fotografowana **w trakcie interakcji**: lista opcji jest rozwinięta,
-a opcja, którą krok wybiera, jest zakreślona tak samo jak cel kroku `click`. Na jednej stronie
-pojawiają się trzy znaki:
+a wybierana opcja jest oznaczona gwiazdką tak samo jak cel kroku `click`. To jedyna akcja, której
+znaki rozkładają się na dwa prostokąty:
 
-- **czerwone koło** na wierszu opcji — to, co czytelnik ma kliknąć;
+- **gwiazdka** na wierszu opcji — to, co czytelnik ma kliknąć, rysowana dokładnie jak na stronie
+  kroku `click`;
 - **czerwona ramka** wokół samej kontrolki, żeby było widać, w którym polu jesteśmy;
-- **strzałka** kończąca się na wierszu opcji, a nie na kontrolce.
+- **strzałka** kończąca się na krawędzi wiersza opcji, a nie kontrolki.
 
 Strzałka kolejnego kroku zaczyna się od tego wiersza — tam, gdzie zostało oko czytelnika.
+
+W trybie `mode: native` (poniżej) nie ma wiersza, więc strona kroku `select` jest oznaczona jak
+każda inna akcja z ramką: strzałka do ramki kontrolki i sama ramka, bez gwiazdki — nic widocznego
+nie jest klikane.
 
 Działa to dlatego, że Guidebot wstrzykuje nakładkę DOM zastępującą natywną listę opcji (tę samą,
 która pokazuje listy rozwijane na filmach z `render`) — listę natywnego `<select>` rysuje system

@@ -282,7 +282,7 @@ async def test_the_frame_shows_the_open_list_and_the_click_mark_sits_on_the_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The `select:` page's screenshot contains the unfurled list, and the click
-    circle the PDF draws on it falls inside the option row.
+    star the PDF draws on it falls inside the option row.
 
     Both halves matter and neither implies the other. A frame taken with the
     list open but annotated from the collapsed control's stale box would mark
@@ -328,8 +328,8 @@ async def test_the_frame_shows_the_open_list_and_the_click_mark_sits_on_the_row(
 async def test_the_select_page_frames_the_control_and_points_the_arrow_at_the_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other two marks: a rectangle around the control the reader is in, and
-    an arrow that ends on the option row rather than on the control."""
+    """The other two marks: a frame around the control the reader is in, and an
+    arrow that ends on the option row rather than on the control."""
 
     path = _write(tmp_path, "shimmed-marks.scenario.yaml", SHIMMED_SCENARIO)
 
@@ -351,9 +351,9 @@ async def test_the_select_page_frames_the_control_and_points_the_arrow_at_the_ro
             await browser.close()
 
     assert control is not None
-    selected = _only(pages[1].annotations, "selected")
-    assert (selected.x, selected.y) == pytest.approx((control["x"], control["y"]), abs=1.0)
-    assert (selected.w, selected.h) == pytest.approx((control["width"], control["height"]), abs=1.0)
+    framed = _only(pages[1].annotations, "frame")
+    assert (framed.x, framed.y) == pytest.approx((control["x"], control["y"]), abs=1.0)
+    assert (framed.w, framed.h) == pytest.approx((control["width"], control["height"]), abs=1.0)
     # The arrow starts at the previous cursor position, which the navigate step
     # cleared, so this page has none — the first `select:` after a navigate is
     # exactly the case where an arrow must not be invented.
@@ -397,8 +397,8 @@ async def test_a_display_none_widget_is_driven_instead_of_timing_out(
     assert click.cx is not None and click.cy is not None
     # The widget stands where the hidden original is, so the framed control must
     # be the widget's box — a `display: none` element has no box to frame.
-    selected = _only(pages[1].annotations, "selected")
-    assert selected.w is not None and selected.w > 8
+    framed = _only(pages[1].annotations, "frame")
+    assert framed.w is not None and framed.w > 8
 
 
 async def test_native_mode_keeps_todays_collapsed_frame(
@@ -419,8 +419,9 @@ async def test_native_mode_keeps_todays_collapsed_frame(
 
     select_page = pages[1]
     assert select_page.screenshot is not None
-    # Today's shape exactly: the control is framed and nothing is circled.
-    assert {a.kind for a in select_page.annotations} == {"selected"}
+    # Marked like any other framed action: the control is framed and nothing is
+    # starred, because under `native` nothing visible is clicked.
+    assert {a.kind for a in select_page.annotations} == {"frame"}
     # And nothing was unfurled over the backdrop.
     _width, _height, rows = _read_png(select_page.screenshot)
     reference = _read_png(closed)[2]
@@ -452,10 +453,10 @@ async def test_the_marks_are_page_coordinates_when_the_site_runs_in_the_chrome_s
             await browser.close()
 
     click = _only(pages[1].annotations, "click")
-    selected = _only(pages[1].annotations, "selected")
+    framed = _only(pages[1].annotations, "frame")
     # The control sits at the very top of the fixture, so an un-offset mark would
     # land above the bar; both marks must be below it and inside the viewport.
-    assert selected.y > CHROME_HEIGHT
+    assert framed.y > CHROME_HEIGHT
     assert CHROME_HEIGHT < click.cy < 600
     # ...and the row is still below the control it belongs to, list-open order.
-    assert click.cy > selected.y + selected.h
+    assert click.cy > framed.y + framed.h

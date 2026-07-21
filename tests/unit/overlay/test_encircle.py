@@ -99,8 +99,11 @@ async def test_encircle_draws_a_trail_in_the_requested_colour_then_cleans_it_up(
     overlay = Overlay(CursorConfig(), Viewport(width=800, height=600))
     await overlay.install(page)
 
+    # `hold` daje zapas na wolnym CI: bez niego ślad żyje tylko tyle, ile trwa
+    # animacja, i między `wait_for` a odczytem atrybutu mógłby zdążyć zniknąć —
+    # `get_attribute` wisiałby wtedy do domyślnego timeoutu Playwrighta.
     running = asyncio.create_task(
-        _encircle(page, overlay, loops=2, hold=0.0, color="#22c55e"),
+        _encircle(page, overlay, loops=2, hold=1.0, color="#22c55e"),
     )
     await page.locator(TRAIL).wait_for(state="attached", timeout=5000)
     stroke = await page.locator(TRAIL).get_attribute("stroke")
@@ -108,6 +111,57 @@ async def test_encircle_draws_a_trail_in_the_requested_colour_then_cleans_it_up(
 
     assert stroke == "#22c55e"
     await page.locator(TRAIL).wait_for(state="detached", timeout=5000)
+
+
+async def test_cursor_keeps_a_steady_speed_around_an_elongated_ellipse(page: Page) -> None:
+    """Wokół szerokiej tabeli kursor ma jechać równo, a nie pełznąć i śmigać.
+
+    Parametryzacja kątem daje stałą prędkość *kątową*: przy rx/ry = 8 kursor
+    przechodzi w jednej klatce ośmiokrotnie dłuższy odcinek na płaskich łukach
+    niż na końcach. Ślad jest rysowany długością łuku, więc rozjeżdża się wtedy
+    z kursorem w środku okrążenia. Test mierzy odległości między kolejnymi
+    klatkami i pilnuje, żeby rozrzut był mały.
+    """
+
+    overlay = Overlay(CursorConfig(), Viewport(width=800, height=600))
+    await overlay.install(page)
+    await page.evaluate(
+        """() => {
+            window.__samples = [];
+            const tick = () => {
+                const el = document.querySelector("[data-guidebot-cursor]");
+                if (el) {
+                    window.__samples.push([
+                        Number.parseFloat(el.style.left),
+                        Number.parseFloat(el.style.top),
+                    ]);
+                }
+                window.__sampler = window.requestAnimationFrame(tick);
+            };
+            tick();
+        }"""
+    )
+
+    await overlay.encircle(
+        page, cx=400.0, cy=300.0, rx=320.0, ry=40.0, loops=1, hold=0.0, color="#22c55e"
+    )
+
+    steps = await page.evaluate(
+        """() => {
+            window.cancelAnimationFrame(window.__sampler);
+            const pts = window.__samples;
+            const out = [];
+            for (let i = 1; i < pts.length; i++) {
+                out.push(Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+            }
+            return out.filter((d) => d > 0);
+        }"""
+    )
+
+    steps.sort()
+    p10 = steps[len(steps) // 10]
+    p90 = steps[len(steps) * 9 // 10]
+    assert p90 / p10 < 2.0, f"prędkość kursora skacze {p90 / p10:.1f}× (rx/ry = 8)"
 
 
 async def test_lap_duration_scales_with_the_ellipse_but_stays_within_its_own_bounds() -> None:

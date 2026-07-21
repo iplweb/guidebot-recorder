@@ -121,32 +121,56 @@ Internally the three beat-2 methods are split into "find the row" and "click the
 row", so the common tail (approach → `on_revealed` → click → `_confirm_selected`)
 is written once. No rule about *which* row, or how to open which list, moves.
 
-### 4. Annotations (owner-approved shape)
+### 4. Annotations (owner-approved intent, in the vocabulary of PR #53)
 
-- a **click circle** on the option row — the same mark a `click:` step uses,
-  because that is literally what the video's second beat does;
-- the existing **`selected` rectangle**, but around the **control**, so the reader
-  sees which field they are in;
-- the **arrow** from the previous cursor position ending at the **option row**,
-  not at the control.
+The intent is two statements in one page — *this is the field* and *this is the
+row to click* — so `select:` is the one action whose marks are split across two
+boxes. Everything else puts frame, mark and arrow-tip on the same rectangle.
+
+*Restated while merging `main`.* PR #53
+(`2026-07-21-guide-arrow-frame-star-design.md`) replaced the guide's annotation
+vocabulary wholesale: the per-action rectangles (`selected` / `typed` / `hover`)
+became one `frame` kind for every targeted action, the click circle became an
+eight-armed **star** centred on the cursor with a gap that clears the cursor
+ring, and arrows are now **clipped to the rims** of the shapes at both ends
+rather than drawn centre to centre. This section originally named the marks of
+the vocabulary #53 removed; the intent is unchanged and is expressed in the new
+one as:
+
+- a **click star** on the option row — the same mark, at the same size, a
+  `click:` step draws, because the reader is being told to do the same thing;
+- the **`frame`** around the **control**, so the reader sees which field they are
+  in — the same frame every other targeted action gets;
+- the **arrow** ending at the **option row's rim**, not the control's.
+
+The row-sized click circle of the original design goes with the circle. It
+existed because an outline the height of three option rows reads as pointing at
+all three; a star locates its target by its centre and has no such failure mode,
+so shrinking it would only have made the select page's mark quieter than the
+identical instruction on a click page — two visual languages in one document,
+which is what #53 exists to prevent.
 
 The "previous cursor" carried into the next step becomes the option row's centre,
-so the next arrow starts where the reader's eye was left.
+and `prev_shape` becomes the row's rect, so the next arrow starts at the rim of
+the row where the reader's eye was left.
 
-`annotations_for` grows optional `row_box` / `row_center`; with neither (native
-mode, or any control with no list) it produces exactly today's marks. One
-function, one place where a `select` page's geometry is decided.
+`annotations_for` grows optional `row_box` / `row_center`, and `cursor_shape`
+answers "which shape was the cursor left in" for both the incoming arrow's tip
+and the next step's `prev_shape` — one rule, one place. With no row geometry
+(native mode, or any control with no list) a `select` is marked exactly like any
+other framed action, and gets **no star**: nothing visible was clicked.
 
 ### 5. `mode: native` and the classes with no list
 
 `mode: native`, globally or per step, keeps today's behaviour end to end: the
 cursor travels to the collapsed control, the frame is taken there, the value is
-set, and the annotation is the `selected` rectangle around the control. There is
+set, and the annotation is the `frame` around the control — the marks of any
+other targeted action, and no star, since nothing visible is clicked. There is
 no list to reveal and this must not become an error.
 
 A `multiple` / `size > 1` listbox has no list to *unfurl* either — its rows are
 already laid out — but it does have a row to mark, so it takes the full
-annotation shape with the control rectangle around the listbox itself.
+annotation shape with the frame around the listbox itself.
 
 ### 6. The preflight gap this exposes, and what it actually is
 
@@ -262,7 +286,7 @@ tests whose names claim more than their assertions check.
 
 | Level | File | Covers |
 | --- | --- | --- |
-| Annotate | `tests/unit/guide/test_annotate.py` | a `select` with row geometry yields a **click circle on the row**, a `selected` rectangle on the **control**, and an arrow **ending at the row**; with no row geometry it yields today's marks byte for byte |
+| Annotate | `tests/unit/guide/test_annotate.py` | a `select` with row geometry yields a **click star on the row** (the same size a `click:` step's star has), a **`frame` on the control**, and an arrow **clipped to the row's rim**; with no row geometry it is marked like any other framed action, with no star |
 | Capture | `tests/unit/guide/test_capture.py` | the frame is taken **while the list is open** — i.e. between `on_revealed` and the commit — and never again; `prev_cursor` for the next step is the row centre; the readiness barrier is awaited after navigation; `mode: native` keeps today's shape; the `not_visible` preflight verdict for a `select` becomes the recorder's own diagnosis; an `optional:` step skips **only** `OPTION_MISSING` and still fails on `UNDRIVABLE` (§7) |
 | Recorder | `tests/unit/recorder/test_recorder_select.py` | `on_revealed` fires exactly once, before the commit, on all four paths (shim, page widget, listbox, native), carrying the row's real rect; `ripple=False` suppresses the ring; and one `reason` case per raise site (§7), including the mirror pair "the widget draws the row the `<select>` lost" / "the `<select>` has the option the widget never drew" |
 | Guide wiring | `tests/unit/guide/test_guide.py` | `run_guide` installs the shim through `install_selects` and hands the controller to `capture_pages`; `mode: native` installs nothing |
