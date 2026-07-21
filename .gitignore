@@ -11,3 +11,18 @@ site/
 
 # superpowers SDD scratch (progress ledger)
 .superpowers/
+
+# narzędziowe cache
+.pytest_cache/
+.ruff_cache/
+.playwright-mcp/
+
+# artefakty guidebota: sidecar `compile` i gotowy film
+*.compiled.yaml
+*.mp4
+
+# pliki tymczasowe edytorów (emacs, vim)
+*~
+\#*\#
+.\#*
+*.swp
