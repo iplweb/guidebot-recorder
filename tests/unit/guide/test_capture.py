@@ -238,6 +238,24 @@ async def test_select_step_picks_option_then_screenshots(tmp_path, monkeypatch):
     assert any(a.kind == "selected" for a in pages[0].annotations)
 
 
+async def test_select_action_without_select_step_raises(tmp_path, monkeypatch):
+    """The sidecar recorded a `select` action, but the scenario step it maps to
+    isn't a select step (e.g. the scenario was edited by hand after freezing).
+    This must raise a GuideError telling the user to re-freeze, not silently
+    call select_option with a nonexistent option.
+    """
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(config=_cfg(), steps=[Step(click="jakiś przycisk")])
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    recorder = FakeRecorder()
+    with pytest.raises(GuideError, match="compile --force"):
+        await capture_pages(
+            scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+        )
+
+
 async def test_scroll_without_say_calls_recorder_but_makes_no_page(tmp_path):
     scenario = Scenario(config=_cfg(), steps=[Step(scroll="down")])
     recorder = FakeRecorder()
@@ -251,14 +269,19 @@ async def test_scroll_without_say_calls_recorder_but_makes_no_page(tmp_path):
 
 async def test_scroll_with_say_produces_one_page_with_text_and_screenshot(tmp_path):
     scenario = Scenario(config=_cfg(), steps=[Step(scroll="down", say="Przewijamy w dół")])
-    recorder = FakeRecorder()
+    events: list[str] = []
+    recorder = FakeRecorder(events)
+    page = FakePage(events)
     pages = await capture_pages(
-        scenario, _compiled([None]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+        scenario, _compiled([None]), page, recorder, tmp_path / "shots", timeout=15.0
     )
     assert len(recorder.scroll_calls) == 1
     assert len(pages) == 1
     assert pages[0].text == "Przewijamy w dół"
     assert pages[0].screenshot is not None
+    # the scroll must land BEFORE the screenshot: otherwise the PDF page would
+    # show the frame from before the page moved, not the state being described.
+    assert events == ["scroll:down", "screenshot"]
 
 
 async def test_cursor_resets_after_scroll(tmp_path, monkeypatch):

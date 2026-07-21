@@ -23,7 +23,7 @@ class Annotation:
     cx: float | None = None
     cy: float | None = None
     r: float | None = None
-    # typed / hover: rectangle around the target box
+    # typed / hover / selected: rectangle around the target box
     x: float | None = None
     y: float | None = None
     w: float | None = None
