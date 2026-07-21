@@ -20,11 +20,18 @@ from playwright.async_api import BrowserContext
 
 from guidebot_recorder.models.config import SelectsConfig
 
-# Default ceiling for :meth:`Selects.wait_ready`. Generous next to any sane
-# ``settle_ms`` (the widget's own uncancellable first pass fires one settle
-# window after DOMContentLoaded), so it only ever fires when something is truly
+# Floor for :meth:`Selects.wait_ready`'s deadline, in seconds. Generous next to
+# the default ``settle_ms``, so it only ever fires when something is truly
 # wedged.
 READY_TIMEOUT = 15.0
+
+# Mirrors ``MAX_DEFERRAL_FACTOR`` in ``selects.js``: the widget promises its
+# first pass no later than this many settle windows after DOMContentLoaded.
+DEFERRAL_FACTOR = 3
+
+# Headroom on top of that promise — process start-up, the pass itself and the
+# round trip through the CDP connection.
+READY_MARGIN = 5.0
 
 _AWAIT_READY = """(timeoutMs) => {
     const api = window.__guidebot_selects;
@@ -73,6 +80,19 @@ class Selects:
         """The full injected script (prelude + body), for direct evaluation."""
         return self._script
 
+    @property
+    def ready_timeout(self) -> float:
+        """Seconds :meth:`wait_ready` waits before declaring the widget wedged.
+
+        Derived rather than constant: ``settle_ms`` has no upper bound, and the
+        widget's own guaranteed first pass is only due ``DEFERRAL_FACTOR``
+        settle windows in. A fixed 15 s ceiling is already shorter than that at
+        ``settle_ms >= 5000``, which turns ordinary page churn into a spurious
+        :class:`SelectsNotReadyError`.
+        """
+        settle_seconds = self.config.settle_ms / 1000
+        return max(READY_TIMEOUT, settle_seconds * DEFERRAL_FACTOR + READY_MARGIN)
+
     async def install_context(self, context: BrowserContext) -> None:
         """Register the widget for every subsequently created/navigated document.
 
@@ -84,7 +104,17 @@ class Selects:
         """
         await context.add_init_script(script=self._script)
 
-    async def wait_ready(self, frame, timeout: float = READY_TIMEOUT) -> None:
+    def _not_ready(self, frame, timeout: float) -> SelectsNotReadyError:
+        """The user-facing failure: which frame gave up, and what to try next."""
+        url = getattr(frame, "url", "") or "(nieznany adres)"
+        return SelectsNotReadyError(
+            f"widget select nie zgłosił gotowości w ciągu {timeout:.1f} s "
+            f"dla ramki {url}. Zwiększ selects.settleMs, jeśli strona długo się "
+            f"inicjalizuje, albo ustaw selects.mode: native, aby zrezygnować "
+            f"z podmiany list rozwijanych na tej stronie."
+        )
+
+    async def wait_ready(self, frame, timeout: float | None = None) -> None:
         """Block until the frame's first classification pass has finished.
 
         Without this barrier a step could resolve or run against a page that has
@@ -92,11 +122,14 @@ class Selects:
         the same instant.
 
         Bounded on purpose: waiting forever would turn any page whose widget
-        never settles into a compile or render that hangs with no diagnosis.
+        never settles into a compile or render that hangs with no diagnosis. The
+        default bound is :attr:`ready_timeout`, which tracks ``settle_ms``.
 
         Raises:
             SelectsNotReadyError: the widget did not settle within ``timeout``.
         """
+        if timeout is None:
+            timeout = self.ready_timeout
         timeout_ms = max(1, int(timeout * 1000))
         try:
             # The page-side race is the primary guard; the outer wait covers the
@@ -106,12 +139,8 @@ class Selects:
                 timeout=timeout + 1.0,
             )
         except TimeoutError as exc:
-            raise SelectsNotReadyError(
-                f"widget select nie zgłosił gotowości w ciągu {timeout:.1f} s"
-            ) from exc
+            raise self._not_ready(frame, timeout) from exc
         except Exception as exc:
             if "guidebot selects ready timeout" not in str(exc):
                 raise
-            raise SelectsNotReadyError(
-                f"widget select nie zgłosił gotowości w ciągu {timeout:.1f} s"
-            ) from exc
+            raise self._not_ready(frame, timeout) from exc

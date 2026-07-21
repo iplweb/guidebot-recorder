@@ -233,6 +233,56 @@ async def test_a_late_select_in_an_observed_shadow_root_is_shimmed(page: Page) -
     )
 
 
+async def test_mutations_in_a_detached_shadow_root_do_not_defer_the_settle_debounce(
+    page: Page,
+) -> None:
+    """M4: an observed root the page has thrown away must stop re-arming the debounce.
+
+    A MutationObserver cannot unobserve a single node, so the detached root keeps
+    delivering records. Measured before the fix: a live select was shimmed at
+    0.42 s instead of 0.20 s, because every mutation in the dead subtree pushed
+    the pending pass out to the deferral ceiling.
+    """
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await page.evaluate(
+        "() => { document.getElementById('host')"
+        ".attachShadow({mode: 'open'}).innerHTML = '<i>x</i>'; }"
+    )
+    await _inject(page, {"settleMs": 200})
+    # The root is observed now; detaching the host does not undo that.
+    await page.evaluate(
+        """() => {
+      const host = document.getElementById('host');
+      window.__root = host.shadowRoot;
+      host.remove();
+    }"""
+    )
+    elapsed = await page.evaluate(
+        """() => new Promise((resolve) => {
+      const started = performance.now();
+      let n = 0;
+      const storm = window.setInterval(() => {
+        window.__root.innerHTML = '<i>' + (n += 1) + '</i>';
+      }, 16);
+      const select = document.createElement('select');
+      select.id = 's';
+      select.style.width = '220px';
+      select.innerHTML = '<option>a</option><option>b</option>';
+      document.body.appendChild(select);
+      const check = () => {
+        if (select.hasAttribute('data-guidebot-shimmed')) {
+          window.clearInterval(storm);
+          resolve(performance.now() - started);
+        } else {
+          window.setTimeout(check, 10);
+        }
+      };
+      check();
+    })"""
+    )
+    assert elapsed < 400, f"the detached root deferred the pass to {elapsed:.0f} ms"
+
+
 async def test_only_mutation_on_the_select_is_the_marker_attribute(page: Page) -> None:
     await page.set_content(NESTED)
     before = await page.evaluate(
@@ -626,6 +676,13 @@ _READ_OVERLAY_STYLES = """() => {
     buttonRect: rect(button),
     selectRect: rect(s),
     maxHeight: Number.parseFloat(getComputedStyle(list).maxHeight),
+    listHeight: list.getBoundingClientRect().height,
+    visibleOptions: Array.from(list.querySelectorAll('[data-guidebot-option-index]'))
+      .filter((r) => {
+        const lr = list.getBoundingClientRect();
+        const rr = r.getBoundingClientRect();
+        return rr.top >= lr.top - 1 && rr.bottom <= lr.bottom + 1;
+      }).length,
   };
 }"""
 
@@ -661,6 +718,17 @@ async def test_page_css_cannot_bleed_into_the_overlay(page: Page) -> None:
     drift = zip(styles["buttonRect"], styles["selectRect"], strict=True)
     assert max(abs(a - b) for a, b in drift) < 1.0, styles
     assert styles["maxHeight"] < 400, styles["maxHeight"]
+
+    # `max-height` alone proves nothing: `div {height:120px!important}` above wins
+    # over an unpinned `height` and shrinks the *rendered* list to 120 px, which
+    # measured as 4 visible options out of the 8 `maxVisibleOptions` asks for.
+    assert abs(styles["listHeight"] - styles["maxHeight"]) < 1.0, (
+        f"a page height rule shrank the list to {styles['listHeight']}px "
+        f"(max-height {styles['maxHeight']}px)"
+    )
+    assert styles["visibleOptions"] >= 8, (
+        f"only {styles['visibleOptions']} options fit, maxVisibleOptions was 8"
+    )
 
 
 async def test_geometry_repins_after_a_scroll(page: Page) -> None:
@@ -836,17 +904,60 @@ async def test_option_rows_follow_a_replaced_option_set_while_the_list_is_closed
     assert (await page.evaluate(_ROW_TEXTS))["button"] == "Alfa"
 
 
+async def test_an_option_set_that_only_moves_a_separator_still_rebuilds_the_rows(
+    page: Page,
+) -> None:
+    """M8: joining the signature parts with "" lets distinct option sets collide.
+
+    ``["a", "b"]`` fingerprints as ``o:a`` + ``o:b`` and the single option
+    ``ao:b`` as ``o:ao:b`` — the same string, so the rows are never rebuilt and
+    the list keeps showing options the select no longer has.
+    """
+    await page.set_content(
+        "<body style='margin:0'><select id='s' style='width:220px'>"
+        "<option>a</option><option>b</option></select></body>"
+    )
+    await _inject(page)
+    assert (await page.evaluate(_ROW_TEXTS))["rows"] == ["a", "b"]
+    await page.evaluate(
+        "() => { document.getElementById('s').innerHTML = '<option>ao:b</option>'; }"
+    )
+    await page.wait_for_function(
+        "() => Array.from(window.__guidebot_selects"
+        ".listFor(document.getElementById('s'))"
+        ".querySelectorAll('[data-guidebot-option-index]'))"
+        ".map((n) => n.textContent).join('|') === 'ao:b'",
+        timeout=3000,
+    )
+
+
 async def test_rebuilding_rows_keeps_an_open_lists_highlight(page: Page) -> None:
-    """The rebuild must not drop the active row out from under an open list."""
+    """The rebuild must not drop the active row out from under an open list.
+
+    The highlight is moved *away* from the selection first: a rebuild that
+    re-applies `selectedIndex` looks correct as long as the two agree, so only an
+    arrow-key highlight that has left the selection behind can catch it.
+    """
     await page.set_content(NESTED)
     await _inject(page)
-    await page.evaluate(
+    state = await page.evaluate(
         """() => {
       const s = document.getElementById('s');
-      s.selectedIndex = 1;
+      s.selectedIndex = 0;
       window.__guidebot_selects.open(s);
+      for (let i = 0; i < 2; i += 1) {
+        s.dispatchEvent(new KeyboardEvent(
+          'keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
+      }
+      const list = window.__guidebot_selects.listFor(s);
+      const row = list.querySelector('[data-guidebot-option-active]');
+      return {
+        active: row ? row.getAttribute('data-guidebot-option-index') : null,
+        selectedIndex: s.selectedIndex,
+      };
     }"""
     )
+    assert state == {"active": "2", "selectedIndex": 0}, "the fixture never moved the highlight"
     await page.evaluate(
         "() => { document.getElementById('s').insertAdjacentHTML("
         "'beforeend', '<option>Pomorskie</option>'); }"
@@ -856,13 +967,18 @@ async def test_rebuilding_rows_keeps_an_open_lists_highlight(page: Page) -> None
         ".querySelectorAll('[data-guidebot-option-index]').length === 4",
         timeout=3000,
     )
-    active = await page.evaluate(
-        "() => { const list = window.__guidebot_selects"
-        ".listFor(document.getElementById('s'));"
-        " const row = list.querySelector('[data-guidebot-option-active]');"
-        " return row ? row.getAttribute('data-guidebot-option-index') : null; }"
+    after = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const row = window.__guidebot_selects.listFor(s)
+        .querySelector('[data-guidebot-option-active]');
+      return {
+        active: row ? row.getAttribute('data-guidebot-option-index') : null,
+        selectedIndex: s.selectedIndex,
+      };
+    }"""
     )
-    assert active == "1"
+    assert after == {"active": "2", "selectedIndex": 0}
 
 
 async def test_observer_unshims_a_select_that_gains_a_marker_class(page: Page) -> None:
@@ -1411,6 +1527,36 @@ async def test_ready_settles_even_when_the_page_mutates_every_frame(page: Page) 
     ), "the first pass resolved `ready` without ever shimming anything"
 
 
+async def test_a_throwing_classification_pass_still_resolves_ready(page: Page) -> None:
+    """M5: without `try/finally` a throw leaves `ready` pending for good.
+
+    The guaranteed timer is cleared only at the end of `classify()`, so once it
+    has fired, a pass that throws every time takes `markReady` down with it — and
+    `Selects.wait_ready` blocks compile and render on exactly that promise.
+    """
+    await page.set_content(NESTED)
+    await page.evaluate(
+        """() => {
+      window.__guidebot_selects_config = {settleMs: 20};
+      const original = Element.prototype.appendChild;
+      Element.prototype.appendChild = function (node) {
+        if (node && node.nodeType === 1 && node.hasAttribute('data-guidebot-select-button')) {
+          throw new Error('a page hook threw while the shim was mounting');
+        }
+        return original.call(this, node);
+      };
+    }"""
+    )
+    await page.evaluate(SELECTS_JS)
+    outcome = await page.evaluate(
+        """() => Promise.race([
+      window.__guidebot_selects.ready.then(() => 'ready'),
+      new Promise((r) => window.setTimeout(() => r('never settled'), 2000)),
+    ])"""
+    )
+    assert outcome == "ready"
+
+
 async def test_a_late_select_is_shimmed_while_the_page_mutates_every_frame(page: Page) -> None:
     """C1: the observer's debounce needs a cap, not just an uncancellable first pass.
 
@@ -1431,6 +1577,44 @@ async def test_a_late_select_is_shimmed_while_the_page_mutates_every_frame(page:
     await page.wait_for_function(
         "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
         timeout=5000,
+    )
+
+
+# The same storm, but on the macrotask queue instead of the frame clock. A
+# `clearTimeout`+`setTimeout` ceiling can never win against this: the re-armed
+# timer is always queued *behind* the storm's own already-pending one, so the
+# pass is postponed for as long as the page keeps mutating.
+_EVERY_TASK_STYLE_STORM = """() => {
+  const el = document.getElementById('storm');
+  let n = 0;
+  const step = () => {
+    el.style.transform = 'translateX(' + (n++ % 7) + 'px)';
+    window.setTimeout(step, 0);
+  };
+  window.setTimeout(step, 0);
+}"""
+
+
+async def test_the_deferral_ceiling_survives_a_zero_delay_timer_storm(page: Page) -> None:
+    """M3: the cap must be its own uncancellable deadline, not a re-armed debounce.
+
+    Measured before the fix: a select appended during a `setTimeout(fn, 0)` storm
+    was still unshimmed after 5 s, even though the ceiling is 3 × 200 ms.
+    """
+    await page.set_content("<body style='margin:0'><div id='storm'>x</div></body>")
+    await page.evaluate('window.__guidebot_selects_config = {"settleMs": 200};')
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate("window.__guidebot_selects.ready")
+    await page.evaluate(_EVERY_TASK_STYLE_STORM)
+    await page.evaluate(
+        "() => { const s = document.createElement('select');"
+        " s.id = 's'; s.style.width = '220px';"
+        " s.innerHTML = '<option>a</option><option>b</option>';"
+        " document.body.appendChild(s); }"
+    )
+    await page.wait_for_function(
+        "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
+        timeout=3000,
     )
 
 

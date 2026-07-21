@@ -147,7 +147,8 @@
   let uidCounter = 0;
   let rafHandle = null;
   let settleTimer = null;
-  let settleDeadline = 0;
+  // The debounce's ceiling: armed once per chain, never cancelled by a re-arm.
+  let deadlineTimer = null;
   let guaranteedTimer = null;
 
   function css(element, declarations) {
@@ -329,6 +330,12 @@
       border: "0",
       "font-size": "inherit",
       "line-height": "normal",
+      // The width trio matters as much as the height one: a page `span` rule
+      // pinning a width would either squeeze the label to nothing or push the
+      // caret out of the button.
+      width: "auto",
+      "min-width": "0",
+      "max-width": "none",
       height: "auto",
       "min-height": "0",
       "max-height": "none",
@@ -348,9 +355,13 @@
       display: "block",
       padding: "0",
       margin: "0 0 0 6px",
+      // The triangle *is* its borders, so any page-imposed box size deforms it.
       width: "0",
+      "min-width": "0",
+      "max-width": "none",
       height: "0",
       "min-height": "0",
+      "max-height": "none",
       "border-left": "4px solid transparent",
       "border-right": "4px solid transparent",
       "border-top": "5px solid " + (computed.color || "#4b5563"),
@@ -377,6 +388,11 @@
       width: "0px",
       "min-width": "0",
       "max-width": "none",
+      // `height` as well as the min/max pair: `max-height` alone leaves
+      // `div {height: 120px !important}` free to *shrink* the list below the
+      // clamp `layoutList` computed, which silently drops rows out of frame
+      // (measured: 120 px and 4 visible options where 218 px and 8 were due).
+      height: "auto",
       "min-height": "0",
       display: "none",
       margin: "0",
@@ -527,12 +543,21 @@
     return heading;
   }
 
+  // Spelled as an escape on purpose. This used to be the literal control
+  // character, which is invisible in an editor, in a diff and in review — it
+  // reads exactly like `join("")`, the separator-less join under which
+  // `["a", "b"]` and `["ao:b"]` fingerprint identically.
+  const SIGNATURE_SEPARATOR = "\u0001";
+
   /**
    * A cheap fingerprint of everything `buildOptions` renders.
    *
    * Rebuilding unconditionally on every classification pass would reset the
    * highlight and the scroll position of an open list; rebuilding only when this
    * changes keeps the rows fresh without the churn.
+   *
+   * The parts are joined with a separator no label can contain, so two distinct
+   * option sets can never share a fingerprint and leave the rows stale.
    */
   function optionsSignature(select) {
     const parts = [];
@@ -549,7 +574,7 @@
         }
       }
     }
-    return parts.join("");
+    return parts.join(SIGNATURE_SEPARATOR);
   }
 
   /** Rebuild the rows if — and only if — the option set actually changed. */
@@ -560,7 +585,11 @@
     }
     buildOptions(entry);
     if (entry.open) {
-      setActive(entry, entry.select.selectedIndex);
+      // The highlight belongs to the *open list*, not to the select: the viewer
+      // may have arrowed it far away from `selectedIndex`, and re-applying the
+      // selection would throw that away — measured, a highlight on row 12 jumped
+      // back to row 0 the moment the page appended an option.
+      setActive(entry, entry.activeIndex >= 0 ? entry.activeIndex : entry.select.selectedIndex);
     }
   }
 
@@ -920,6 +949,13 @@
    * like any other. A root attached *after* this sweep produces no mutation
    * record of its own (`attachShadow` is invisible to a MutationObserver); it is
    * picked up by the next pass the host's own mutations trigger.
+   *
+   * The `"*"` sweep is the price of that coverage, and it stays: a shadow root
+   * is reachable only through its host's `shadowRoot` property, which no
+   * selector can express, so the native `querySelectorAll("select")` this
+   * replaced cannot see into one. Passes are debounced by `settle_ms` and
+   * happen only on mutation, so the walk is not per frame. `localName` rather
+   * than `tagName.toLowerCase()` keeps it from allocating a string per element.
    */
   function collectSelects() {
     const found = [];
@@ -931,7 +967,7 @@
           pending.push(element.shadowRoot);
           observeRoot(element.shadowRoot);
         }
-        if (element.tagName.toLowerCase() === "select") {
+        if (element.localName === "select") {
           found.push(element);
         }
       }
@@ -946,61 +982,92 @@
       scheduleGuaranteedPass();
       return;
     }
-    for (const select of Array.from(shims.keys())) {
-      if (!isShimmable(select)) {
-        unshim(select);
-        continue;
+    // Everything below runs against page-controlled DOM, so a page getter, a
+    // patched prototype or a hostile `getComputedStyle` can throw anywhere in
+    // it. The `finally` is what keeps such a throw cosmetic: without it the pass
+    // takes `markReady()` down with it, and once the guaranteed timer has fired
+    // there is nothing left to resolve `ready` — compile and render then block
+    // on it until their own timeout.
+    try {
+      for (const select of Array.from(shims.keys())) {
+        if (!isShimmable(select)) {
+          unshim(select);
+          continue;
+        }
+        // An SPA that replaces <body> takes our overlays with it while the
+        // select survives; re-attach rather than losing the shim.
+        const entry = shims.get(select);
+        if (!entry.button.isConnected) {
+          document.body.appendChild(entry.button);
+        }
+        if (!entry.list.isConnected) {
+          document.body.appendChild(entry.list);
+        }
+        // Rows read stale text until the next `open()` otherwise; the page may
+        // have swapped the whole option set in the meantime.
+        syncOptions(entry);
+        updateLabel(entry);
       }
-      // An SPA that replaces <body> takes our overlays with it while the select
-      // survives; re-attach rather than losing the shim.
-      const entry = shims.get(select);
-      if (!entry.button.isConnected) {
-        document.body.appendChild(entry.button);
+      for (const select of collectSelects()) {
+        if (shims.has(select) || !isShimmable(select)) {
+          continue;
+        }
+        shim(select);
       }
-      if (!entry.list.isConnected) {
-        document.body.appendChild(entry.list);
+    } finally {
+      scheduleFrame();
+      markReady();
+      // A pass has now completed, so the fallback timer has served its purpose;
+      // from here the capped debounce is enough to keep classification alive.
+      if (guaranteedTimer !== null) {
+        window.clearTimeout(guaranteedTimer);
+        guaranteedTimer = null;
       }
-      // Rows read stale text until the next `open()` otherwise; the page may
-      // have swapped the whole option set in the meantime.
-      syncOptions(entry);
-      updateLabel(entry);
     }
-    for (const select of collectSelects()) {
-      if (shims.has(select) || !isShimmable(select)) {
-        continue;
-      }
-      shim(select);
+  }
+
+  /** Run a pending pass now and retire both timers that could still start one. */
+  function runPendingClassify() {
+    if (settleTimer !== null) {
+      window.clearTimeout(settleTimer);
+      settleTimer = null;
     }
-    scheduleFrame();
-    markReady();
-    // A pass has now completed, so the fallback timer has served its purpose;
-    // from here the capped debounce is enough to keep classification alive.
-    if (guaranteedTimer !== null) {
-      window.clearTimeout(guaranteedTimer);
-      guaranteedTimer = null;
+    if (deadlineTimer !== null) {
+      window.clearTimeout(deadlineTimer);
+      deadlineTimer = null;
     }
+    classify();
   }
 
   /**
    * Debounced classification, with a hard ceiling on how long it may be deferred.
    *
-   * Every re-arm still restarts the settle window, but never past
-   * `MAX_DEFERRAL_FACTOR` windows from the moment the current chain started, so
-   * an every-frame mutation slows the pass down instead of cancelling it forever.
+   * Every re-arm restarts the settle window, so a page that mutates constantly
+   * would postpone the pass forever. The ceiling that prevents that is a *second,
+   * independent* timer, armed once when the chain starts and never cancelled by
+   * a re-arm — exactly what `scheduleGuaranteedPass` does for the first pass.
+   *
+   * Implementing the ceiling by shortening the re-armed debounce instead (clear +
+   * set, with the wait clamped to the remaining budget) does not hold: a page
+   * running `setTimeout(fn, 0)` re-queues its own work ahead of every freshly set
+   * timer, so the ceiling never comes due. Measured that way, a select added
+   * during such a storm was still unshimmed after 5 s.
    */
   function scheduleClassify(delay) {
     const requested = delay === undefined ? SETTLE_MS : delay;
-    const now = Date.now();
-    if (settleTimer === null) {
-      settleDeadline = now + Math.max(requested, SETTLE_MS * MAX_DEFERRAL_FACTOR);
-    } else {
+    if (settleTimer !== null) {
       window.clearTimeout(settleTimer);
     }
-    const wait = Math.max(0, Math.min(requested, settleDeadline - now));
     settleTimer = window.setTimeout(() => {
       settleTimer = null;
-      classify();
-    }, wait);
+      runPendingClassify();
+    }, requested);
+    if (deadlineTimer === null) {
+      deadlineTimer = window.setTimeout(() => {
+        deadlineTimer = null;
+        runPendingClassify();
+      }, Math.max(requested, SETTLE_MS * MAX_DEFERRAL_FACTOR));
+    }
   }
 
   /**
@@ -1051,6 +1118,14 @@
    */
   function isRelevant(records) {
     for (const record of records) {
+      // A MutationObserver cannot unobserve a single node, so a shadow root the
+      // page has thrown away keeps delivering records forever. Nothing inside it
+      // can reach the document any more, so reacting would only re-arm the
+      // settle debounce on behalf of a dead subtree — measured, that pushed a
+      // live select's shim from 0.20 s out to the 0.42 s deferral ceiling.
+      if (!record.target.isConnected) {
+        continue;
+      }
       if (record.type === "attributes") {
         if (isOurNode(record.target)) {
           continue;
@@ -1089,8 +1164,15 @@
     attributeFilter: ["class", "style", "hidden", "multiple", "size", "disabled"],
   };
 
-  /** Observe a root once. Shadow roots need their own registration. */
-  const observedRoots = new Set();
+  /**
+   * Observe a root once. Shadow roots need their own registration.
+   *
+   * Weak on purpose: this bookkeeping only answers "already registered?", and a
+   * strong `Set` would pin every shadow root the page ever attached for the
+   * lifetime of the document. The observer's own node list holds weak references
+   * (DOM standard), so once this set lets go, a detached root is collectable.
+   */
+  const observedRoots = new WeakSet();
   function observeRoot(root) {
     if (observedRoots.has(root)) {
       return;
