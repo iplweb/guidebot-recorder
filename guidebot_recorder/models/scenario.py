@@ -106,8 +106,10 @@ class Highlight(BaseModel):
     """Draw attention to a control or an area without touching it.
 
     ``what`` is the semantic target — a control ("przycisk Zapisz") or a whole
-    region ("tabela z wynikami"); an area is just a container element, so the
-    resolver treats both alike. In the film the cursor laps an ellipse around the
+    region ("tabela z wynikami"). An area resolves like anything else only because
+    this command widens the Reasoner's candidate set with container roles
+    (``page_context.HIGHLIGHT_CANDIDATE_ROLES``); the acting commands still see
+    controls alone. In the film the cursor laps an ellipse around the
     target, leaving a marker trail behind it; in the PDF guide the same ellipse is
     drawn onto the screenshot. Nothing is clicked, hovered or typed: this is the
     one command that points at the page without changing it.

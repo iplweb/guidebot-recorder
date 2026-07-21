@@ -23,6 +23,9 @@
   // --- `encircle` (the `highlight` command) --------------------------------
   const ENCIRCLE_STROKE_WIDTH = 5;
   const ENCIRCLE_FADE_MS = 260;
+  // Chord samples used to invert arc length. 180 keeps the error well under a
+  // pixel even for a viewport-wide ellipse, and the table is built once per lap.
+  const ENCIRCLE_ARC_SAMPLES = 180;
 
   // --- Cursor appearance ---------------------------------------------------
   // Values come from the YAML `config.cursor` block (injected as a global by
@@ -546,6 +549,50 @@
    * us, and a fallback timer settles the promise even when rAF stops firing in a
    * backgrounded document — without it a recording would hang forever.
    */
+  /**
+   * Angle lookup that walks an ellipse at a CONSTANT SPEED.
+   *
+   * Stepping the angle linearly would not: on an ellipse, equal angles cover
+   * wildly unequal arcs (at rx/ry = 8 the cursor crawls around the ends and
+   * bolts along the flat runs, ~5x apart), and the trail — which is drawn by
+   * arc length via stroke-dashoffset — would come unstuck from the cursor
+   * mid-lap. Sampling cumulative chord length once and inverting it keeps both
+   * on the same clock.
+   */
+  function arcLengthTable(rx, ry, samples = ENCIRCLE_ARC_SAMPLES) {
+    const cumulative = new Float64Array(samples + 1);
+    let previousX = rx;
+    let previousY = 0;
+    for (let i = 1; i <= samples; i++) {
+      const angle = (i / samples) * 2 * Math.PI;
+      const x = rx * Math.cos(angle);
+      const y = ry * Math.sin(angle);
+      cumulative[i] = cumulative[i - 1] + Math.hypot(x - previousX, y - previousY);
+      previousX = x;
+      previousY = y;
+    }
+    const total = cumulative[samples];
+    return (fraction) => {
+      if (!(total > 0)) {
+        return fraction * 2 * Math.PI;
+      }
+      const wanted = fraction * total;
+      let low = 0;
+      let high = samples;
+      while (low + 1 < high) {
+        const mid = (low + high) >> 1;
+        if (cumulative[mid] <= wanted) {
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+      const span = cumulative[high] - cumulative[low];
+      const within = span > 0 ? (wanted - cumulative[low]) / span : 0;
+      return ((low + within) / samples) * 2 * Math.PI;
+    };
+  }
+
   function encircle(cx, cy, rx, ry, options = {}) {
     const centreX = Number(cx);
     const centreY = Number(cy);
@@ -609,6 +656,7 @@
 
     setImportant(cursor, "transition", "none");
     const spinMs = laps * msPerLap;
+    const angleAt = arcLengthTable(radiusX, radiusY);
 
     return new Promise((resolve) => {
       let start = null;
@@ -651,7 +699,8 @@
         // Only the spin phase advances the angle; during the hold the cursor
         // rests at the entry point and the trail stands whole.
         const spun = Math.min(elapsed, spinMs);
-        const angle = (spun / msPerLap) * 2 * Math.PI;
+        const laps = spun / msPerLap;
+        const angle = angleAt(laps - Math.floor(laps));
         setImportant(cursor, "left", `${centreX + radiusX * Math.cos(angle)}px`);
         setImportant(cursor, "top", `${centreY + radiusY * Math.sin(angle)}px`);
         // The first lap draws the trail; later laps trace over what is there.

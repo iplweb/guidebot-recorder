@@ -27,7 +27,7 @@ from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.models.scenario import Step, WaitUntil
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.resolver.identity_capture import capture_identity
-from guidebot_recorder.resolver.page_context import collect_candidates
+from guidebot_recorder.resolver.page_context import candidate_roles_for, collect_candidates
 from guidebot_recorder.resolver.reasoner import (
     ErrorReason,
     Reasoner,
@@ -216,7 +216,9 @@ async def resolve_step_target(
     """
 
     instruction = step_instruction(step)
-    candidates = await collect_candidates(root)
+    # `highlight` points at a region, so its candidate set includes containers a
+    # clicking command has no use for; every other kind gets today's set.
+    candidates = await collect_candidates(root, roles=candidate_roles_for(kind))
     option = step.select.option if step.select is not None else None
     resolution_error: str | None = None
     last_rejection: ValidationFail | None = None
