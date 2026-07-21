@@ -96,6 +96,10 @@ Decyzje:
   gałąź `navigate` (`capture.py:102`).
 - Strona ma `kind="step"` i pustą listę adnotacji; nowy wariant w
   `GuidePage.kind` nie jest potrzebny.
+- `guide` **instaluje overlay** (`guide/guide.py:63-67`, `guide.py:83`), więc
+  `Recorder.scroll` pójdzie ścieżką animowaną (`recorder.py:240-248`: 16 kroków
+  × 18 ms + 150 ms ≈ 0,44 s na krok). To akceptowalne — kadr i tak jest robiony
+  po zakończeniu animacji, a kod jest wspólny z `render`.
 
 ### 3. `capture_pages()`: gałąź `select`
 
@@ -103,10 +107,12 @@ W dispatchu na `action.action`, obok `type` / `hover` / `click`:
 
 ```python
 elif act == "select":
-    option = step.select.option if step.select else None
-    if option is None:
-        raise GuideError(f"krok {index}: krok select bez `option` — sprawdź scenariusz")
-    await res.locator.select_option(label=option)
+    if step.select is None:
+        raise GuideError(
+            f"krok {index}: sidecar mówi `select`, a krok scenariusza nim nie jest "
+            "— uruchom `compile --force`"
+        )
+    await res.locator.select_option(label=step.select.option)
     shot, size = await _screenshot(page, shots_dir, index)  # kadr PO wyborze
 ```
 
@@ -122,16 +128,19 @@ Decyzje:
 - **`res.locator.select_option(label=…)`, nie `recorder.select()`.** `guide` trzyma
   wzorzec „point → (akcja) → zrzut" i `res.locator` pochodzi z już wykonanego
   `recorder.point()`; `recorder.select()` wykonałoby drugie `_point_and_prepare`.
-  Przy `overlay=None` (a `guide` overlaya nie ma) `Recorder.select` i tak sprowadza
-  się do `select_option(label=…)` (`recorder.py:174-176`), więc zachowanie jest
-  identyczne.
-- **Brak `option` jest błędem, nie cichym pominięciem** — pydantic wymusza
-  `option` na modelu `Select`, więc ta gałąź jest obroną przed niespójnością
-  sidecar↔scenariusz, nie normalną ścieżką.
+  Co ważniejsze: `guide` **ma** zainstalowany overlay (`guide/guide.py:63-67, 83`),
+  więc `Recorder.select` poszedłby ścieżką `_step_option_visibly`
+  (`recorder.py:179-212`) — stepowanie strzałkami po 140 ms na opcję z dźwiękiem
+  klawisza. Dla nieruchomego kadru to czysty koszt bez zysku; `select_option`
+  ustawia wartość natychmiast i deterministycznie.
+- **Niespójność sidecar↔scenariusz jest błędem, nie cichym pominięciem.** Pydantic
+  wymusza `option` na modelu `Select`, więc jedyny realny przypadek to wpis
+  `action: select` w sidecarze przy kroku, który selectem nie jest — czyli
+  nieaktualny sidecar. Stąd rada `compile --force` w komunikacie.
 
 ### 4. Adnotacja `selected`
 
-`Annotation.kind` dostaje wariant `"selected"`; `annotate.annotations_for()`
+`Annotation.kind` (`guide/model.py:16`) dostaje wariant `"selected"`; `annotate.annotations_for()`
 zwraca go dla `action == "select"`, gdy znany jest `box`;
 `layout.py:47` renderuje `("typed", "hover", "selected")` tym samym czerwonym
 prostokątem. Wizualnie bez zmian — chodzi o to, żeby model nie twierdził, że w
@@ -154,6 +163,47 @@ async def reuse_is_valid(page: Page | Frame, cached: CachedAction) -> bool:
     return await reuse_failure(page, cached) is None
 ```
 
+**Równoważność jest wymogiem twardym, nie kosmetyką.** `reuse_is_valid` ma trzy
+miejsca wywołania: `render.py:2741` (odtwarzanie), `render.py:2276` (probe kroków
+opcjonalnych) i `compile.py:649` — to ostatnie decyduje, czy wpis da się reużyć,
+czyli czy `compile` odpali LLM-a. Każde odchylenie semantyki uderza w koszt i
+determinizm kompilacji.
+
+Pełny kształt funkcji (kolejność, zasięg `try` i ścieżki sukcesu są istotne):
+
+```python
+async def reuse_failure(page, cached):
+    try:
+        if cached.action == "waitFor":
+            if cached.state is None:
+                return "no_wait_state"
+            if cached.state == "hidden":
+                # UWAGA: to jest ścieżka wyjścia także dla SUKCESU. Hidden-wait
+                # z definicji nie ma tożsamości (models/action.py:87-88), więc
+                # NIE WOLNO puścić go dalej do sprawdzeń tożsamości — inaczej
+                # każdy poprawny hidden-gate dostanie `identity_missing`,
+                # `compile` przestanie go reużywać i re-resolvuje go LLM-em.
+                locator = await build_locator(page, cached.target)
+                return None if await locator.count() <= 1 else "wait_ambiguous"
+
+        result = await validate_compile_time(page, cached.target, cached.action)
+        if isinstance(result, ValidationFail):
+            return result.reason
+        if cached.identity is None:
+            return "identity_missing"
+        if (
+            cached.action == "type"
+            and cached.fingerprint.command_kind == "teach"
+            and await is_sensitive_type_target(result.locator)
+        ):
+            return "sensitive_target"
+        current_identity = await capture_identity(result.locator)
+    except (PlaywrightError, ValueError):
+        return "dom_changed"
+    # poza `try` — dokładnie jak dziś (validate.py:235)
+    return None if cached.identity.matches(current_identity) else "identity_mismatch"
+```
+
 Odwzorowanie obecnych ścieżek `False` jest 1:1:
 
 | ścieżka w `reuse_is_valid` | nowy powód |
@@ -166,9 +216,12 @@ Odwzorowanie obecnych ścieżek `False` jest 1:1:
 | `except (PlaywrightError, ValueError)` | `dom_changed` |
 | `identity.matches()` = `False` | `identity_mismatch` |
 
+Ścieżki sukcesu (`None`) są dwie i obie muszą przetrwać: `waitFor`/`hidden`
+z `count() <= 1` **oraz** zgodna tożsamość na końcu.
+
 `ValidationReason` (słownik używany do re-promptów resolvera) **pozostaje
 nietknięty** — nowe powody żyją w osobnym aliasie `ReuseReason`.
-`render.py:2742` używa dalej `reuse_is_valid` i nie zmienia zachowania.
+Wszystkie trzy call site'y `reuse_is_valid` zachowują dotychczasowe zachowanie.
 
 ### 6. `guide` raportuje prawdziwy powód
 
@@ -197,6 +250,15 @@ _REUSE_REASON_PL = {
 Nieznany powód wpada w `.get(reason, reason)`, czyli w najgorszym razie
 użytkownik zobaczy surowy identyfikator, a nie fałszywą radę.
 
+**Semantyka pozostaje bez zmian:** krok obowiązkowy z niepustym powodem nadal
+**zawsze** kończy się `GuideError` (jak dziś, `capture.py:146-147`). Zmienia się
+wyłącznie treść zdania — nic nie zaczyna być po cichu pomijane.
+
+Wpisy `no_wait_state` i `wait_ambiguous` są w `guide` dziś nieosiągalne (walidacja
+odpala się tylko dla `act != "waitFor"`, `capture.py:145`). Zostają w mapie dla
+kompletności typu `ReuseReason`, żeby przyszły użytkownik `reuse_failure`
+(np. `compile`) nie dostał surowego identyfikatora.
+
 ## Testy (TDD — najpierw czerwone)
 
 `tests/unit/guide/*` używają fake'ów bez przeglądarki (`FakeLocator`,
@@ -209,12 +271,25 @@ prawdziwego headless Chromium mimo katalogu `unit/`.
 
 **`tests/unit/guide/test_capture.py`** (rozszerzyć `FakeLocator` o
 `select_option`, `FakeRecorder` o `scroll`, dodać wspólny log zdarzeń)
+
+*Najpierw migracja seamu:* cztery istniejące testy patchują
+`capture.reuse_is_valid` (linie 92, 123, 136, 158). Po przejściu `capture.py` na
+`reuse_failure` te monkeypatche stają się martwe, a prawdziwe `reuse_failure`
+dostanie `FakeRecorder.frame = object()` i wysypie się `AttributeError`
+(nieprzechwytywanym — `reuse_failure` łapie tylko `PlaywrightError, ValueError`).
+Seam trzeba przenieść na `capture.reuse_failure` zwracające `None` / powód.
+
 - krok `select` woła `select_option(label="Zakres lat")` i **dopiero potem**
-  robi zrzut (kolejność weryfikowana logiem zdarzeń).
+  robi zrzut (kolejność weryfikowana wspólnym logiem zdarzeń).
 - strona z kroku `select` ma adnotację `kind="selected"`.
-- `scroll` bez tekstu: `recorder.scroll` wywołany, `pages == []`.
+- `scroll` bez tekstu: `recorder.scroll` wywołany ze znormalizowanym `Scroll`,
+  `pages == []`.
 - `scroll` z `say`: `recorder.scroll` wywołany, powstaje strona ze zrzutem i
-  tekstem, a następna strona akcji **nie** ma strzałki (kursor wyzerowany).
+  tekstem.
+- reset kursora — sekwencja **akcja → scroll → akcja**. Bez tego test jest pusty:
+  `prev_cursor` nigdy nie zostałby ustawiony i asercja przeszłaby również bez
+  poprawki. `FakeRecorder.point` zwraca stałe `center=(5.0, 5.0)`, więc bez resetu
+  powstałaby strzałka (5,5)→(5,5) — różnica jest obserwowalna.
 - powód `not_found` daje komunikat bez `compile --force`; `identity_mismatch`
   daje komunikat z `compile --force`.
 
@@ -222,6 +297,23 @@ prawdziwego headless Chromium mimo katalogu `unit/`.
 - `reuse_failure()` zwraca `"not_found"`, `"not_visible"` i `"identity_mismatch"`
   dla odpowiednio spreparowanego DOM-u, oraz `None` dla poprawnego celu.
 - `reuse_is_valid()` nadal zwraca `bool` (regresja opakowania).
+
+**`tests/integration/test_guide.py`** — dowód end-to-end bez LLM-a: nowy fixture
+HTML z `<select>` (zmieniającym treść strony) i zawartością poniżej zagięcia,
+scenariusz z `select:` + `scroll:`, kompilacja `MockReasoner`em, `run_guide` →
+prawdziwy PDF. Asercje: PDF niepusty, liczba stron zgodna z regułą „scroll bez
+tekstu nie daje strony", a select faktycznie zmienił wartość kontrolki.
+
+## Znane ograniczenie (poza zakresem tej zmiany)
+
+`Recorder.point` robi `scrollIntoView({block: 'center'})` przy **każdej** akcji
+(`recorder.py:87`). Jeśli cel kolejnego kroku był poza kadrem, strona przewija się
+niejawnie i `prev_cursor` z poprzedniego kroku wskazuje już inne miejsce
+viewportu — strzałka bywa więc myląca także bez jawnego `scroll:`. Zerowanie
+kursora po `scroll` jest spójne z gałęzią `navigate`, ale **nie domyka** tego
+tematu. Pełne rozwiązanie (śledzenie przesunięcia scrolla między krokami i
+korygowanie współrzędnych albo zerowanie kursora, gdy `point()` przewinął stronę)
+jest osobnym zadaniem.
 
 ## Poza zakresem
 
@@ -242,6 +334,10 @@ i produkuje stronę tylko wtedy, gdy krok niesie `say`/`caption`.
 
 1. `uv run ruff check .` i `uv run ruff format --check .` (line-length 100).
 2. `uv run pytest tests/unit` — zielone, wraz z nowymi przypadkami.
-3. Ręcznie: `guide` na scenariuszu z `select` + `scroll` przechodzi krok 16 i
-   produkuje PDF (wymaga lokalnego demo BPP na `http://127.0.0.1:8000`; brak demo
-   należy zaraportować wprost, nie udawać weryfikacji).
+3. `uv run pytest tests/integration/test_guide.py` — nowy przypadek
+   `select` + `scroll` produkuje prawdziwy PDF.
+4. Ręcznie: `guide` na scenariuszu BPP z `select` + `scroll` przechodzi krok 16.
+   **Na tym hoście niewykonalne** — demo BPP na `http://127.0.0.1:8000` nie
+   odpowiada, a repo `bpp-guides` nie istnieje. Zastępczo służy punkt 3
+   (prawdziwy Chromium, prawdziwa kompilacja, prawdziwy PDF). Braku demo nie
+   wolno zamiatać pod dywan — musi trafić do opisu PR.
