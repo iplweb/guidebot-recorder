@@ -26,6 +26,7 @@ steps:
   - say: "Welcome. I'll show you how to log in to the system."
   - navigate: /login
   - teach: "To log in, click the Log in button in the top-right corner"
+    caption: "Sign in"  # Optional: this text overrides the teach instruction in PDF guides
   - enterText: { into: "the email address field", text: "${DEMO_EMAIL}" }
     say: "Now I'm entering my email address."
   - wait: { until: "the loading spinner to disappear", state: hidden, timeout: 10 }

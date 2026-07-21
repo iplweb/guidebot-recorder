@@ -6,13 +6,14 @@ Run the CLI from the project environment:
 uv run guidebot --help
 ```
 
-The five public commands are:
+The six public commands are:
 
 | Command | Input | Result |
 |---|---|---|
 | `validate` | One source scenario | Schema validation only. |
 | `compile` | One source scenario | One compiler-v2 sidecar. |
 | `render` | One source scenario | One MP4 with one or more audio streams. |
+| `guide` | One source scenario | One landscape PDF with annotated screenshots. |
 | `compile-set` | Localized set manifest | One sidecar per stale variant. |
 | `render-set` | Localized set manifest | One single-audio MP4 per variant. |
 
@@ -156,6 +157,33 @@ uv run guidebot render scenarios/login.scenario.yaml \
 
 For `--out out/login.mp4`, persistent work and language beds live under
 `out/.guidebot_video/login/`. TTS cache entries live under `.guidebot/audio/`.
+
+## `guidebot guide`
+
+```bash
+uv run guidebot guide PATH --out OUTPUT.pdf [OPTIONS]
+```
+
+Loads the source and adjacent compiled sidecar, then builds a landscape PDF guide with
+one annotated screenshot per meaningful step, side-by-side narration text, and a visual
+legend (arrows, circles, frames, glows).
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--out PATH`, `-o PATH` | required | Destination `.pdf` path. Parent directories are created. |
+| `--timeout SECONDS` | `15` | Playwright action timeout. |
+| `--verbose`, `-v` | off | Show page-build progress and step details. |
+
+This command makes no LLM calls. Each guide page captures the frame at the moment an
+interactive step (`click`, `hover`, `enterText`, `teach`) completes. `navigate` steps
+produce a single text-only page. `slide` steps insert a visual section divider. `wait`
+and `when` gates produce no output; a missing conditional element causes its whole branch
+to be skipped.
+
+Use `caption:` on a step to override the PDF text (falls back to `say` or `teach` if
+omitted). See [Building step-by-step PDF guides](../concepts/pdf-guide.md) for the full
+explanation, limitations (single language, no pop-ups, no multi-step grouping), and
+annotation legend.
 
 ## `guidebot render-set`
 

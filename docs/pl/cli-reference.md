@@ -4,7 +4,7 @@
 uv run guidebot --help
 ```
 
-Publiczne polecenia to `validate`, `compile`, `compile-set`, `render` i `render-set`.
+Publiczne polecenia to `validate`, `compile`, `render`, `guide`, `compile-set` i `render-set`.
 
 ## `guidebot validate`
 
@@ -98,6 +98,32 @@ nagrywania i, przy domyślnym ustawieniu, wygląd pod narracją (strona stoi
 nieruchomo, zamiast się animować). Pełne wyjaśnienie:
 [`holdFrameForNarration` i `holdFrameSettle`](scenario-reference.md#holdframefornarration-i-holdframesettle)
 w dokumentacji YAML scenariusza.
+
+## `guidebot guide`
+
+```bash
+uv run guidebot guide ŚCIEŻKA --out WYNIK.pdf [OPCJE]
+```
+
+Wczytuje źródło i sąsiedni sidecar, następnie buduje krajobrazowy przewodnik PDF z jednym
+anotowanym zrzutem ekranu na znaczący krok, tekstem narracji obok i legendą wizualną
+(strzałkami, kołami, ramkami, glow).
+
+| Opcja | Domyślnie | Znaczenie |
+|---|---:|---|
+| `--out ŚCIEŻKA`, `-o ŚCIEŻKA` | wymagana | Docelowy `.pdf`. Katalogi-rodzice są tworzone. |
+| `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
+| `--verbose`, `-v` | wyłączone | Pokazuje postęp budowania stron i szczegóły kroków. |
+
+To polecenie nie wykonuje żadnych wywołań LLM. Każda strona przewodnika przechwytuje kadr
+w momencie zakończenia interaktywnego kroku (`click`, `hover`, `enterText`, `teach`).
+Kroki `navigate` tworzą jedną stronę zawierającą tylko tekst. Kroki `slide` wstawiają
+wizualny podział sekcji. Bramy `wait` i `when` nie produkują wyjścia; brak elementu
+warunkującego powoduje, że całą gałąź jest pomijana.
+
+Użyj `caption:` na kroku, aby nadpisać tekst PDF (wraca do `say` lub `teach` gdy
+pominięty). Pełne wyjaśnienie, ograniczenia (jeden język, brak popupów, brak grupowania)
+i legenda adnotacji znajdują się w [Tworzeniu przewodników PDF krok po kroku](../concepts/pdf-guide.md).
 
 ## `guidebot render-set`
 

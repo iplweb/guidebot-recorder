@@ -70,6 +70,7 @@ user Codex configuration for this constrained call, so a model cannot be selecte
 | `guidebot validate SCENARIO` | Validate one scenario without opening Chromium. | None |
 | `guidebot compile SCENARIO` | Compile one scenario into its adjacent sidecar. | Codex on cache misses |
 | `guidebot render SCENARIO --out FILE.mp4` | Render one scenario, optionally with several audio tracks. | None |
+| `guidebot guide SCENARIO --out FILE.pdf` | Build a landscape PDF guide with annotated screenshots and step narration. | None |
 | `guidebot compile-set MANIFEST` | Compile every complete localized scenario listed in a render-set manifest. | Codex on cache misses |
 | `guidebot render-set MANIFEST --output-dir DIR` | Render one single-audio MP4 per localized variant. | None |
 
@@ -369,6 +370,7 @@ w `~/.codex/config.toml`. Dokładny opis znajdziesz na stronie
 | `guidebot validate SCENARIUSZ` | Waliduje jeden scenariusz bez uruchamiania Chromium. | Brak |
 | `guidebot compile SCENARIUSZ` | Kompiluje jeden scenariusz do sąsiedniego sidecara. | Codex przy braku ważnego celu |
 | `guidebot render SCENARIUSZ --out PLIK.mp4` | Renderuje jeden scenariusz, opcjonalnie z wieloma ścieżkami audio. | Brak |
+| `guidebot guide SCENARIUSZ --out PLIK.pdf` | Buduje krajobrazowy przewodnik PDF z anotowanymi zrzutami ekranu i narracją kroków. | Brak |
 | `guidebot compile-set MANIFEST` | Kompiluje kompletne, zlokalizowane scenariusze z manifestu zestawu. | Codex przy braku ważnego celu |
 | `guidebot render-set MANIFEST --output-dir KATALOG` | Renderuje osobny, jednościeżkowy MP4 dla każdego wariantu językowego. | Brak |
 
