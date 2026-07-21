@@ -230,6 +230,38 @@ różne wyniki: budujemy lokator **bez** `nth`, pobieramy `candidate_ids_of` i
 porównujemy element o indeksie `target.nth` z `cached.identity.dom_path_digest`.
 Indeks poza zakresem (lista trafień się skurczyła) to **dryf**, nie wyjątek.
 
+#### Ograniczenie: co ten sygnał łapie, a czego nie
+
+Ustalone empirycznie przy wdrożeniu, wbrew pierwotnemu brzmieniu tego specu.
+`dom_path_digest` jest ścieżką **pozycyjną i absolutną** (`nth-of-type` od
+korzenia), więc:
+
+| zmiana strony | wykryta? |
+|---|---|
+| element zniknął — lista trafień krótsza niż `nth` | **tak** |
+| cel przeniesiony w inne miejsce struktury | **tak** |
+| zmiana strukturalna gdziekolwiek nad gałęzią celu | **tak** (fałszywy alarm — kosztuje jedną zbędną rezolucję, patrz decyzje) |
+| **jednorodne wstawienie rodzeństwa**, np. wiersz dołożony przed celem w tabeli identycznych wierszy | **nie** |
+
+Ostatni wiersz jest istotny, bo to nagłówkowy scenariusz dryfu ze zgłoszenia
+(„`nth: 3` przestaje działać przy pierwszym dodanym wierszu"). Element, który po
+wstawieniu trafia w zamrożone `nth`, zajmuje **tę samą pozycję strukturalną** co
+zamrożony, więc ma identyczny digest — mimo że logicznie jest to inny wiersz.
+Ścieżka pozycyjna z definicji nie odróżnia „ten sam element" od „inny element na
+tej samej pozycji".
+
+Wniosek dla projektu, a nie dla implementacji: wykrywanie dryfu jest **częściowym
+backstopem**, nie gwarancją. Trwałość w tym scenariuszu zapewnia `scope`
+(reasoner jest go teraz uczony) — dokładnie tak, jak przewidywała Propozycja 2 ze
+zgłoszenia — a ostrzeżenie o namiarze pozycyjnym kieruje autora w tę stronę.
+Główna naprawa (poprawny `nth` **w chwili kompilacji**, mierzony z `candidateId`)
+działa niezależnie od tego ograniczenia i to ona zamyka Propozycję 1.
+
+Odrzucone wzmocnienie: unieważnianie reuse dla każdego gołego `nth` (bez
+`scope`), czyli ponowna rezolucja przy każdej kompilacji. Zamknęłoby lukę, ale
+kosztem wywołania LLM-a na każdy taki krok przy każdej kompilacji i utraty
+determinizmu tam, gdzie cache istnieje właśnie po to, by go zapewnić.
+
 `False` — czyli „nie ma czego sprawdzać" — dla: targetu bez `nth`, targetu
 niebędącego `RoleTarget`, `cached.identity is None` (ukryte czekanie), oraz
 sidecara sprzed tej zmiany (`dom_path_digest is None`). Cisza dla starych
@@ -428,9 +460,13 @@ nienazwanymi polami tekstowymi.
   `not_pinnable`;
 - **dwa różne kroki roku dostają różne `nth`** — regresja na najbardziej
   wymowny przypadek ze zgłoszenia;
-- `pinned_drifted`: `False` dla świeżo zamrożonego, `True` po wstrzyknięciu
-  wiersza przed celem, `True` gdy lista trafień skurczyła się poniżej `nth`,
+- `pinned_drifted`: `False` dla świeżo zamrożonego, `True` gdy cel zmienia
+  pozycję strukturalną, `True` gdy lista trafień skurczyła się poniżej `nth`,
   `False` dla sidecara bez `dom_path_digest` i dla `identity is None`.
+  **Uwaga**: wstawienie strukturalnie identycznego wiersza przed celem `True`
+  **nie** da — patrz „Ograniczenie: co ten sygnał łapie, a czego nie". Test ma
+  wymuszać dryf zmianą, która realnie przesuwa ścieżkę pozycyjną celu,
+  i komentarzem tłumaczyć, dlaczego wariant jednorodny by nie zadziałał.
 
 `tests/unit/resolver/test_page_context.py` — **unikalność `Candidate.id`
 w obecności shadow DOM** (test, którego dziś brakuje; bez naprawy `domPath`
@@ -469,6 +505,11 @@ wierszach, pełny cykl `compile` → `render`. Dwa wymagania, bez których test
    (tę samą bramkę `compile_up_to_date`, co CLI), a nie przez
    `run_compile_in_browser` — inaczej ominie dokładnie ten bloker, który
    naprawiamy.
+3. **Dryf tylko w wariancie faktycznie wykrywanym.** Zmiana strony między
+   kompilacjami ma przesuwać cel **strukturalnie** (albo go usuwać), a nie
+   dokładać jednorodny wiersz — ten drugi wariant z założenia nie daje sygnału
+   i test asertujący go byłby fałszywy. Uzasadnienie w „Ograniczenie: co ten
+   sygnał łapie, a czego nie".
 
 ## Dokumentacja
 
