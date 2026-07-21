@@ -74,6 +74,7 @@ steps:
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
 | `holdFrameForNarration` | No | boolean / `true` | Freeze the picture during narration instead of recording in real time, render-only. |
 | `holdFrameSettle` | No | number / `1.0` | Real seconds recorded before the frame freezes, render-only. |
+| `selects` | No | object / built-in shim defaults | DOM select shim that makes a native `<select>`'s option list visible on camera; only `mode` affects the compile hash. |
 
 ### `viewport`
 
@@ -438,6 +439,33 @@ has no address bar — only the compositor frame is drawn.
     space around the pop-up content. Forcing the pop-up to fill the viewport is a
     planned improvement.
 
+### `selects`
+
+Settings for the DOM select shim used by the [`select`](#select) step. All fields
+are optional; omit the whole `selects:` block to keep the built-in shim behavior.
+
+```yaml
+selects:
+  mode: shim            # shim (default) | native
+  settleMs: 1000
+  maxVisibleOptions: 8
+  openHoldMs: 350
+```
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the pre-shim arrow-key value stepping. A per-step `select.mode` overrides this for one control. |
+| `settleMs` | `1000` | Milliseconds to wait after page load before classifying each `<select>` as raw or already enhanced. Gives the page's own select2/Tom Select/Chosen initialization time to hide or replace the original control before the shim decides whether to touch it. |
+| `maxVisibleOptions` | `8` | Number of options shown in the unfurled list at once before it scrolls internally. |
+| `openHoldMs` | `350` | Milliseconds the unfurled list stays open for the viewer to read before the cursor moves to the chosen option. |
+
+Only `mode` affects what gets compiled: changing it to `native` changes what the
+resolver drives, so — like `config.setup` — it participates in the config hash only
+when it differs from the default, and forces a recompile (see the
+[recompile matrix](#recompile-matrix)). `settleMs`, `maxVisibleOptions`, and
+`openHoldMs` are cosmetic render-time tuning, like `cursor` or `popup`: changing
+them never requires a recompile.
+
 ## `steps`
 
 `steps` is an ordered list. A step may contain:
@@ -577,20 +605,58 @@ show the value in the recording; Guidebot does not add masking.
   say: "From the report type list I choose the table format."
 ```
 
-Choose an option from a native `<select>` dropdown. `from` is a semantic target
-instruction sent to the reasoner and must resolve to a native `<select>` element —
-resolving to a non-select control (a custom `role="combobox"` widget, a button) is a
-`not_select` validation error. `option` is the visible label of the option to pick;
-it is shown, never spoken, and is **not** environment-substituted.
+Choose an option from a dropdown. `from` is a semantic target instruction sent to
+the reasoner and must resolve to a native `<select>` element — resolving to a
+non-select control (a custom `role="combobox"` widget, a button) is a `not_select`
+validation error. `option` is the visible label of the option to pick; it is shown,
+never spoken, and is **not** environment-substituted.
 
-A native select's option list is drawn by the operating system, so no
-browser-automation tool — Playwright included — can unfurl or screenshot it. During
-`render` the cursor therefore glides to the control, shows the click ripple, and
-*steps* the collapsed control's value to `option` with arrow keys, so the value
-visibly changes even though the list never opens (a jump of more than twelve options
-is set directly to keep the animation short). During `compile` the value is set
-directly. Either way the element ends on `option`, so later steps and the render
-agree. Pair it with a `say` such as "from this list I choose …" to narrate the intent.
+A native `<select>`'s option list is drawn by the operating system, so no
+browser-automation tool — Playwright included — can unfurl or screenshot it. To make
+the choice visible anyway, Guidebot injects a DOM shim (`config.selects`, described
+below) that replaces the raw control with an overlay whose list genuinely opens
+downward in the page. During `render` the cursor glides to the control and clicks
+it, the list unfurls, the cursor glides to the chosen row, and clicks it — two
+visible beats instead of an invisible value change. During `compile` the value is
+set directly with no animation, since compilation is meant to be fast, not pretty.
+Either way the element ends on `option`, so later steps and the render agree.
+
+**Widgets the page has already enhanced are deliberately left alone.** If the
+target application replaces its `<select>` with its own dropdown — select2, Tom
+Select, Chosen, or anything shaped the same way (a hidden or invisible original
+`<select>` plus a sibling widget) — Guidebot does not shim it: that widget's list
+is already DOM and already records correctly. The same two-beat choreography drives
+it directly instead — the visible control associated with the hidden select (found
+by its `aria-controls`/`aria-owns`, an `aria-labelledby`/`aria-describedby`
+back-reference, or, failing both, the nearest visible sibling), then the option row
+that appears once it opens.
+
+If neither beat finds anything to click — no visible control associated with an
+already-enhanced select, or no row matching `option` after opening it — the run
+**fails** rather than silently setting the value; a widget the shim cannot drive is
+not one Guidebot will pretend to have shown. `compile` also probes an enhanced
+widget's drivability up front, so an undriveable one is caught there instead of
+partway through a render.
+
+For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
+loads its options over the network, for instance — use the per-step **`mode:
+native`** escape hatch. It falls back to the pre-shim behaviour: the cursor still
+glides to the control and clicks it, but the collapsed value is *stepped* to
+`option` with arrow keys instead of opening a list (a jump of more than twelve
+options is set directly to keep the animation short). `mode` also has a global
+form, `config.selects.mode` (see the `selects` config block below); the per-step
+value defaults to it and overrides it for one stubborn control in an otherwise fine
+scenario:
+
+```yaml
+- select:
+    from: "the province dropdown"
+    option: "Mazowieckie"
+    mode: native          # optional; defaults to config.selects.mode
+```
+
+Pair a `select` step with a `say` such as "from this list I choose …" to narrate
+the intent.
 
 ### `scroll`
 
@@ -837,9 +903,11 @@ use explicit waits and verify the result.
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
 | `select.option` value alone | No — render-only |
+| `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | No — render-only |
 | `config.setup` (on a target) added, removed, or repointed | Yes — the setup path is folded into the target's compile hash |
+| `config.selects.mode` switched between `shim` and `native` | Yes — folded into the config hash, like `config.setup`, only when non-default |
 | Adding, removing, or reordering a `slide` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
 | Switching a step's command kind | Yes |
 
 See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
