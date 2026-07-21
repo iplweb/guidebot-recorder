@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
+from tqdm import tqdm
 
 from guidebot_recorder.diagnostics import step_banner
 from guidebot_recorder.guide.annotate import annotations_for
@@ -101,13 +102,26 @@ async def capture_pages(
             sensitive=sensitive_values,
         )
 
-    for index, (fs, action) in enumerate(zip(flat, actions, strict=True)):
+    # Wrapping the iterator (rather than `bar.update(1)` as render does) is what
+    # keeps the count honest here: this loop leaves through a dozen `continue`s
+    # — skipped branches, absent optional targets, page-less steps — and each
+    # one would need its own update call to stay in step.
+    steps = tqdm(
+        list(zip(flat, actions, strict=True)),
+        desc="guide",
+        unit="krok",
+        disable=not verbose,
+    )
+    for index, (fs, action) in enumerate(steps):
         step = fs.step
         if skipped_branch is not None:
             if fs.branch == skipped_branch:
                 continue
             skipped_branch = None
         kind = classify(fs)
+        if verbose:
+            # `tqdm.write` instead of `print`: a bare print tears the bar apart.
+            tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
         try:
             if kind == "gate":
                 try:
@@ -115,7 +129,7 @@ async def capture_pages(
                     if target is None:
                         skipped_branch = fs.branch
                         if verbose:
-                            print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
+                            tqdm.write(f"pomijam gałąź {fs.branch}: bramka nieobecna")
                         continue
                     # action is a CachedAction here (target came from it above); mirror the
                     # non-gate wait branch's state fallback and use the gate's own timeout.
@@ -127,7 +141,7 @@ async def capture_pages(
                 except PlaywrightError:
                     skipped_branch = fs.branch  # branch element absent -> skip whole branch
                     if verbose:
-                        print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
+                        tqdm.write(f"pomijam gałąź {fs.branch}: bramka nieobecna")
                 continue
 
             if kind == "navigate":
@@ -199,7 +213,7 @@ async def capture_pages(
                     timeout_wait = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
                     await recorder.wait_for(action.target, action.state or "visible", timeout_wait)
                 elif verbose and not step.optional:
-                    print(
+                    tqdm.write(
                         banner(fs, index, "pomijam: oczekiwanie nierozwiązane — uruchom `compile`")
                     )
                 continue
@@ -208,7 +222,7 @@ async def capture_pages(
             if not isinstance(action, CachedAction):
                 if step.optional:
                     if verbose:
-                        print(banner(fs, index, "pomijam: cel nieobecny"))
+                        tqdm.write(banner(fs, index, "pomijam: cel nieobecny"))
                     continue  # optional branch never compiled -> skip page
                 raise RuntimeError(banner(fs, index, "nierozwiązana akcja obowiązkowa"))
             act = action.action
@@ -221,7 +235,7 @@ async def capture_pages(
             except PlaywrightError:
                 if step.optional:
                     if verbose:
-                        print(banner(fs, index, "pomijam: cel nieobecny"))
+                        tqdm.write(banner(fs, index, "pomijam: cel nieobecny"))
                     continue
                 raise
             if act == "type":

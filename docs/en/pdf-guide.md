@@ -70,7 +70,7 @@ uv run guidebot guide SCENARIO.yaml --out OUTPUT.pdf [OPTIONS]
 | `--headed` | off | Show the Chromium window. |
 | `--pause-on-error` | off | On error, pause and keep a headed page available for inspection. |
 | `--timeout SECONDS` | `15` | Playwright action timeout. |
-| `--verbose`, `-v` | off | Show page-build progress and step details. |
+| `--verbose`, `-v` | off | Progress bar (as in `render`), the kind of each step, and skip notices. |
 
 The `--timeout` value is used identically to the `compile` and `render` commands and applies
 to all browser actions during guide generation.
