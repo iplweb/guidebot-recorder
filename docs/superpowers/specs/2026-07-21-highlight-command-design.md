@@ -122,6 +122,17 @@ wstrzyknięcia w żadnej z warstw.
    model, a nie plik scenariusza.
 3. `resolution.step_instruction()` dla `highlight` zwraca `what`;
    `resolution.action_for()` mapuje `"highlight" → "highlight"`.
+3a. **Zbiór kandydatów rozszerzony o kontenery — tylko dla tego kroku.**
+   `page_context.CANDIDATE_ROLES` to same elementy interaktywne plus `heading`;
+   `table`, `form`, `region`, `list`, `figure`, `group`, `article`, `grid` i `img`
+   nie trafiały do Reasonera w ogóle. Bez tego `highlight: "tabela z wynikami"` —
+   sztandarowy przykład tej komendy — nie miałby czego wskazać i kończyłby się
+   `no_action`. Nowa stała `HIGHLIGHT_CANDIDATE_ROLES` dokłada te role, a
+   `candidate_roles_for(kind)` wybiera zbiór; `collect_candidates` przyjmuje go
+   parametrem. Rozszerzenie jest zawężone do `highlight` świadomie: kontener nie
+   jest klikalny, więc w zbiorze `click`/`type`/`select` nie ma czego szukać, a
+   poszerzenie go globalnie zmieniłoby wybory modelu w scenariuszach, które już
+   się kompilują.
 4. `resolver/validate.py` dopuszcza nową akcję na białej liście i sprawdza dla
    niej **tylko** istnienie, unikalność i widoczność celu — bez testów
    edytowalności i typu elementu, bo nic nie klikamy ani nie wpisujemy.
@@ -182,11 +193,14 @@ i w `cursor.js` i rozjechała przy pierwszej zmianie.
 
 1. `point(target, ripple=False)` — kursor dolatuje łukiem do środka elementu, bez
    pierścienia kliknięcia i bez dźwięku. Zwraca `box`.
-2. Gdy `box is None` (element bez prostokąta) — koniec kroku: żadnej animacji,
-   żadnego błędu, komunikat tylko w trybie `--verbose`. To jedyna degradacja tej
-   ścieżki; `Recorder.highlight()` woła **wyłącznie `render`**, a tam nakładka
-   jest zawsze obecna (`compile` nie wykonuje akcji dla tego kroku, a `guide` ma
-   własną, nieanimowaną ścieżkę — patrz niżej).
+2. Gdy `box is None` — koniec kroku: żadnej animacji, żadnego błędu. To gałąź
+   **defensywna, a nie ścieżka degradacji**: każda droga tutaj przechodzi
+   walidację odrzucającą `not_visible`, a element widoczny ma prostokąt. Nie ma
+   komunikatu `--verbose`, bo `_render_step` tej flagi nie dostaje (ma ją dopiero
+   pętla nadrzędna), a przewlekanie jej przez sygnaturę dla gałęzi nieosiągalnej
+   w praktyce kosztuje więcej, niż daje. `Recorder.highlight()` woła **wyłącznie
+   `render`**, a tam nakładka jest zawsze obecna (`compile` nie wykonuje akcji dla
+   tego kroku, a `guide` ma własną, nieanimowaną ścieżkę — patrz niżej).
 3. Geometria: `ellipse_around(box, spec.padding)` → `fit_to_bounds(…, viewport)`.
 4. `overlay.move_to(page, cx + rx, cy)` — dolot ze środka elementu do **punktu
    wejścia** na elipsę (prawy skraj, kąt 0). Świadomie używamy istniejącego

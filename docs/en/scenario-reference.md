@@ -834,9 +834,22 @@ the intent.
 
 Draw attention to a control or an area — the one command that points at an element
 **without touching the page**: no click, no hover, no DOM event. `what` is the semantic
-target instruction sent to the reasoner; an area (a table, a section, a form) is just a
-container element as far as the resolver is concerned, so you describe it exactly as
-you would a button.
+target instruction sent to the reasoner; you describe an area (a table, a section, a
+form) exactly as you would a button.
+
+!!! note "Which areas can be targeted"
+
+    `highlight` is the only command whose candidate set includes container roles
+    alongside controls: `table`, `grid`, `form`, `region`, `list`, `article`,
+    `figure`, `img`, and `group`. Every other command sees interactive elements
+    only — a container cannot be clicked anyway.
+
+    The practical consequence: **a bare `<div>` is not a target**. Its role is
+    `generic`, so the reasoner never sees it and the step fails with "no such
+    element". Point at a `<table>`, `<form>`, `<ul>`, `<figure>`, `<article>`, or a
+    `<section>` carrying an `aria-label` (only the label turns a section into a
+    `region`). An accessible name helps a lot: without one the reasoner can address
+    the container only positionally, and that index shifts with the DOM.
 
 During `render` the cursor glides to the target, moves to the right edge of the ellipse
 circumscribed around it, and laps that ellipse `loops` times, leaving a growing marker

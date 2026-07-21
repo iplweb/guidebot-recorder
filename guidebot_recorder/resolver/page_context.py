@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -25,7 +26,10 @@ class Candidate:
     ancestry: list[tuple[str, str]]
 
 
-_CANDIDATE_ROLES = (
+#: Roles worth offering the Reasoner for a command that *acts* on an element.
+#: Interactive controls plus headings — a heading is not clickable but is the
+#: landmark authors describe positions by ("under Settings").
+CANDIDATE_ROLES = (
     "button",
     "checkbox",
     "combobox",
@@ -47,6 +51,37 @@ _CANDIDATE_ROLES = (
     "textbox",
     "treeitem",
 )
+
+#: Container roles, offered ON TOP of :data:`CANDIDATE_ROLES` to the one command
+#: that points at a region instead of operating a control: `highlight`. A table,
+#: a form or a section is never clickable, so it has no business in the candidate
+#: set of `click`/`type`/`select` — widening the set for every command would
+#: change what the model picks for scenarios that already compile. Kept narrow on
+#: purpose: these are the roles an author actually names ("the results table",
+#: "the summary section"), not every landmark the ARIA spec knows.
+_CONTAINER_ROLES = (
+    "article",
+    "figure",
+    "form",
+    "grid",
+    "group",
+    "img",
+    "list",
+    "region",
+    "table",
+)
+
+#: What a `highlight` step resolves against.
+HIGHLIGHT_CANDIDATE_ROLES = CANDIDATE_ROLES + _CONTAINER_ROLES
+
+#: Command kinds whose candidate set differs from the default.
+_ROLES_BY_KIND = {"highlight": HIGHLIGHT_CANDIDATE_ROLES}
+
+
+def candidate_roles_for(kind: str) -> tuple[str, ...]:
+    """The roles the Reasoner may choose from when resolving a ``kind`` step."""
+
+    return _ROLES_BY_KIND.get(kind, CANDIDATE_ROLES)
 
 
 _MARK_CANDIDATE_ROLE_SCRIPT = r"""
@@ -399,12 +434,19 @@ async def collect_candidates(
     page: Page,
     viewport_only: bool = True,
     limit: int = 200,
+    *,
+    roles: Sequence[str] = CANDIDATE_ROLES,
 ) -> list[Candidate]:
-    """Return visible interactive controls and headings in deterministic DOM order.
+    """Return the visible elements of ``roles`` in deterministic DOM order.
 
     ``viewport_only`` keeps only elements whose bounding rectangle intersects
     the viewport. Passing zero as ``limit`` avoids evaluating the page; a
     negative limit is almost certainly a caller error and is rejected.
+
+    ``roles`` defaults to the interactive controls and headings every acting
+    command resolves against; :data:`HIGHLIGHT_CANDIDATE_ROLES` widens it with
+    containers for the one command that points at a region instead of operating
+    a control (see :func:`candidate_roles_for`).
     """
 
     if isinstance(limit, bool) or not isinstance(limit, int):
@@ -416,7 +458,7 @@ async def collect_candidates(
 
     role_map_key = f"__guidebot_candidate_roles_{uuid4().hex}"
     try:
-        for role in _CANDIDATE_ROLES:
+        for role in roles:
             await page.get_by_role(role).evaluate_all(
                 _MARK_CANDIDATE_ROLE_SCRIPT,
                 {"roleMapKey": role_map_key, "role": role},
