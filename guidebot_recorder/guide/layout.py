@@ -34,9 +34,12 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
 .highlight { stroke-width: 5; fill: none; stroke-linecap: round; }
 """
 
+# `markerUnits` defaults to `strokeWidth`, so the head scales with `.arrow`'s
+# `stroke-width: 4`: a 6-wide marker paints ~24 screenshot px. Kept deliberately
+# small — a bigger head swallowed short clipped arrows whole (all head, no shaft).
 _ARROW_MARKER = (
-    '<defs><marker id="ah" markerWidth="10" markerHeight="10" refX="8" refY="5" '
-    'orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#e11"/></marker></defs>'
+    '<defs><marker id="ah" markerWidth="6" markerHeight="6" refX="5" refY="3" '
+    'orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#e11"/></marker></defs>'
 )
 
 
@@ -44,7 +47,7 @@ _STAR_ARMS = 8
 
 
 def _star(a: Annotation) -> list[str]:
-    """Eight arms every 45°, each spanning `r_inner`..`r_outer` around (`cx`, `cy`).
+    """`_STAR_ARMS` arms evenly spaced, each spanning `r_inner`..`r_outer` around (`cx`, `cy`).
 
     Coordinates are rounded to two decimals so the HTML does not swell with
     17-digit floats.

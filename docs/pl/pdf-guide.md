@@ -90,6 +90,13 @@ widżet, którego nie da się rozwinąć; nakładka zdjęta w trakcie kroku) zat
 przewodnik także dla kroku opcjonalnego — inaczej strona zniknęłaby po cichu z PDF-a,
 a usterka została na stronie.
 
+Dwa przypadki warto wymienić wprost, bo bywają brane za „brak opcji", a nim nie są.
+Opcja `disabled` **jest** na liście — strona po prostu jej nie przyjmuje — więc krok
+`optional: true` zatrzyma się na niej, zamiast ją pominąć; inaczej przewodnik po cichu
+przestałby pokazywać kontrolkę, którą strona celowo zablokowała. Tak samo lista
+`multiple` / `size > 1`, która nie ma na stronie żadnego rozmiaru: o jej opcjach nie
+dowiedzieliśmy się wtedy niczego, a szukana może tam być.
+
 ## Tekst narracji: `say`, `teach` lub `caption`
 
 Domyślnie strona PDF pokazuje narrację kroku — albo `say` dla samodzielnych kroków, albo `teach`

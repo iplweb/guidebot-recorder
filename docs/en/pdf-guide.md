@@ -87,6 +87,13 @@ selection, a widget that cannot be unfurled, the overlay removed mid-step) stops
 guide even for an optional step: otherwise the page would vanish from the PDF without a
 word and the defect would stay on the site.
 
+Two cases are worth naming outright, because they read like "the option is missing" and
+are not. A `disabled` option **is** on the list — the page simply refuses it — so an
+`optional: true` step stops on it rather than skipping; otherwise the guide would quietly
+stop covering a control the site deliberately locked. The same goes for a `multiple` /
+`size > 1` list with no size on the page at all: nothing was learned about which options
+it offers, and the wanted one may well be there.
+
 ## Narration text: `say`, `teach`, or `caption`
 
 By default, a PDF page shows the step's narration — either from `say` for standalone steps or `teach`

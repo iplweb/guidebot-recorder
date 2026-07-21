@@ -7,10 +7,10 @@ from guidebot_recorder.guide.model import Annotation
 from guidebot_recorder.models.scenario import ResolvedHighlight
 from guidebot_recorder.overlay.geometry import Ellipse, ellipse_around, fit_to_bounds
 
-#: click star: each of the eight arms spans these radii around the cursor
-#: (screenshot px, deviceScaleFactor already applied upstream). The gap left by
-#: `CLICK_INNER` clears the 16 px cursor ring drawn by `overlay/cursor.js`, so
-#: the cursor itself stays readable inside the star.
+#: click star: each of the eight arms spans these radii around the click point
+#: (viewport px — the guide never sets a deviceScaleFactor). `CLICK_INNER` leaves
+#: a hole in the middle so the arms are a burst radiating outward rather than a
+#: solid asterisk; the click point stays legible inside it.
 CLICK_INNER = 16.0
 CLICK_OUTER = 30.0
 
@@ -29,11 +29,12 @@ def target_shape(
 ) -> Shape | None:
     """The shape the annotations draw around the target.
 
-    `highlight` -> the ellipse fitted to the screenshot (the very one its
-    annotation draws); any other action with a box -> a `Rect` from that box;
-    no box -> ``None``. A `highlight` without a `mark` is ``None`` too: the
-    padding is unknown, so there is no ellipse to compute — and such a step
-    gets no highlight annotation either.
+    `highlight` -> the ellipse its annotation draws: fitted to `bounds` when
+    given, raw otherwise (the fit only matters against a real screenshot). Any
+    other action with a box -> a `Rect` from that box; no box -> ``None``. A
+    `highlight` without a `mark` is ``None`` too: the padding is unknown, so
+    there is no ellipse to compute — and such a step gets no highlight
+    annotation either.
 
     For a `select` this is the *control* — the field the reader is in — which is
     not where its cursor ends up; see `cursor_shape`.
@@ -92,14 +93,21 @@ def annotations_for(
     mark: ResolvedHighlight | None = None,
     bounds: _Point | None = None,
 ) -> list[Annotation]:
-    """Build the marks for one target action, omitting any mark that lacks geometry.
+    """Build the marks for one target action.
+
+    A mark is omitted when it lacks geometry; the arrow is also dropped when
+    clipping against the two targets leaves nothing to draw (they overlap, or
+    the gap is shorter than `MIN_ARROW`).
 
     ``row_box``/``row_center`` describe the option row of a ``select:`` step whose
     list was photographed **open**, and they are what splits that one action's
     marks across two boxes: the **frame** stays on the control, so the reader sees
     which field they are in, while the **star** and the arrow's tip go to the row,
     because clicking that row is literally what happens next. Every other action
-    puts all three on the same box.
+    puts all three on the same box. The row is fed through the same
+    `clipped_arrow` and `_star` as any other target, so a select's arrow and star
+    are the very same marks a `click:` step draws — including the drop rule above
+    — rather than a select-only variant that could drift from them.
 
     With no row geometry — ``mode: native``, where the option list is an OS popup
     no screenshot can hold — a ``select`` is marked like any other framed action:

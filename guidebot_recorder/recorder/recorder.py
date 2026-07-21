@@ -150,6 +150,23 @@ _OPTION_INDEX_JS = """(el, label) => {
   return -1;
 }"""
 
+#: (el, label) => {index, disabled} — everything "can this option be chosen?"
+#: needs, in one round trip.
+#:
+#: ``index`` is :data:`_OPTION_INDEX_JS`'s answer (``-1`` when absent); ``disabled``
+#: is that option's ``disabled`` flag, and ``false`` when there is no such option
+#: — an absent option is not a disabled one, and the two are different verdicts
+#: (see :meth:`Recorder._require_option`).
+#:
+#: Composed from :data:`_OPTION_INDEX_JS` rather than repeating its loop, the same
+#: way :data:`_SHIM_STATE_JS` embeds ``SELECT_SHAPE_JS``: the label rule is stated
+#: once, so "which option is this?" cannot come out differently depending on which
+#: of the two questions was being asked.
+_OPTION_STATE_JS = f"""(el, label) => {{
+  const index = ({_OPTION_INDEX_JS})(el, label);
+  return {{index: index, disabled: index >= 0 && el.options[index].disabled}};
+}}"""
+
 #: (el) => void — hand this select back to the browser, durably.
 #:
 #: The per-step ``mode: native`` override exists for one stubborn widget in an
@@ -526,8 +543,12 @@ class Recorder:
 
         Raises:
             SelectDriveError: nothing visible could be clicked for this select,
-                or the option is not on offer — :attr:`SelectDriveError.reason`
-                tells the two apart on every path, direct ones included.
+                the option is ``disabled``, or the option is not on offer —
+                :attr:`SelectDriveError.reason` tells the last of those apart
+                from the rest on every path, direct ones included. The two
+                listless paths ask :meth:`_require_option` before they call
+                ``select_option``, so neither refusal costs a step timeout and
+                surfaces as a raw Playwright error.
             SelectsNotReadyError: the widget is installed in this frame but its
                 first classification pass never finished (see
                 :data:`READY_WAIT_MS`).
@@ -552,9 +573,9 @@ class Recorder:
             # must be gone before this control is on camera, or the ripple would
             # land on a widget that vanishes out from under it.
             await self._pin_native(locator)
-            # Before the cursor sets off, too: a label this select does not carry
-            # is the one refusal a caller may answer with a skip, and it should
-            # not first cost a glide and a ripple towards a choice that cannot be
+            # Before the cursor sets off, too: neither an option this select does
+            # not carry nor a `disabled` one can be chosen, and neither should
+            # first cost a glide and a ripple towards a choice that cannot be
             # made.
             await self._require_option(locator, option)
             box, center = await self._approach(locator, ripple=ripple, click_sound=True)
@@ -570,7 +591,9 @@ class Recorder:
         # own single-beat path rather than an association heuristic to run.
         state = await locator.evaluate(_SHIM_STATE_JS)
         if state["listbox"]:
-            await self._select_in_listbox(locator, option, ripple=ripple, on_revealed=on_revealed)
+            await self._select_in_listbox(
+                locator, state, option, ripple=ripple, on_revealed=on_revealed
+            )
             return
         await self._select_in_two_beats(
             locator, state, option, ripple=ripple, on_revealed=on_revealed
@@ -728,23 +751,45 @@ class Recorder:
             reason=OPTION_MISSING,
         )
 
-    async def _require_option(self, locator: Locator, option: str) -> None:
-        """Refuse up front when the select does not offer ``option``.
+    async def _require_option(self, locator: Locator, option: str) -> int:
+        """ "Can this option be chosen?", asked of the ``<select>`` — the only place.
 
-        For the two paths that never unfurl a list — compile's direct set and
-        ``mode: native`` — this is the whole of "is the option there?". The
-        on-camera paths learn the same thing from the list they opened, so all
-        four classify a vanished option identically; without it the direct paths
-        would answer a caller's ``optional:`` question with an unclassifiable
-        Playwright timeout instead.
+        Every path that consults the real control before committing goes through
+        here: compile's direct set, ``mode: native``, the natively-visible
+        listbox and the page-widget beat 2. There is exactly one guard because
+        there are exactly two ways the answer can be "no", they are asked in the
+        same breath, and a second copy of either could drift from this one — the
+        mistake this module already paid for when four definitions of "is this
+        select enhanced?" disagreed.
 
-        :data:`_OPTION_INDEX_JS` applies the same ``HTMLOptionElement.label``
-        rule Playwright's ``select_option(label=…)`` matches on, so this and the
-        call it guards agree about which labels exist.
+        The two refusals are deliberately *not* interchangeable:
+
+        * no such option — :meth:`_option_missing_error`, the one refusal an
+          ``optional:`` step may answer with a skip (:data:`OPTION_MISSING`);
+        * the option exists but is ``disabled`` — :meth:`_disabled_option_error`,
+          which is :data:`UNDRIVABLE`, because the option *is* on offer and the
+          step asking for it is simply broken.
+
+        Both matter before ``Locator.select_option`` as much as before a glide.
+        Playwright raises nothing of its own for either: for a disabled option it
+        sits in "waiting for element to be visible and enabled" until the whole
+        step timeout elapses, and surfaces a raw English ``TimeoutError`` naming
+        neither the control nor the option — well after this method could have
+        said both, in Polish, and with a ``reason`` a caller can act on.
+
+        Returns the option's index, which :meth:`_select_in_listbox` needs to
+        address the row; :data:`_OPTION_INDEX_JS` (via :data:`_OPTION_STATE_JS`)
+        applies the same ``HTMLOptionElement.label`` rule Playwright's
+        ``select_option(label=…)`` matches on, so this, the row it addresses and
+        the call it guards all agree about which labels exist.
         """
 
-        if await locator.evaluate(_OPTION_INDEX_JS, option) < 0:
+        state = await locator.evaluate(_OPTION_STATE_JS, option)
+        if state["index"] < 0:
             raise await self._option_missing_error(locator, option)
+        if state["disabled"]:
+            raise await self._disabled_option_error(locator, option)
+        return state["index"]
 
     @staticmethod
     async def _set_option_directly(locator: Locator, option: str) -> None:
@@ -775,6 +820,29 @@ class Recorder:
         return SelectDriveError(
             f"po rozwinięciu {await self._describe(locator)} nie pojawiła się "
             f'opcja „{option}" (limit {OPTION_WAIT_MS} ms)'
+        )
+
+    async def _disabled_option_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """A ``disabled`` option refuses every path this recorder can drive it by.
+
+        Built in one place and raised from two observations of the same fact:
+        :meth:`_require_option` reading the ``<select>``, and
+        :meth:`_shim_option_row` reading the row the shim rendered after beat 1
+        (where the ``<select>`` is no longer the whole truth — the shim may have
+        been taken off it mid-step). One wording, so a disabled option reads the
+        same regardless of which choreography found it.
+
+        :data:`UNDRIVABLE`, emphatically not :data:`OPTION_MISSING`: the option
+        *is* there, on offer and spelled correctly — the page simply refuses it.
+        An ``optional:`` step means "do this if it is offered", so it must fail
+        here rather than shrug, or a scenario would silently stop exercising a
+        control the page deliberately locked.
+        """
+
+        return SelectDriveError(
+            f'opcja „{option}" na liście {await self._describe(locator)} jest '
+            f"wyłączona (`disabled`) — nie da się jej wybrać ani z rozwiniętej "
+            f"listy, ani bezpośrednio"
         )
 
     async def _unshimmed_mid_step_error(self, locator: Locator, option: str) -> SelectDriveError:
@@ -913,6 +981,7 @@ class Recorder:
     async def _select_in_listbox(
         self,
         locator: Locator,
+        state: dict,
         option: str,
         *,
         ripple: bool = True,
@@ -936,11 +1005,19 @@ class Recorder:
         an unmodified click replaces the whole selection, and so does
         ``select_option(label=…)``. A ``select:`` step has always meant "this one
         option is now chosen", and it still does.
+
+        ``state`` is the caller's already-computed :data:`_SHIM_STATE_JS` read —
+        not re-fetched here, so this only ever needs the ``hidden`` half of it.
+        A select the page (or an earlier step, or DOM drift since ``compile``)
+        hid outright has no box for the cursor to land on, and neither
+        ``locator.click()`` nor Playwright's own actionability wait for it would
+        ever resolve; see :meth:`_hidden_listbox_error` for why that failure has
+        no ``mode: native`` escape hatch to offer.
         """
 
-        index = await locator.evaluate(_OPTION_INDEX_JS, option)
-        if index < 0:
-            raise await self._option_missing_error(locator, option)
+        if state["hidden"]:
+            raise await self._hidden_listbox_error(locator, option)
+        index = await self._require_option(locator, option)
         row = locator.locator("option").nth(index)
         # The listbox *is* the control the viewer sees, so its own box is the one
         # a still capture frames. Reading it moves no cursor and opens nothing.
@@ -953,6 +1030,36 @@ class Recorder:
             on_revealed=on_revealed,
             control_box=control_box,
             control_center=_center_of(control_box),
+        )
+
+    async def _hidden_listbox_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """The listbox itself has no box — nothing stands in for it to click instead.
+
+        Unlike the shimmed and page-widget shapes, a ``multiple`` / ``size > 1``
+        select needs no stand-in when it is visible: its ``<option>`` rows are
+        already laid out in the page (see :meth:`_select_in_listbox`). That is
+        exactly why there is nothing to fall back to when it is *not* visible —
+        a native ``<select>`` would be exactly as hidden, so ``mode: native``
+        would not help here either. Same reasoning, same omission, as
+        :meth:`_no_control_error`'s ``hidden`` branch.
+
+        :data:`UNDRIVABLE`, and never :data:`OPTION_MISSING`: nothing here says
+        anything about which options the control offers — the option list was
+        never even reached. An ``optional:`` step must fail on a control an
+        earlier step hid or a stale compile left behind, exactly as a mandatory
+        one does.
+        """
+
+        # Medium-neutral wording, like `_no_control_error`'s: the PDF guide
+        # reaches this too, and "on the film" would reach an author who asked
+        # for a document.
+        tail = f'nie da się pokazać wyboru opcji „{option}"'
+        return SelectDriveError(
+            f"{await self._describe(locator)} nie ma żadnego rozmiaru na stronie "
+            f"(element ukryty albo bez layoutu) — {tail}. Sprawdź, czy "
+            f"wcześniejszy krok scenariusza nie ukrył tego pola, albo czy układ "
+            f"strony zmienił się od czasu `compile` — jeśli tak, uruchom "
+            f"`compile --force`"
         )
 
     async def _select_in_two_beats(
@@ -1038,6 +1145,16 @@ class Recorder:
         scrolled to it — and nothing that changes the page's state does. Handing
         the row back rather than clicking it is what lets the PDF guide take its
         frame in between; the click itself is :meth:`_commit_option`'s.
+
+        The one path that does *not* ask :meth:`_require_option`, and the reason
+        is specific: by beat 2 the ``<select>`` is no longer the whole truth. The
+        shim may have been taken off it while the list was opening, and what the
+        cursor is about to land on is the shim's rendered row, so both questions
+        have to be put to the rendered list. The *verdicts* are still the shared
+        ones — :meth:`_option_missing_error` and :meth:`_disabled_option_error` —
+        so a caller sees the same message and the same
+        :attr:`SelectDriveError.reason` here as anywhere else; only the thing
+        being looked at differs.
         """
 
         # Read both *after* beat 1: the observer may have unshimmed and
@@ -1071,11 +1188,7 @@ class Recorder:
         # no other way to notice, and sending the cursor there at all would film
         # a choice the page was never going to accept.
         if await row.get_attribute("data-guidebot-option-disabled") is not None:
-            raise SelectDriveError(
-                f'opcja „{option}" na liście {await self._describe(locator)} jest '
-                f"wyłączona (`disabled`) — nie da się jej wybrać ani z rozwiniętej "
-                f"listy, ani bezpośrednio"
-            )
+            raise await self._disabled_option_error(locator, option)
         # Scroll the list *before* the glide: the cursor must travel to a row the
         # viewer can already see, not to one that scrolls under it on arrival.
         await locator.evaluate(
@@ -1091,13 +1204,14 @@ class Recorder:
         search at all, and must be said out loud rather than answered with the
         first node on the page that happens to carry the label.
 
-        The underlying ``<select>`` is consulted before the wait, because it is
-        the only thing here that can tell "the option is not on offer" from "the
-        widget did not draw a row", and those two want different answers from a
-        caller (:data:`OPTION_MISSING`). A page widget keeps the original's
-        ``<option>`` elements — that is what it submits — so the same question
-        ``validate.reuse_failure`` asks at preflight is answerable here. It also
-        saves waiting :data:`OPTION_WAIT_MS` for a row that could not exist.
+        The underlying ``<select>`` is consulted before the wait, via the shared
+        :meth:`_require_option`, because it is the only thing here that can tell
+        "the option is not on offer" from "the widget did not draw a row", and
+        those two want different answers from a caller (:data:`OPTION_MISSING`).
+        A page widget keeps the original's ``<option>`` elements — that is what
+        it submits — so the same question ``validate.reuse_failure`` asks at
+        preflight is answerable here, ``disabled`` included. It also saves
+        waiting :data:`OPTION_WAIT_MS` for a row that could not exist.
         """
 
         if not await self.frame.evaluate(_HAS_SNAPSHOT_JS):

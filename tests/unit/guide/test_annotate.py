@@ -186,9 +186,51 @@ def test_overlapping_targets_get_no_arrow():
     assert "arrow" not in _kinds(anns)
 
 
+def test_a_selects_row_arrow_obeys_the_same_drop_rules_as_any_other():
+    """The row is clipped and length-checked like every other arrow target.
+
+    `cursor_shape` hands the row's `Rect` straight to `clipped_arrow`, so a
+    select inherits the shared overlap and `MIN_ARROW` rules rather than keeping
+    a select-only arrow that could go on drawing the all-head-no-shaft stub
+    those rules exist to suppress. Both branches are pinned, because a
+    select-only copy would most plausibly show up as one of them quietly not
+    applying.
+    """
+
+    row = {"x": 300.0, "y": 100.0, "width": 100.0, "height": 40.0}
+    row_center = (350.0, 120.0)
+
+    def _for_select(prev_cursor, prev_shape):
+        return annotations_for(
+            "select",
+            prev_cursor=prev_cursor,
+            prev_shape=prev_shape,
+            center=CENTER,
+            box=BOX,
+            row_box=row,
+            row_center=row_center,
+        )
+
+    overlapping = _for_select((310.0, 120.0), Rect(x=290.0, y=100.0, w=100.0, h=40.0))
+    assert "arrow" not in _kinds(overlapping)
+
+    # Near-adjacent boxes: the clip leaves 4 px of gap, under `MIN_ARROW`.
+    too_short = _for_select((250.0, 120.0), Rect(x=200.0, y=100.0, w=96.0, h=40.0))
+    assert "arrow" not in _kinds(too_short)
+
+    # ...and a real gap still gets its arrow, so neither assertion above is vacuous.
+    assert "arrow" in _kinds(_for_select((50.0, 120.0), Rect(x=0.0, y=100.0, w=100.0, h=40.0)))
+
+
 @pytest.mark.parametrize("action", ["click", "type", "hover", "select"])
 def test_target_shape_is_the_box_of_a_targeted_action(action):
-    assert target_shape(action, box=BOX) == Rect(10.0, 20.0, 100.0, 40.0)
+    shape = target_shape(action, box=BOX)
+
+    assert shape == Rect(10.0, 20.0, 100.0, 40.0)
+    # `Rect` and `Ellipse` are both 4-field NamedTuples, so `Rect(a,b,c,d) ==
+    # Ellipse(a,b,c,d)` is `True` — the `==` above cannot tell them apart, yet the
+    # production dispatches on `isinstance`. Pin the actual type.
+    assert isinstance(shape, Rect)
 
 
 def test_target_shape_of_a_highlight_is_its_fitted_ellipse():

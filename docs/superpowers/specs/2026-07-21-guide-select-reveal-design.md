@@ -265,6 +265,33 @@ narrower than what `main` shipped: `main` caught any `PlaywrightError` from
 `display: none` Tom Select — i.e. "this widget cannot be driven at all" was being
 skipped as "the option is not there".
 
+### One guard, after the merge with PR #54
+
+PR #54 landed the same fast-fail from the other end: it rejected a `disabled`
+option before both direct `select_option` calls, for the same reason this branch
+checked the label there — Playwright raises nothing of its own and simply burns
+the step timeout. Two guards asking two halves of one question, each with its own
+JS and its own label-matching loop, is how this module previously grew four
+disagreeing answers to "is this select enhanced?". So they are merged into a
+single `Recorder._require_option`: one round trip (`_OPTION_STATE_JS`, composed
+from `_OPTION_INDEX_JS` so the label rule is stated once), one call per drive, two
+verdicts.
+
+- absent → `OPTION_MISSING`, the skippable one;
+- present but `disabled` → `UNDRIVABLE`. The option **is** on offer, so an
+  `optional:` step must fail on it; skipping would quietly stop covering a control
+  the page deliberately locked.
+
+It is asked by compile's direct set, `mode: native`, the listbox path (which
+thereby gains the `disabled` check it never had) and the page widget. The shimmed
+beat 2 is the one exception, and deliberately: by then the `<select>` is no longer
+the whole truth — the shim may have been taken off it mid-step — so both questions
+go to the rendered row. It still raises the same two shared errors, so the
+`reason` and the wording do not fork.
+
+`_hidden_listbox_error` (also PR #54's) is `UNDRIVABLE` too: the list was never
+reached, so nothing was learned about which options it offers.
+
 ## Constraints carried over from the shim
 
 - The `<select>` is never re-parented, wrapped or moved — element identity hashes

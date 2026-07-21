@@ -49,8 +49,8 @@ def ray_exit(origin: _Point, toward: _Point, shape: Shape) -> _Point:
     """The point where the ray ``origin`` -> ``toward`` leaves ``shape``.
 
     Returns ``origin`` unchanged when ``origin`` is not strictly inside the
-    shape, when ``origin == toward``, or when the shape is degenerate (zero
-    width or height). Callers treat that as "nothing to clip here".
+    shape, when ``origin == toward``, or when the shape is degenerate (a zero
+    extent on either axis). Callers treat that as "nothing to clip here".
     """
 
     dx = toward[0] - origin[0]
@@ -82,10 +82,13 @@ def clipped_arrow(
     b = ray_exit(end, start, end_shape) if end_shape is not None else end
 
     # Overlapping shapes push both exits past each other, so the clipped segment
-    # runs against the original direction. This test has to come before the
-    # length one: a reversed segment can easily be longer than the threshold.
+    # runs against the original direction — reject it. (Both this and the length
+    # test below just return `None`, so their order is immaterial; kept this
+    # first only because a reversed segment is the more surprising case.)
     if (b[0] - a[0]) * (end[0] - start[0]) + (b[1] - a[1]) * (end[1] - start[1]) <= 0.0:
         return None
+    # Applies even when neither shape clipped anything: a hop shorter than this
+    # reads as a dot, not a pointer, so the guide would rather draw nothing.
     if math.hypot(b[0] - a[0], b[1] - a[1]) < MIN_ARROW:
         return None
     return a, b
@@ -96,6 +99,9 @@ def _rect_exit(origin: _Point, dx: float, dy: float, r: Rect) -> _Point:
 
     ox, oy = origin
     if r.w <= 0.0 or r.h <= 0.0:
+        # Redundant with the strict containment below (`r.x < ox < r.x` is never
+        # true at zero width), but spelled out so a degenerate box reads as an
+        # explicit no-op rather than an accident of the next line.
         return origin
     if not (r.x < ox < r.x + r.w and r.y < oy < r.y + r.h):
         return origin
@@ -137,7 +143,9 @@ def _ellipse_exit(origin: _Point, dx: float, dy: float, e: Ellipse) -> _Point:
     dv = dy / e.ry
     a = du * du + dv * dv
     if a == 0.0:
-        # The direction vanishes once normalised — nothing sane to intersect.
+        # Unreachable via `ray_exit` (it screens out `origin == toward`, and the
+        # radii are positive here), but `_ellipse_exit` is module-private and a
+        # future caller might not; guard rather than divide by zero below.
         return origin
 
     b = 2.0 * (u * du + v * dv)

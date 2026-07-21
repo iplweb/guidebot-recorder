@@ -95,8 +95,10 @@ zwracany jest `origin`.
 4. Gdy `|b - a| < MIN_ARROW` (12 px zrzutu) → `None`.
 5. Inaczej `(a, b)`.
 
-Kolejność kroków 3 i 4 ma znaczenie: test zwrotu musi poprzedzać test długości, bo
-odwrócony odcinek bywa dostatecznie długi, żeby przejść próg.
+Kroki 3 i 4 oba zwracają `None`, więc ich wzajemna kolejność jest behawioralnie
+obojętna — test zwrotu stoi pierwszy tylko dlatego, że odwrócony odcinek to bardziej
+zaskakujący przypadek. (Kolejność zaczęłaby mieć znaczenie dopiero, gdyby któryś krok
+zwracał coś innego niż `None`, np. skrócony odcinek.)
 
 **Próg `MIN_ARROW` obowiązuje zawsze**, również gdy oba kształty są `None`. To świadoma
 zmiana zachowania: dziś przewodnik rysuje strzałkę nawet przy kilkupikselowym przeskoku

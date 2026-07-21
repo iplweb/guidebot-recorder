@@ -734,6 +734,13 @@ there is also no list to unfurl. The choreography is a single beat: the cursor
 glides straight to the `<option>` and clicks it, scrolling the listbox to it first
 if it sits below the fold. The control keeps its own native appearance throughout.
 
+Precisely because it needs no shim, this shape also has nothing to fall back on
+when it turns out to have no box at all — hidden by an earlier step in the same
+run, or by a page whose layout drifted since the scenario was last compiled. That
+fails immediately with a message naming the control, rather than waiting out
+Playwright's own actionability retries; `mode: native` is not offered as a way
+out, because a native `<select>` would be exactly as invisible.
+
 As always for `select`, this picks **one** option: clicking it deselects whatever
 else was selected, exactly as setting the value directly does. There is no way to
 choose several options in one step.
@@ -774,6 +781,13 @@ there *is* a row to click and clicking it achieves nothing — a `disabled` opti
 or a widget whose list is accompanied by a toast or live region repeating the same
 label. Without the read-back such a run would finish green and produce a video in
 which the dropdown visibly never changes.
+
+A `disabled` option targeted where there is no click to read back afterwards —
+`compile`'s direct value-set, or the `mode: native` escape hatch below — is
+checked for up front instead, for the same reason: Chromium never treats a
+disabled `<option>` as selectable, so without the check Playwright would retry
+its own actionability wait until the step's full timeout elapsed and then raise
+its own, unrelated-looking error.
 
 For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
 loads its options over the network, for instance — use the per-step **`mode:

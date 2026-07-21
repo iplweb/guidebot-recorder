@@ -369,6 +369,55 @@ async def test_a_disabled_option_on_a_shimmed_select_fails_instead_of_doing_noth
     assert await page.locator("select").input_value() == "lista"  # never changed
 
 
+async def test_a_disabled_option_at_compile_time_fails_fast_instead_of_a_raw_timeout(page):
+    """The direct path (no overlay) used to hang out a full step timeout.
+
+    `Locator.select_option` retries "waiting for element to be visible and
+    enabled" — Chromium never considers a `disabled` `<option>` selectable, so
+    the retry loop never ends on its own and `select_option` raises nothing
+    until the caller's own timeout elapses, as a raw English
+    `playwright.TimeoutError` naming no control and no option. Measured on this
+    branch before the fix: with `page.set_default_timeout(...)` at 8s, this
+    test took the full 8s and raised `playwright.async_api.TimeoutError`
+    instead of `SelectDriveError`.
+    """
+
+    page.set_default_timeout(3000)
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await _install_selects(page)
+    rec = Recorder(page, overlay=None)  # compile path
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert "tabela" in str(excinfo.value)
+    assert "wyłączona" in str(excinfo.value)
+    assert await page.locator("select").input_value() == "lista"  # never changed
+
+
+async def test_a_disabled_option_under_native_mode_fails_fast_instead_of_a_raw_timeout(page):
+    """The `mode: native` escape hatch shares the same direct `select_option` call.
+
+    Same hazard as the compile path, reached instead through the per-step
+    `native: true` override with an overlay installed (the render-time shape of
+    the hatch).
+    """
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela", native=True)
+
+    assert "tabela" in str(excinfo.value)
+    assert "wyłączona" in str(excinfo.value)
+    assert await page.locator("select").input_value() == "lista"  # never changed
+
+
 def _enhanced_with_decoy(labels: list[str], rows: list[str], decoy: str) -> str:
     """The page-widget pattern plus a live region that echoes the option label.
 
@@ -766,6 +815,40 @@ async def test_native_mode_still_works_on_a_listbox(page):
     await rec.select(TestidTarget(testid="s"), "pilne", native=True)
 
     assert await page.evaluate(_SELECTED_JS) == ["pilne"]
+
+
+async def test_a_hidden_listbox_fails_fast_instead_of_a_raw_timeout(page):
+    """A `display: none` listbox — e.g. reached via a stale compiled target —
+    used to hang out a full step timeout instead of failing legibly.
+
+    The `listbox` shape (`multiple` / `size > 1`) needs no shim stand-in when
+    visible, so `_select_in_listbox` drove straight at the `<option>` — and
+    when the select itself has no box at all, neither `_approach`'s bounding
+    box read nor `Locator.click()`'s own actionability wait ever resolves.
+    Measured on this branch before the fix: with a short default timeout, this
+    raised a raw `playwright.async_api.TimeoutError` ("element is not
+    visible") instead of `SelectDriveError`.
+    """
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' aria-label='Tagi' "
+        "multiple size='3' style='display:none'>"
+        "<option>zwykłe</option><option>pilne</option><option>archiwalne</option>"
+        "</select></body>"
+    )
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "pilne")
+
+    message = str(excinfo.value)
+    assert "pilne" in message
+    assert "compile --force" in message
+    assert await page.evaluate(_SELECTED_JS) == []  # never touched
 
 
 # --- which situation the failure is in --------------------------------------
@@ -1290,3 +1373,129 @@ async def test_a_control_with_nothing_to_unfurl_is_not_option_missing(page):
         await rec.select(TestidTarget(testid="s"), "Beta")
 
     assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_disabled_option_on_the_compile_path_is_not_option_missing(page):
+    """The listless direct set now refuses up front — and must refuse *loudly*.
+
+    Both halves are the point. A `disabled` option is present, correctly spelled
+    and on offer, so classifying it as `OPTION_MISSING` would make an
+    `optional: true` step skip a control the page deliberately locked — the
+    guide would quietly stop covering it and nobody would learn why. And a raw
+    `playwright.TimeoutError` (what this used to be) carries no `reason` at all,
+    so it could not be classified either way.
+    """
+
+    page.set_default_timeout(3000)
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await _install_selects(page)
+    rec = Recorder(page, overlay=None)  # compile path
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_disabled_option_under_native_mode_is_not_option_missing(page):
+    """The other listless path, through the `mode: native` escape hatch."""
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela", native=True)
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_disabled_option_in_a_listbox_is_not_option_missing(page):
+    """The listbox path asks the same guard as everyone else, so it agrees.
+
+    It used to check only "is the label there?" and then click the row, which a
+    disabled `<option>` silently refuses — caught one beat later by
+    `_confirm_selected`, and named by a message about the cursor missing rather
+    than about the option being locked. Routing it through `_require_option`
+    gives it the same verdict, the same wording and the same `reason` the other
+    three paths carry.
+    """
+
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' multiple size='3'>"
+        "<option>zwykłe</option><option disabled>pilne</option>"
+        "<option>archiwalne</option></select></body>"
+    )
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "pilne")
+
+    assert excinfo.value.reason == UNDRIVABLE
+    assert "wyłączona" in str(excinfo.value)
+    assert await page.evaluate(_SELECTED_JS) == []  # never touched
+
+
+async def test_a_hidden_listbox_is_not_option_missing(page):
+    """The listbox has no box; nothing was learned about which options it offers.
+
+    An `optional:` step must fail here, not skip: a control an earlier step hid
+    (or a compiled target the page's layout drifted away from) is a broken
+    scenario, and the option it names may be sitting right there.
+    """
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' aria-label='Tagi' "
+        "multiple size='3' style='display:none'>"
+        "<option>zwykłe</option><option>pilne</option><option>archiwalne</option>"
+        "</select></body>"
+    )
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "pilne")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_one_guard_answers_can_this_option_be_chosen(page):
+    """Both refusals come from a single call, so they cannot drift apart.
+
+    The merge that produced this file had two candidate fast-fails for the two
+    listless direct sets — one for "no such option", one for "the option is
+    `disabled`" — each with its own JS and its own label-matching loop. Two
+    definitions of the same question is how this module previously grew four
+    disagreeing answers to "is this select enhanced?". Pinned here: one
+    `_require_option` per drive, and it settles both cases.
+    """
+
+    calls: list[str] = []
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await _install_selects(page)
+    rec = Recorder(page, overlay=None)  # compile path
+    original = rec._require_option
+
+    async def _spy(locator, option):
+        calls.append(option)
+        return await original(locator, option)
+
+    rec._require_option = _spy  # type: ignore[method-assign]
+
+    with pytest.raises(SelectDriveError) as disabled:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+    with pytest.raises(SelectDriveError) as absent:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "nie ma takiej")
+
+    assert calls == ["tabela", "nie ma takiej"]  # one guard, one call each
+    assert disabled.value.reason == UNDRIVABLE
+    assert absent.value.reason == OPTION_MISSING
