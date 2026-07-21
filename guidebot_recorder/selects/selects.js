@@ -139,6 +139,8 @@
       scrollOptionIntoView: () => {},
       pinNative: () => {},
       refresh: () => {},
+      // Nothing is ever classified here, so no pass can be owed.
+      settled: () => ready,
     });
     markReady();
     return;
@@ -981,6 +983,57 @@
     return found;
   }
 
+  // --- The pending-pass barrier ----------------------------------------------
+  //
+  // `ready` answers "has the *first* pass run?" — once, and never again. That is
+  // the wrong question for a step that drives a select the page has only just
+  // added: the observer has already armed a pass, the select is not classified
+  // yet, and `ready` settled seconds ago at page load. A caller that trusts it
+  // finds a bare `<select>` with no DOM list to unfurl, and the step fails with
+  // "the shim did not cover it" — for a select the shim was about to cover.
+  //
+  // `settled()` answers the question that actually gates such a step: "is a
+  // classification pass still owed?".
+
+  /** Resolvers waiting for the pass that was owed when they asked. */
+  let passWaiters = [];
+
+  function notifyPassComplete() {
+    if (passWaiters.length === 0) {
+      return;
+    }
+    const waiting = passWaiters;
+    passWaiters = [];
+    for (const resolve of waiting) {
+      resolve();
+    }
+  }
+
+  function classificationPending() {
+    return settleTimer !== null || deadlineTimer !== null || guaranteedTimer !== null;
+  }
+
+  /**
+   * A promise for the classification pass that is owed *right now*.
+   *
+   * Snapshot semantics, deliberately not "resolve once the page is quiescent":
+   * a document that keeps mutating is never quiescent — our own `cursor.js`
+   * rewrites `left`/`top` every frame of a glide — so a barrier waiting for that
+   * would hang every step instead of unblocking the one that needed it. Waiting
+   * for the pass owed at the moment of asking is bounded by the debounce's own
+   * ceiling (`MAX_DEFERRAL_FACTOR` settle windows) no matter what the page does
+   * afterwards, which is the same bound `Selects.ready_timeout` already derives.
+   *
+   * With nothing owed this is `ready`, so the first-pass barrier is still taken
+   * on a page that has not classified anything yet.
+   */
+  function settled() {
+    if (!classificationPending()) {
+      return ready;
+    }
+    return new Promise((resolve) => passWaiters.push(resolve));
+  }
+
   function classify() {
     if (!document.body) {
       // Nothing to append to yet; retry on the uncancellable timer rather than
@@ -1029,6 +1082,10 @@
         window.clearTimeout(guaranteedTimer);
         guaranteedTimer = null;
       }
+      // Inside the `finally` for the same reason `markReady` is: a pass that
+      // throws still has to release the callers blocked on it, or one page
+      // getter takes compile and render down with it.
+      notifyPassComplete();
     }
   }
 
@@ -1325,6 +1382,7 @@
     refresh: () => {
       scheduleClassify();
     },
+    settled: settled,
   });
 
   document.addEventListener("mousedown", onMouseDown, true);

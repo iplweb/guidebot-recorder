@@ -148,14 +148,21 @@ READY_WAIT_MS = 15_000
 #: and a missing API must degrade to "nothing to wait for", not to an error.
 #:
 #: Bounded by the same page-side ``Promise.race`` idiom ``Selects.wait_ready``
-#: uses, rejecting with the same marker: ``ready`` is a promise the *page*
+#: uses, rejecting with the same marker: the barrier is a promise the *page*
 #: settles, so awaiting it bare makes a wedged page hang the caller — precisely
 #: the failure that barrier exists to prevent.
+#:
+#: ``settled()`` rather than ``ready``, for the reason ``Selects.wait_ready``
+#: gives: ``ready`` reports the *first* classification pass and never re-arms,
+#: so a select the page appended a moment ago is still unclassified when it
+#: resolves — and this method is the last barrier before the step drives that
+#: select. ``ready`` remains the fallback for a partial API object.
 _SELECTS_READY_JS = f"""(timeoutMs) => {{
   const api = window.__guidebot_selects;
   if (!api || !api.ready) return null;
+  const barrier = typeof api.settled === "function" ? api.settled() : api.ready;
   return Promise.race([
-    api.ready,
+    barrier,
     new Promise((_resolve, reject) => {{
       window.setTimeout(() => reject(new Error({READY_TIMEOUT_MARKER!r})), timeoutMs);
     }}),
@@ -461,19 +468,24 @@ class Recorder:
         await self._select_in_two_beats(locator, state, option)
 
     async def _await_selects_ready(self) -> None:
-        """Wait for this frame's first classification pass — but not forever.
+        """Wait until this frame owes no classification pass — but not forever.
 
         Both production callers (compile, render) take
         :meth:`guidebot_recorder.selects.Selects.wait_ready` first, so this
-        normally finds a promise that has already settled. It is written as a
+        normally finds a barrier that has already settled. It is written as a
         bound anyway because that ordering is an invariant of *those* call
         sites, not of this one: a direct caller on a page whose widget is wedged
         would otherwise get an ``evaluate`` that never returns, which is the one
         outcome the barrier design rules out everywhere else.
 
+        Not merely "the first pass has run": every branch below reads whether
+        *this* select is shimmed, and a select the previous step added is still
+        unclassified while the debounced pass it triggered is pending. See
+        :data:`_SELECTS_READY_JS`.
+
         Raises:
-            SelectsNotReadyError: the widget is in this frame and its ``ready``
-                promise did not settle within :data:`READY_WAIT_MS`.
+            SelectsNotReadyError: the widget is in this frame and its barrier
+                did not settle within :data:`READY_WAIT_MS`.
         """
 
         try:
