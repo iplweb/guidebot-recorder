@@ -1,0 +1,713 @@
+"""Direct tests of selects.js's public API (no Python ``Selects`` wrapper).
+
+Patterned on ``tests/unit/overlay/test_cursor_js.py``: inject
+``window.__guidebot_selects_config`` then evaluate the raw script in a real
+Chromium page.
+
+The load-bearing invariant, asserted first and hardest, is that shimming a
+``<select>`` leaves the page's DOM structure untouched — the shim is an overlay
+appended to ``<body>``, never a wrapper. ``capture_identity`` hashes the whole
+composed ancestor chain, so a single inserted wrapper would invalidate every
+frozen target under it.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from importlib.resources import files
+
+import pytest
+from playwright.async_api import Page, Route, async_playwright
+
+SELECTS_JS = files("guidebot_recorder.selects").joinpath("selects.js").read_text("utf-8")
+
+# Must stay strictly below the cursor's own z-index (overlay/cursor.js:18), so
+# the synthetic cursor is never painted underneath the option list.
+MAX_Z_INDEX = 2147483647
+
+
+@pytest.fixture
+async def page() -> AsyncIterator[Page]:
+    async with async_playwright() as p:
+        b = await p.chromium.launch(headless=True)
+        pg = await b.new_page()
+        try:
+            yield pg
+        finally:
+            await b.close()
+
+
+async def _inject(page: Page, cfg: dict | None = None) -> None:
+    """Install the widget with a short settle window and await the first pass."""
+    merged = {"settleMs": 20, **(cfg or {})}
+    await page.evaluate(f"window.__guidebot_selects_config = {json.dumps(merged)};")
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate("window.__guidebot_selects.ready")
+
+
+def _options(labels: list[str]) -> str:
+    return "".join(f"<option>{label}</option>" for label in labels)
+
+
+# A deliberately deep, sibling-sensitive fixture: `select + .hint` is exactly the
+# kind of structural CSS selector a wrapper design would break.
+NESTED = (
+    "<body style='margin:0'><main id='main'><form id='form'>"
+    "<div class='row' id='row'>"
+    "<label for='s'>Województwo</label>"
+    "<select id='s' style='width:220px'>"
+    "<option>Mazowieckie</option><option>Lubelskie</option><option>Śląskie</option>"
+    "</select>"
+    "<span class='hint'>podpowiedź</span>"
+    "</div></form></main></body>"
+)
+
+_SNAPSHOT_STRUCTURE = """(id) => {
+  const el = document.getElementById(id);
+  const chain = [];
+  for (let a = el.parentElement; a; a = a.parentElement) {
+    chain.push([a.tagName.toLowerCase(), a.getAttribute('role') || '', a.id || '']);
+  }
+  const parent = el.parentElement;
+  return {
+    chain: chain,
+    siblingIndex: Array.prototype.indexOf.call(parent.children, el),
+    siblingTags: Array.from(parent.children).map((n) => n.tagName.toLowerCase()),
+    nextSiblingClass: el.nextElementSibling ? el.nextElementSibling.className : null,
+    structuralSelectorMatches: document.querySelector('select + .hint') !== null,
+  };
+}"""
+
+
+async def test_shimming_does_not_touch_the_ancestor_chain(page: Page) -> None:
+    """The whole design rests on this: no re-parenting, no wrapper, no move."""
+    await page.set_content(NESTED)
+    before = await page.evaluate(_SNAPSHOT_STRUCTURE, "s")
+    await _inject(page)
+    # Open the list too — the overlay must stay out of the page tree even then.
+    await page.evaluate("() => window.__guidebot_selects.open(document.getElementById('s'))")
+    after = await page.evaluate(_SNAPSHOT_STRUCTURE, "s")
+    assert after == before, "shimming restructured the page DOM"
+
+    # Belt and braces: the shim really did happen, and its elements hang off
+    # <body>, not off any ancestor of the select.
+    assert await page.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('s'))"
+    )
+    hosts = await page.evaluate(
+        "() => Array.from(document.querySelectorAll("
+        "'[data-guidebot-select-button],[data-guidebot-select-list]'))"
+        ".map((n) => n.parentElement.tagName.toLowerCase())"
+    )
+    assert hosts == ["body", "body"], hosts
+    polluted = await page.evaluate(
+        "() => { const out = []; "
+        "for (let a = document.getElementById('s').parentElement; a; a = a.parentElement) {"
+        " for (const at of a.attributes) { if (at.name.startsWith('data-guidebot')) out.push(at.name); } }"
+        " return out; }"
+    )
+    assert polluted == [], polluted
+
+
+async def test_only_mutation_on_the_select_is_the_marker_attribute(page: Page) -> None:
+    await page.set_content(NESTED)
+    before = await page.evaluate(
+        "() => Array.from(document.getElementById('s').attributes)"
+        ".map((a) => a.name + '=' + a.value).sort()"
+    )
+    await _inject(page)
+    after = await page.evaluate(
+        "() => Array.from(document.getElementById('s').attributes)"
+        ".map((a) => a.name + '=' + a.value).sort()"
+    )
+    added = [a for a in after if a not in before]
+    assert [a.split("=")[0] for a in added] == ["data-guidebot-shimmed"], added
+    assert [a for a in before if a not in after] == []
+
+
+async def test_raw_select_gets_button_and_list_addressed_by_uid(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    info = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      const uid = s.getAttribute('data-guidebot-shimmed');
+      const button = document.querySelector('[data-guidebot-select-button][data-guidebot-for="' + uid + '"]');
+      const list = document.querySelector('[data-guidebot-select-list][data-guidebot-for="' + uid + '"]');
+      return {
+        uid: uid,
+        buttonMatches: button === api.buttonFor(s),
+        listMatches: list === api.listFor(s),
+        buttonAria: button.getAttribute('aria-hidden'),
+        listAria: list.getAttribute('aria-hidden'),
+        pointerEvents: getComputedStyle(button).pointerEvents,
+        buttonZ: Number(getComputedStyle(button).zIndex),
+        listZ: Number(getComputedStyle(list).zIndex),
+        listDisplay: getComputedStyle(list).display,
+        buttonPosition: getComputedStyle(button).position,
+        listPosition: getComputedStyle(list).position,
+      };
+    }"""
+    )
+    assert info["uid"]
+    assert info["buttonMatches"] and info["listMatches"]
+    assert info["buttonAria"] == "true" and info["listAria"] == "true"
+    # The real <select> must remain Playwright's hit target.
+    assert info["pointerEvents"] == "none"
+    assert 0 < info["buttonZ"] < MAX_Z_INDEX
+    assert 0 < info["listZ"] < MAX_Z_INDEX
+    assert info["listDisplay"] == "none", "the list must start closed"
+    assert info["buttonPosition"] == "fixed" and info["listPosition"] == "fixed"
+
+
+async def test_button_is_pinned_to_the_selects_rect(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    delta = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const a = s.getBoundingClientRect();
+      const b = window.__guidebot_selects.buttonFor(s).getBoundingClientRect();
+      return [Math.abs(a.left - b.left), Math.abs(a.top - b.top),
+              Math.abs(a.width - b.width), Math.abs(a.height - b.height)];
+    }"""
+    )
+    assert max(delta) < 1.0, delta
+
+
+async def test_button_copies_the_selects_own_metrics_and_only_falls_back_when_transparent(
+    page: Page,
+) -> None:
+    """A transparent control would leave the button see-through on camera.
+
+    Only the alpha channel may trigger the fallback: `rgb(255, 255, 0)` is an
+    opaque yellow and must be copied verbatim.
+    """
+    await page.set_content(
+        "<body style='margin:0'>"
+        "<select id='a' style='width:200px;background-color:rgb(255,255,0);"
+        "font-family:Georgia;font-size:19px'><option>x</option></select>"
+        "<select id='b' style='width:200px;background-color:rgba(0,0,0,0)'>"
+        "<option>x</option></select>"
+        "</body>"
+    )
+    await _inject(page)
+    styles = await page.evaluate(
+        """() => {
+      const api = window.__guidebot_selects;
+      const read = (id) => {
+        const cs = getComputedStyle(api.buttonFor(document.getElementById(id)));
+        return [cs.backgroundColor, cs.fontFamily, cs.fontSize];
+      };
+      return {a: read('a'), b: read('b')};
+    }"""
+    )
+    assert styles["a"] == ["rgb(255, 255, 0)", "Georgia", "19px"]
+    assert styles["b"][0] == "rgb(255, 255, 255)"
+
+
+LEFT_ALONE = {
+    "select2_clipped_to_1px": (
+        "<select id='s' style=\"position:absolute;width:1px;height:1px;padding:0;"
+        'margin:-1px;overflow:hidden;clip:rect(0 0 0 0)">' + _options(["a", "b"]) + "</select>"
+    ),
+    "display_none": ("<select id='s' style='display:none'>" + _options(["a", "b"]) + "</select>"),
+    "marker_class_select2": (
+        "<select id='s' class='select2-hidden-accessible' style='width:200px;height:30px'>"
+        + _options(["a", "b"])
+        + "</select>"
+    ),
+    "marker_class_tomselect": (
+        "<select id='s' class='tomselected' style='width:200px;height:30px'>"
+        + _options(["a", "b"])
+        + "</select>"
+    ),
+    "marker_class_chosen": (
+        "<select id='s' class='chosen-select' style='width:200px;height:30px'>"
+        + _options(["a", "b"])
+        + "</select>"
+    ),
+    "multiple": (
+        "<select id='s' multiple style='width:200px;height:80px'>"
+        + _options(["a", "b"])
+        + "</select>"
+    ),
+    "size_gt_1": (
+        "<select id='s' size='4' style='width:200px;height:80px'>"
+        + _options(["a", "b", "c", "d"])
+        + "</select>"
+    ),
+}
+
+
+@pytest.mark.parametrize("html", list(LEFT_ALONE.values()), ids=list(LEFT_ALONE))
+async def test_non_raw_selects_are_left_alone(page: Page, html: str) -> None:
+    await page.set_content(f"<body style='margin:0'><div id='host'>{html}</div></body>")
+    await _inject(page)
+    state = await page.evaluate(
+        """() => ({
+      overlays: document.querySelectorAll(
+        '[data-guidebot-select-button],[data-guidebot-select-list]').length,
+      marker: document.getElementById('s').hasAttribute('data-guidebot-shimmed'),
+      isShimmed: window.__guidebot_selects.isShimmed(document.getElementById('s')),
+      buttonFor: window.__guidebot_selects.buttonFor(document.getElementById('s')),
+    })"""
+    )
+    assert state == {"overlays": 0, "marker": False, "isShimmed": False, "buttonFor": None}
+
+
+async def test_mousedown_opens_the_list_and_suppresses_the_native_popup(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    result = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const ev = new MouseEvent('mousedown', {bubbles: true, cancelable: true, button: 0});
+      s.dispatchEvent(ev);
+      const list = window.__guidebot_selects.listFor(s);
+      return {prevented: ev.defaultPrevented, display: getComputedStyle(list).display};
+    }"""
+    )
+    assert result["prevented"] is True, "native OS popup was not suppressed"
+    assert result["display"] != "none", "mousedown did not open the DOM list"
+
+
+@pytest.mark.parametrize("key", ["ArrowDown", "Enter", " "])
+async def test_keyboard_opens_the_list(page: Page, key: str) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    display = await page.evaluate(
+        """(key) => {
+      const s = document.getElementById('s');
+      s.dispatchEvent(new KeyboardEvent('keydown', {key: key, bubbles: true, cancelable: true}));
+      return getComputedStyle(window.__guidebot_selects.listFor(s)).display;
+    }""",
+        key,
+    )
+    assert display != "none"
+
+
+async def test_real_click_on_the_select_unfurls_the_list(page: Page) -> None:
+    """End-to-end proof that the shim button does not steal the hit target."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.click("#s")
+    uid = await page.get_attribute("#s", "data-guidebot-shimmed")
+    list_selector = f'[data-guidebot-select-list][data-guidebot-for="{uid}"]'
+    await page.wait_for_selector(list_selector, state="visible", timeout=3000)
+
+
+async def test_choosing_an_option_sets_value_and_fires_input_and_change(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate(
+        """() => {
+      window.__events = [];
+      const s = document.getElementById('s');
+      for (const type of ['input', 'change']) {
+        s.addEventListener(type, (e) => window.__events.push([type, e.bubbles]));
+      }
+      window.__guidebot_selects.open(s);
+    }"""
+    )
+    await page.click('[data-guidebot-option-index="2"]')
+    state = await page.evaluate(
+        """() => ({
+      value: document.getElementById('s').value,
+      index: document.getElementById('s').selectedIndex,
+      events: window.__events,
+      display: getComputedStyle(
+        window.__guidebot_selects.listFor(document.getElementById('s'))).display,
+    })"""
+    )
+    assert state["index"] == 2
+    assert state["value"] == "Śląskie"
+    assert state["events"] == [["input", True], ["change", True]]
+    assert state["display"] == "none", "choosing an option must close the list"
+
+
+async def test_rechoosing_the_current_option_fires_nothing(page: Page) -> None:
+    """Native selects stay silent when the value does not change (spec §4)."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      s.selectedIndex = 1;
+      window.__events = [];
+      for (const type of ['input', 'change']) {
+        s.addEventListener(type, () => window.__events.push(type));
+      }
+      window.__guidebot_selects.open(s);
+    }"""
+    )
+    await page.click('[data-guidebot-option-index="1"]')
+    state = await page.evaluate(
+        "() => ({events: window.__events, index: document.getElementById('s').selectedIndex})"
+    )
+    assert state["events"] == []
+    assert state["index"] == 1
+
+
+async def test_list_opens_downward_and_clamps_max_height_with_internal_scrolling(
+    page: Page,
+) -> None:
+    labels = [f"Opcja {i}" for i in range(30)]
+    await page.set_content(
+        "<body style='margin:0'><div style='height:400px'></div>"
+        f"<select id='s' style='width:220px'>{_options(labels)}</select></body>"
+    )
+    await _inject(page)
+    geo = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      window.__guidebot_selects.open(s);
+      const list = window.__guidebot_selects.listFor(s);
+      const sr = s.getBoundingClientRect();
+      const lr = list.getBoundingClientRect();
+      return {
+        selectBottom: sr.bottom,
+        listTop: lr.top,
+        listBottom: lr.bottom,
+        maxHeight: Number.parseFloat(getComputedStyle(list).maxHeight),
+        overflowY: getComputedStyle(list).overflowY,
+        scrollHeight: list.scrollHeight,
+        clientHeight: list.clientHeight,
+        innerHeight: window.innerHeight,
+      };
+    }"""
+    )
+    assert geo["listTop"] >= geo["selectBottom"] - 0.5, "the list flipped upward"
+    assert geo["maxHeight"] >= 120
+    assert geo["listBottom"] <= geo["innerHeight"] + 0.5, "the list spilled past the frame"
+    assert geo["overflowY"] in ("auto", "scroll")
+    assert geo["scrollHeight"] > geo["clientHeight"] + 1, "the list did not clamp"
+
+
+async def test_list_never_flips_upward_and_keeps_a_floor_height(page: Page) -> None:
+    """Right at the bottom edge there is no room; the floor wins, not a flip."""
+    labels = [f"Opcja {i}" for i in range(30)]
+    await page.set_content(
+        "<body style='margin:0'><div style='height:690px'></div>"
+        f"<select id='s' style='width:220px'>{_options(labels)}</select></body>"
+    )
+    await _inject(page)
+    geo = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      window.__guidebot_selects.open(s);
+      const list = window.__guidebot_selects.listFor(s);
+      return {
+        selectBottom: s.getBoundingClientRect().bottom,
+        listTop: list.getBoundingClientRect().top,
+        maxHeight: Number.parseFloat(getComputedStyle(list).maxHeight),
+      };
+    }"""
+    )
+    assert geo["listTop"] >= geo["selectBottom"] - 0.5, "the list flipped upward"
+    assert abs(geo["maxHeight"] - 120) < 1.0, geo["maxHeight"]
+
+
+async def test_geometry_repins_after_a_scroll(page: Page) -> None:
+    await page.set_content(
+        "<body style='margin:0'><div style='height:300px'></div>"
+        f"<select id='s' style='width:220px'>{_options(['a', 'b', 'c'])}</select>"
+        "<div style='height:2000px'></div></body>"
+    )
+    await _inject(page)
+    before = await page.evaluate(
+        "() => window.__guidebot_selects.buttonFor(document.getElementById('s'))"
+        ".getBoundingClientRect().top"
+    )
+    await page.evaluate("() => window.scrollTo(0, 180)")
+    await page.evaluate(
+        "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
+    )
+    after = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const b = window.__guidebot_selects.buttonFor(s);
+      return {button: b.getBoundingClientRect().top, select: s.getBoundingClientRect().top};
+    }"""
+    )
+    assert abs(after["button"] - before) > 100, "the overlay did not move with the page"
+    assert abs(after["button"] - after["select"]) < 1.0, "the overlay lost its pin"
+
+
+async def test_observer_shims_a_late_select(page: Page) -> None:
+    await page.set_content("<body style='margin:0'><div id='host'></div></body>")
+    await _inject(page)
+    assert (
+        await page.evaluate(
+            "() => document.querySelectorAll('[data-guidebot-select-button]').length"
+        )
+        == 0
+    )
+    await page.evaluate(
+        "() => { document.getElementById('host').innerHTML = "
+        '\'<select id="s" style="width:200px"><option>a</option><option>b</option></select>\'; }'
+    )
+    await page.wait_for_function(
+        "() => document.querySelectorAll('[data-guidebot-select-button]').length === 1",
+        timeout=3000,
+    )
+
+
+async def test_observer_unshims_a_select_that_gains_a_marker_class(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    assert (
+        await page.evaluate(
+            "() => document.querySelectorAll('[data-guidebot-select-button]').length"
+        )
+        == 1
+    )
+    await page.evaluate(
+        "() => document.getElementById('s').classList.add('select2-hidden-accessible')"
+    )
+    await page.wait_for_function(
+        "() => document.querySelectorAll("
+        "'[data-guidebot-select-button],[data-guidebot-select-list]').length === 0",
+        timeout=3000,
+    )
+    left = await page.evaluate(
+        "() => document.getElementById('s').hasAttribute('data-guidebot-shimmed')"
+    )
+    assert left is False, "the marker attribute survived unshimming"
+
+
+async def test_observer_unshims_a_select_that_loses_its_box(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate("() => { document.getElementById('s').style.display = 'none'; }")
+    await page.wait_for_function(
+        "() => document.querySelectorAll("
+        "'[data-guidebot-select-button],[data-guidebot-select-list]').length === 0",
+        timeout=3000,
+    )
+
+
+async def test_observer_drops_the_overlay_of_a_removed_select(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate("() => document.getElementById('s').remove()")
+    await page.wait_for_function(
+        "() => document.querySelectorAll("
+        "'[data-guidebot-select-button],[data-guidebot-select-list]').length === 0",
+        timeout=3000,
+    )
+
+
+async def test_optgroups_are_headings_and_disabled_options_are_not_clickable(page: Page) -> None:
+    await page.set_content(
+        "<body style='margin:0'><select id='s' style='width:220px'>"
+        "<optgroup label='Północ'><option>Gdańsk</option><option disabled>Olsztyn</option></optgroup>"
+        "<optgroup label='Południe'><option>Kraków</option></optgroup>"
+        "</select></body>"
+    )
+    await _inject(page)
+    await page.evaluate("() => window.__guidebot_selects.open(document.getElementById('s'))")
+    shape = await page.evaluate(
+        """() => {
+      const list = window.__guidebot_selects.listFor(document.getElementById('s'));
+      return {
+        groups: Array.from(list.querySelectorAll('[data-guidebot-optgroup]')).map((n) => n.textContent),
+        groupsClickable: Array.from(list.querySelectorAll('[data-guidebot-optgroup]'))
+          .some((n) => n.hasAttribute('data-guidebot-option-index')),
+        rows: Array.from(list.querySelectorAll('[data-guidebot-option-index]'))
+          .map((n) => [n.getAttribute('data-guidebot-option-index'), n.textContent]),
+        disabledDimmed: Number.parseFloat(getComputedStyle(
+          list.querySelector('[data-guidebot-option-index="1"]')).opacity) < 1,
+      };
+    }"""
+    )
+    assert shape["groups"] == ["Północ", "Południe"]
+    assert shape["groupsClickable"] is False
+    assert shape["rows"] == [["0", "Gdańsk"], ["1", "Olsztyn"], ["2", "Kraków"]]
+    assert shape["disabledDimmed"] is True
+
+    # Clicking the disabled row changes nothing and does not close the list.
+    await page.evaluate(
+        """() => {
+      window.__events = [];
+      document.getElementById('s').addEventListener('change', () => window.__events.push('change'));
+      window.__guidebot_selects.listFor(document.getElementById('s'))
+        .querySelector('[data-guidebot-option-index="1"]')
+        .dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+    }"""
+    )
+    state = await page.evaluate(
+        "() => ({events: window.__events, index: document.getElementById('s').selectedIndex})"
+    )
+    assert state == {"events": [], "index": 0}
+
+
+async def test_option_index_for_normalizes_whitespace_and_falls_back_to_case_insensitive(
+    page: Page,
+) -> None:
+    await page.set_content(
+        "<body style='margin:0'><select id='s' style='width:220px'>"
+        "<option>Pierwszy</option>"
+        "<option>  Drugi\n   wybór </option>"
+        "<option>Trzeci</option>"
+        "</select></body>"
+    )
+    await _inject(page)
+    found = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      return [
+        api.optionIndexFor(s, 'Drugi wybór'),
+        api.optionIndexFor(s, '   Drugi    wybór  '),
+        api.optionIndexFor(s, 'drugi WYBÓR'),
+        api.optionIndexFor(s, 'Pierwszy'),
+        api.optionIndexFor(s, 'Nie ma takiej'),
+      ];
+    }"""
+    )
+    assert found == [1, 1, 1, 0, -1]
+
+
+async def test_scroll_option_into_view_brings_a_far_row_into_the_list_box(page: Page) -> None:
+    labels = [f"Opcja {i}" for i in range(40)]
+    await page.set_content(
+        f"<body style='margin:0'><select id='s' style='width:220px'>{_options(labels)}</select></body>"
+    )
+    await _inject(page)
+    state = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      api.open(s);
+      const list = api.listFor(s);
+      const before = list.scrollTop;
+      api.scrollOptionIntoView(s, 35);
+      const row = list.querySelector('[data-guidebot-option-index="35"]');
+      const lr = list.getBoundingClientRect();
+      const rr = row.getBoundingClientRect();
+      return {before: before, after: list.scrollTop,
+              inside: rr.top >= lr.top - 1 && rr.bottom <= lr.bottom + 1};
+    }"""
+    )
+    assert state["before"] == 0
+    assert state["after"] > 0
+    assert state["inside"] is True
+
+
+async def test_close_hides_the_list_and_open_is_idempotent(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    states = await page.evaluate(
+        """() => {
+      const s = document.getElementById('s');
+      const api = window.__guidebot_selects;
+      const list = api.listFor(s);
+      const read = () => getComputedStyle(list).display;
+      const out = [read()];
+      api.open(s); out.push(read());
+      api.open(s); out.push(read());
+      api.close(s); out.push(read());
+      api.close(s); out.push(read());
+      return out;
+    }"""
+    )
+    assert states == ["none", "block", "block", "none", "none"]
+
+
+async def test_native_mode_installs_no_shim_but_still_resolves_ready(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page, {"mode": "native"})
+    state = await page.evaluate(
+        """() => ({
+      overlays: document.querySelectorAll(
+        '[data-guidebot-select-button],[data-guidebot-select-list]').length,
+      isShimmed: window.__guidebot_selects.isShimmed(document.getElementById('s')),
+      marker: document.getElementById('s').hasAttribute('data-guidebot-shimmed'),
+    })"""
+    )
+    assert state == {"overlays": 0, "isShimmed": False, "marker": False}
+
+
+async def test_script_bails_out_in_the_shell_document(page: Page) -> None:
+    """The shell holds no page content; shimming there would be nonsense."""
+
+    async def handler(route: Route) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<html><body><select id='s' style='width:200px'>"
+            "<option>a</option><option>b</option></select></body></html>",
+        )
+
+    await page.route("https://guidebot.shell/**", handler)
+    await page.goto("https://guidebot.shell/")
+    assert await page.evaluate("() => window.location.origin") == "https://guidebot.shell"
+    await page.evaluate('window.__guidebot_selects_config = {"settleMs": 20};')
+    await page.evaluate(SELECTS_JS)
+    assert await page.evaluate("() => window.__guidebot_selects === undefined")
+    await page.wait_for_timeout(200)
+    assert (
+        await page.evaluate(
+            "() => document.querySelectorAll("
+            "'[data-guidebot-select-button],[data-guidebot-select-list]').length"
+        )
+        == 0
+    )
+
+
+async def test_reinjection_does_not_duplicate_overlays(page: Page) -> None:
+    """add_init_script + an explicit evaluate must not stack two shims."""
+    await page.set_content(NESTED)
+    await _inject(page)
+    await page.evaluate(SELECTS_JS)
+    await page.evaluate("window.__guidebot_selects.ready")
+    await page.wait_for_timeout(120)
+    counts = await page.evaluate(
+        """() => ({
+      buttons: document.querySelectorAll('[data-guidebot-select-button]').length,
+      lists: document.querySelectorAll('[data-guidebot-select-list]').length,
+    })"""
+    )
+    assert counts == {"buttons": 1, "lists": 1}
+
+
+async def test_the_observer_does_not_react_to_the_shims_own_mutations(page: Page) -> None:
+    """The overlay writes styles every frame; that must not re-arm the debounce.
+
+    A feedback loop here would re-classify (and churn shims) forever, burning
+    CPU during every render.
+    """
+    await page.set_content(NESTED)
+    await _inject(page)
+    first = await page.get_attribute("#s", "data-guidebot-shimmed")
+    await page.evaluate("() => window.__guidebot_selects.open(document.getElementById('s'))")
+    await page.wait_for_timeout(400)
+    second = await page.get_attribute("#s", "data-guidebot-shimmed")
+    assert second == first, "the shim was torn down and rebuilt by its own mutations"
+    counts = await page.evaluate(
+        """() => ({
+      buttons: document.querySelectorAll('[data-guidebot-select-button]').length,
+      lists: document.querySelectorAll('[data-guidebot-select-list]').length,
+    })"""
+    )
+    assert counts == {"buttons": 1, "lists": 1}
+
+
+async def test_button_shows_the_selected_label_and_follows_external_changes(page: Page) -> None:
+    await page.set_content(NESTED)
+    await _inject(page)
+    first = await page.evaluate(
+        "() => window.__guidebot_selects.buttonFor(document.getElementById('s')).textContent.trim()"
+    )
+    assert first == "Mazowieckie"
+    await page.evaluate("() => { document.getElementById('s').selectedIndex = 2; }")
+    await page.evaluate(
+        "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
+    )
+    second = await page.evaluate(
+        "() => window.__guidebot_selects.buttonFor(document.getElementById('s')).textContent.trim()"
+    )
+    assert second == "Śląskie"
