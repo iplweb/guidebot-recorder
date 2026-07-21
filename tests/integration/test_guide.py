@@ -213,7 +213,7 @@ async def test_guide_handles_select_and_scroll(tmp_path):
     covered separately by `test_guide_select_actually_executes_and_unlocks_next_step`
     (a dependent later step only succeeds if the choice really changed the
     page) and by `test_capture_pages_executes_select_and_scroll_on_the_live_page`
-    (asserts the live `<select>` value and the page's `selected` annotation
+    (asserts the live `<select>` value and the page's `frame` annotation
     directly).
     """
 
@@ -309,7 +309,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
       `select` never called `locator.select_option`, so it would still be the
       HTML default, `"month"`, not `"all"`);
     - the `GuidePage` produced for the `select` step is a `kind == "step"`
-      page with a non-empty `screenshot` and a `selected` annotation (pre-fix,
+      page with a non-empty `screenshot` and a `frame` annotation (pre-fix,
       an unresolved `select` fell through `classify()`'s fallback into
       `kind == "text"` with `screenshot=None` and no annotations at all).
     """
@@ -369,7 +369,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
     select_page = pages[1]
     assert select_page.kind == "step"
     assert select_page.screenshot is not None
-    assert any(annotation.kind == "selected" for annotation in select_page.annotations)
+    assert any(annotation.kind == "frame" for annotation in select_page.annotations)
 
 
 async def test_option_that_vanished_after_compile_fails_as_a_sentence_not_a_timeout(tmp_path):

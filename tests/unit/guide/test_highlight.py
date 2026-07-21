@@ -53,6 +53,27 @@ def test_annotation_keeps_the_usual_arrow_from_the_previous_cursor():
     assert [a.kind for a in anns] == ["arrow", "highlight"]
 
 
+def test_the_arrow_is_clipped_to_the_ellipse_not_to_the_box():
+    """Elipsa jest wyższa niż pudełko, więc grot zatrzymuje się nad nim, nie na jego krawędzi."""
+
+    anns = annotations_for(
+        "highlight",
+        prev_cursor=(10.0, 10.0),
+        center=(200.0, 220.0),
+        box=BOX,
+        mark=MARK,
+        bounds=FRAME,
+    )
+
+    arrow = next(a for a in anns if a.kind == "arrow")
+    ellipse = next(a for a in anns if a.kind == "highlight")
+    on_rim = ((arrow.x2 - ellipse.cx) / ellipse.rx) ** 2 + (
+        (arrow.y2 - ellipse.cy) / ellipse.ry
+    ) ** 2
+    assert on_rim == pytest.approx(1.0)
+    assert arrow.y2 < BOX["y"]  # nad pudełkiem, więc nie przycięto do prostokąta
+
+
 def test_no_geometry_means_no_marks_at_all():
     anns = annotations_for(
         "highlight", prev_cursor=(10.0, 10.0), center=None, box=None, mark=MARK, bounds=FRAME

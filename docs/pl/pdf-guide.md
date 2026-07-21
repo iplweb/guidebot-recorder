@@ -2,8 +2,8 @@
 
 Guidebot potrafi wyrenderować skompilowany scenariusz jako krajobrazowy przewodnik PDF — jeden
 anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża kadr w momencie
-zakończenia interaktywnego kroku i nakłada na niego adnotacje: ruchy kursora, cel kliknięcia
-i wpisany tekst.
+zakończenia interaktywnego kroku i nakłada na niego adnotacje: strzałkę ruchu kursora, ramkę
+wokół celu akcji, gwiazdkę w miejscu kliknięcia i elipsę zakreślenia.
 
 Ta funkcja nie wymaga LLM ani dodatkowych zależności poza skompilowanym sidecarem.
 
@@ -38,10 +38,13 @@ Jeden przewodnik PDF zawiera jedną lub więcej stron:
 
 Zrzuty ekranu są nakładane adnotacjami:
 
-- **Strzałka** (linia zakrzywiona) — Ruch kursora z punktu A do punktu B.
-- **Czerwone koło** — Cel kliknięcia myszy.
-- **Czerwona ramka** — Tekst wpisany do pola (z `enterText` lub literalnym `teach` pisaniem).
-- **Glow** (miękki halo) — Stan hover na elemencie.
+- **Strzałka** (prosty odcinek) — Ruch kursora z poprzedniego celu do obecnego. Biegnie
+  między ramkami, a nie przez ich środki. Gdy cele nachodzą na siebie albo dzieli je mniej
+  niż 12 px, strzałki nie ma wcale.
+- **Czerwona ramka** — Cel akcji: kliknięcia, wpisania tekstu, najechania lub wyboru
+  z listy.
+- **Gwiazdka** — Miejsce kliknięcia myszą: ośmioramienna gwiazdka wokół kursora,
+  z przerwą w środku, żeby sam kursor pozostał widoczny.
 - **Elipsa** — Zakreślenie z kroku `highlight`, w kolorze ustawionym w scenariuszu.
   Zamiast okrężnego ruchu kursora, który widać w filmie, przewodnik pokazuje samą
   gotową elipsę wokół wskazanego elementu lub obszaru.

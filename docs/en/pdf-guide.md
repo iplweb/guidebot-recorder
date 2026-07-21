@@ -2,7 +2,8 @@
 
 Guidebot can render a compiled scenario as a landscape PDF guide — one annotated step per page,
 side-by-side with narration text. Each guide page freezes the frame at the moment an interactive
-step completes and overlays it with visual annotations of the cursor movement, click target, and text input.
+step completes and overlays it with visual annotations: an arrow for the cursor movement, a frame
+around the action's target, a star where the mouse clicks, and the `highlight` ellipse.
 
 This feature is LLM-free and requires no additional dependencies beyond the compiled sidecar.
 
@@ -36,10 +37,12 @@ A single PDF guide contains one or more pages:
 
 Screenshots are overlaid with visual markers:
 
-- **Arrow** (curved line) — Cursor movement from point A to point B.
-- **Red circle** — Mouse click target.
-- **Red frame** — Text entered into a field (from `enterText` or literal `teach` typing).
-- **Glow** (soft halo) — Hover state on an element.
+- **Arrow** (straight segment) — Cursor movement from the previous target to the current
+  one. It runs between the frames, not through their centres. When the targets overlap or
+  sit less than 12 px apart, no arrow is drawn at all.
+- **Red frame** — The action's target: a click, text entry, hover, or a pick from a list.
+- **Star** — Where the mouse clicks: an eight-pointed star around the cursor, with a gap
+  in the middle so the cursor itself stays visible.
 - **Ellipse** — A `highlight` step's mark, in the colour the scenario chose. Instead of
   the circling cursor the film shows, the guide draws the finished ellipse around the
   control or area being pointed at.

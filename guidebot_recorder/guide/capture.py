@@ -11,7 +11,8 @@ from playwright.async_api import Page
 from tqdm import tqdm
 
 from guidebot_recorder.diagnostics import step_banner
-from guidebot_recorder.guide.annotate import annotations_for
+from guidebot_recorder.guide.annotate import annotations_for, target_shape
+from guidebot_recorder.guide.geometry import Shape
 from guidebot_recorder.guide.model import GuidePage, page_text
 from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
@@ -88,6 +89,10 @@ async def capture_pages(
     actions = compiled.actions
     pages: list[GuidePage] = []
     prev_cursor: tuple[float, float] | None = None
+    # The shape the cursor left, so the next arrow starts at that target's rim
+    # instead of its centre. Reset wherever `prev_cursor` is: a shape from a page
+    # the reader no longer sees would clip the next arrow against nothing.
+    prev_shape: Shape | None = None
     skipped_branch: int | None = None
 
     def banner(entry: FlatStep, entry_index: int, message: str) -> str:
@@ -159,6 +164,7 @@ async def capture_pages(
                     )
                 )
                 prev_cursor = None
+                prev_shape = None
                 continue
 
             if kind == "slide":
@@ -189,6 +195,7 @@ async def capture_pages(
             if kind == "scroll":
                 await recorder.scroll(step.scroll_config())
                 prev_cursor = None
+                prev_shape = None
                 text = page_text(step)
                 if not text:
                     continue
@@ -310,6 +317,7 @@ async def capture_pages(
                     annotations=annotations_for(
                         act,
                         prev_cursor=prev_cursor,
+                        prev_shape=prev_shape,
                         center=res.center,
                         box=res.box,
                         mark=mark,
@@ -319,6 +327,11 @@ async def capture_pages(
                 )
             )
             prev_cursor = res.center
+            # After the page is built, never before: `annotations_for` above needs
+            # the *previous* target's shape, and this line overwrites it.
+            prev_shape = target_shape(
+                act, box=res.box, mark=mark, bounds=(float(size[0]), float(size[1]))
+            )
         except Exception as exc:
             if pause_on_error:
                 await pause_for_inspection(
