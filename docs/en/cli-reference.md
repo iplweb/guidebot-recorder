@@ -181,7 +181,7 @@ and `when` gates produce no output; a missing conditional element causes its who
 to be skipped.
 
 Use `caption:` on a step to override the PDF text (falls back to `say` or `teach` if
-omitted). See [Building step-by-step PDF guides](../concepts/pdf-guide.md) for the full
+omitted). See [Building step-by-step PDF guides](pdf-guide.md) for the full
 explanation, limitations (single language, no pop-ups, no multi-step grouping), and
 annotation legend.
 

@@ -123,7 +123,7 @@ warunkującego powoduje, że całą gałąź jest pomijana.
 
 Użyj `caption:` na kroku, aby nadpisać tekst PDF (wraca do `say` lub `teach` gdy
 pominięty). Pełne wyjaśnienie, ograniczenia (jeden język, brak popupów, brak grupowania)
-i legenda adnotacji znajdują się w [Tworzeniu przewodników PDF krok po kroku](../concepts/pdf-guide.md).
+i legenda adnotacji znajdują się w [Tworzeniu przewodników PDF krok po kroku](pdf-guide.md).
 
 ## `guidebot render-set`
 
