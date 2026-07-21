@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from guidebot_recorder.models.action import Expect, WaitState
+from guidebot_recorder.models.action import WaitState
 from guidebot_recorder.models.config import Config, HighlightConfig
 
 if TYPE_CHECKING:  # tylko dla typów — import w runtime zapętliłby się przez `scenario/__init__`
@@ -230,7 +230,6 @@ class Step(BaseModel):
     #: close the active window and return to the one that opened it; `Literal[True]`
     #: so that `closeWindow: false` is a validation error rather than a silent no-op
     close_window: Literal[True] | None = Field(default=None, alias="closeWindow")
-    expect: Expect | None = None
     #: tolerate an absent element instead of failing the run (single-step shorthand)
     optional: bool = False
     translations: dict[str, str] = Field(default_factory=dict)
@@ -247,6 +246,33 @@ class Step(BaseModel):
         """
 
         return {"what": value} if isinstance(value, str) else value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_authored_expect(cls, data: Any) -> Any:
+        """``expect:`` looks like an authoring control but nothing ever reads it here.
+
+        Readiness (`navigation`/`idle`/`none`) is derived at compile time by
+        ``heuristic_expect(url_before, url_after)`` from what the action was
+        *observed* to do, and that result — not anything an author writes — is
+        what gets frozen into the compiled sidecar's ``CachedAction``/
+        ``Fingerprint`` (the only real ``.expect`` reads in the package). A
+        ``Step.expect`` field used to accept the key and silently discard it;
+        rejecting it here (rather than just deleting the field and letting
+        ``extra="forbid"`` produce a generic "extra inputs" error) lets the
+        message explain *why* the key is pointless and what to delete, the same
+        way ``close_window``'s ``Literal[True]`` turns ``closeWindow: false``
+        into a loud error instead of a silent no-op.
+        """
+
+        if isinstance(data, Mapping) and "expect" in data:
+            raise ValueError(
+                "`expect:` na kroku nic nie robi — gotowość (navigation/idle/none) "
+                "wylicza kompilator z obserwacji tego, co akcja faktycznie zrobiła "
+                "(zmiana URL), i zapisuje wynik w sidecarze (*.compiled.yaml); "
+                "usuń `expect` z tego kroku — bez niego zachowanie się nie zmieni"
+            )
+        return data
 
     @model_validator(mode="after")
     def _exactly_one_command(self) -> Step:
