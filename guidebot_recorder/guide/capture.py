@@ -90,8 +90,9 @@ async def capture_pages(
     pages: list[GuidePage] = []
     prev_cursor: tuple[float, float] | None = None
     # The shape the cursor left, so the next arrow starts at that target's rim
-    # instead of its centre. Reset wherever `prev_cursor` is: a shape from a page
-    # the reader no longer sees would clip the next arrow against nothing.
+    # instead of its centre. Cleared together with `prev_cursor` (the arrow is
+    # gated on the cursor, so this only keeps the pair from ever describing two
+    # different pages).
     prev_shape: Shape | None = None
     skipped_branch: int | None = None
 

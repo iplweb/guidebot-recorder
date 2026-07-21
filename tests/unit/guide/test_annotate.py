@@ -106,7 +106,13 @@ def test_overlapping_targets_get_no_arrow():
 
 @pytest.mark.parametrize("action", ["click", "type", "hover", "select"])
 def test_target_shape_is_the_box_of_a_targeted_action(action):
-    assert target_shape(action, box=BOX) == Rect(10.0, 20.0, 100.0, 40.0)
+    shape = target_shape(action, box=BOX)
+
+    assert shape == Rect(10.0, 20.0, 100.0, 40.0)
+    # `Rect` and `Ellipse` are both 4-field NamedTuples, so `Rect(a,b,c,d) ==
+    # Ellipse(a,b,c,d)` is `True` — the `==` above cannot tell them apart, yet the
+    # production dispatches on `isinstance`. Pin the actual type.
+    assert isinstance(shape, Rect)
 
 
 def test_target_shape_of_a_highlight_is_its_fitted_ellipse():

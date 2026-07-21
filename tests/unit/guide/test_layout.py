@@ -56,6 +56,16 @@ def test_frame_annotation_renders_rounded_rect():
     assert '<rect class="rect"' not in html
 
 
+def test_stylesheet_defines_the_star_and_frame_rules():
+    # A `<line>`/`<rect>` with no `stroke` is invisible: the arms and frames get
+    # their red stroke only from the `.star` / `.frame` CSS rules. Rename either
+    # class in the stylesheet and every PDF silently loses its stars or frames,
+    # with the whole suite still green — so pin the rules by name here.
+    html = render_html([_shot_page([])], title="x")
+    assert ".star {" in html
+    assert ".frame {" in html
+
+
 def test_text_page_has_no_svg():
     pages = [
         GuidePage(kind="text", screenshot=None, text="tylko tekst", heading=None, annotations=[])

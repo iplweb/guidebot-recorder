@@ -8,6 +8,7 @@ from guidebot_recorder.guide.model import Annotation
 from guidebot_recorder.guide.prolog import classify, scan_for_blockers
 from guidebot_recorder.models.config import HighlightConfig
 from guidebot_recorder.models.scenario import FlatStep, Highlight, Step
+from guidebot_recorder.overlay.geometry import ellipse_around, fit_to_bounds
 
 BOX = {"x": 100.0, "y": 200.0, "width": 200.0, "height": 40.0}
 MARK = Highlight(what="tabela").resolved(HighlightConfig(padding=8, color="#22c55e"))
@@ -92,6 +93,41 @@ def test_ellipse_is_kept_inside_the_screenshot():
     ellipse = anns[0]
     assert ellipse.cx - ellipse.rx >= 0.0
     assert ellipse.cx + ellipse.rx <= FRAME[0]
+
+
+def test_arrow_runs_to_the_box_centre_when_it_falls_outside_the_fitted_ellipse():
+    """Świadomie zaakceptowany przypadek brzegowy, nie ideał.
+
+    Gdy `fit_to_bounds` zepchnie elipsę tak, że środek pudełka celu wypada POZA
+    nią (mały cel w rogu kadru), `ray_exit` zwraca `origin` — „nie jestem
+    wewnątrz" — więc grot NIE jest przycinany i strzałka dobiega aż do środka
+    pudełka, przebijając elipsę. To obecne, celowo przypięte zachowanie: test
+    dokumentuje ten kompromis, żeby jego zmiana była świadoma, nie przypadkowa.
+    """
+
+    corner_box = {"x": 0.0, "y": 0.0, "width": 20.0, "height": 20.0}
+    box_center = (10.0, 10.0)  # = środek `corner_box`
+
+    # Elipsa zostaje odepchnięta od rogu przez margines `fit_to_bounds`, aż środek
+    # pudełka ląduje poza nią — potwierdzamy to wprost równaniem elipsy (> 1).
+    fitted = fit_to_bounds(
+        ellipse_around(corner_box, MARK.padding), width=FRAME[0], height=FRAME[1]
+    )
+    u = (box_center[0] - fitted.cx) / fitted.rx
+    v = (box_center[1] - fitted.cy) / fitted.ry
+    assert u * u + v * v > 1.0  # środek pudełka naprawdę leży poza dopasowaną elipsą
+
+    anns = annotations_for(
+        "highlight",
+        prev_cursor=(600.0, 400.0),
+        center=box_center,
+        box=corner_box,
+        mark=MARK,
+        bounds=FRAME,
+    )
+
+    arrow = next(a for a in anns if a.kind == "arrow")
+    assert (arrow.x2, arrow.y2) == pytest.approx(box_center)  # brak przycięcia do elipsy
 
 
 def test_svg_draws_the_ellipse_in_its_own_colour():

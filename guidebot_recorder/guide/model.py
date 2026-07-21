@@ -19,7 +19,7 @@ class Annotation:
     y1: float | None = None
     x2: float | None = None
     y2: float | None = None
-    # click: eight-armed star around the cursor; each arm spans r_inner..r_outer
+    # click: eight-armed star around the target centre; each arm spans r_inner..r_outer
     cx: float | None = None
     cy: float | None = None
     r_inner: float | None = None
