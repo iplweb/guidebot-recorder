@@ -59,6 +59,7 @@ from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
     TargetAbsent,
+    compiled_from,
     heuristic_expect,
     resolve_step_target,
     step_state,
@@ -530,7 +531,7 @@ def _pending_for(step: Step, chash: str) -> PendingAction:
     return PendingAction(
         fingerprint=Fingerprint(
             command_kind=step.command_kind(),
-            compiled_from=_instruction(step),
+            compiled_from=compiled_from(step),
             expect="none",
             config_hash=chash,
             state=step_state(step),
@@ -550,7 +551,7 @@ def _fingerprint_matches(fp: Fingerprint, step: Step, chash: str) -> bool:
     return (
         fp.compiler_version == COMPILER_VERSION
         and fp.command_kind == step.command_kind()
-        and fp.compiled_from == _instruction(step)
+        and fp.compiled_from == compiled_from(step)
         and fp.config_hash == chash
         and fp.state == step_state(step)
     )
@@ -780,7 +781,7 @@ async def _compile_step(
             input_text=input_text,
             fingerprint=Fingerprint(
                 command_kind=kind,
-                compiled_from=_instruction(step),
+                compiled_from=compiled_from(step),
                 expect=expect,
                 config_hash=chash,
                 state=state,

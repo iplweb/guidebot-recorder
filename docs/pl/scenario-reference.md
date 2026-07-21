@@ -402,8 +402,8 @@ selects:
 
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
-| `mode` | `shim` | Globalna furtka. `shim` zamienia surowe `<select>` na nakładkę DOM, więc ich listy są widoczne na filmie; `native` wraca wszędzie do zwiniętej kontrolki — kursor nadal do niej dojeżdża i klika, ale lista nigdy się nie rozwija, a wartość zmienia się od razu. Furtka na poziomie kroku `select.mode` nadpisuje to dla jednej kontrolki. |
-| `settleMs` | `1000` | Milisekundy odczekiwane po załadowaniu strony, zanim każdy `<select>` zostanie sklasyfikowany jako surowy albo już ulepszony przez stronę. Daje własnej inicjalizacji strony (select2/Tom Select/Chosen) czas na ukrycie lub podmianę oryginalnej kontrolki, zanim nakładka zdecyduje, czy jej dotknąć. |
+| `mode` | `shim` | Globalna furtka. `shim` zamienia surowe `<select>` na nakładkę DOM, więc ich listy są widoczne na filmie; `native` wraca wszędzie do zwiniętej kontrolki — kursor nadal do niej dojeżdża i klika, ale lista nigdy się nie rozwija, a wartość zmienia się od razu. Furtka na poziomie kroku `select.mode: native` wyłącza nakładkę dla jednej kontrolki przy globalnym `shim`; odwrotnie się nie da, bo `native` nie wstrzykuje żadnego skryptu nakładki, do którego krok mógłby wrócić — taki krok zostaje odrzucony przy wczytywaniu scenariusza. |
+| `settleMs` | `1000` | Milisekundy odczekiwane po załadowaniu strony, zanim każdy `<select>` zostanie sklasyfikowany jako surowy albo już ulepszony przez stronę. Daje własnej inicjalizacji strony (select2/Tom Select/Chosen) czas na ukrycie lub podmianę oryginalnej kontrolki, zanim nakładka zdecyduje, czy jej dotknąć. `0` wyłącza to okno — sensowne tylko na stronie, która niczego nie ulepsza i gdzie czekanie nic nie daje. |
 | `maxVisibleOptions` | `8` | Liczba opcji widocznych naraz w rozwiniętej liście, zanim zacznie się przewijać wewnętrznie. |
 | `openHoldMs` | `350` | Milisekundy, przez które rozwinięta lista pozostaje otwarta, żeby widz zdążył ją przeczytać, zanim kursor ruszy do wybranej opcji. |
 
@@ -518,12 +518,26 @@ Jak zawsze przy `select`, wybierana jest **jedna** opcja: kliknięcie odznacza
 wszystkie pozostałe, dokładnie tak samo jak bezpośrednie ustawienie wartości. Nie
 da się wybrać wielu opcji w jednym kroku.
 
+`option` porównywane jest z widoczną etykietą opcji po zwinięciu białych znaków, a
+dalej **z uwzględnieniem wielkości liter** — ta sama reguła dla każdego kształtu
+kontrolki, więc jeden scenariusz nie rozwiąże się inaczej na selekcie z nakładką,
+a inaczej na widżecie, który strona ulepszyła sama.
+
 Jeśli nie ma czego kliknąć — brak widocznej kontrolki powiązanej z już ulepszonym
 selectem, select widoczny, ale bez listy opcji, którą Guidebot potrafiłby otworzyć,
-albo brak wiersza pasującego do `option` po otwarciu listy — przebieg kończy się
-**błędem**, zamiast po cichu ustawić wartość. Komunikat błędu mówi, o którą z tych
-sytuacji chodzi. `compile` sprawdza też z góry, czy ulepszony widżet da się
+brak nakładki w tym kontekście w ogóle, albo brak wiersza pasującego do `option` po
+otwarciu listy — przebieg kończy się **błędem**, zamiast po cichu ustawić wartość.
+Komunikat błędu mówi, o którą z tych sytuacji chodzi, i nazywa klasę markerową, jeśli
+to ona jest przyczyną. `compile` sprawdza też z góry, czy ulepszony widżet da się
 sterować, więc niesterowalny widżet wychodzi na jaw tam, a nie w połowie renderu.
+
+**Kliknięcie, które w nic nie trafiło, też kończy się błędem.** Po kliknięciu
+wiersza Guidebot odczytuje `<select>` z powrotem i sprawdza, czy naprawdę pokazuje
+`option`; jeśli nie — krok kończy się błędem, a nie sukcesem. Dotyczy to sytuacji,
+w których wiersz *jest* i kliknięcie go nic nie daje: opcja `disabled` albo widżet,
+któremu towarzyszy „toast" lub obszar live powtarzający tę samą etykietę. Bez tego
+odczytu taki przebieg kończyłby się na zielono i dawał film, na którym lista
+widocznie się nie zmienia.
 
 Dla widżetu, którego nakładka naprawdę nie potrafi obsłużyć — np. listy
 doszukującej opcje przez sieć w miarę pisania — użyj furtki na poziomie kroku,
@@ -544,6 +558,13 @@ w DOM:
     mode: native          # opcjonalne; domyślnie config.selects.mode
 ```
 
+Nadpisanie działa **w jedną stronę**. `config.selects.mode: native` nie jest
+wartością domyślną, którą krok mógłby nadpisać w drugą stronę: decyduje o tym, czy
+skrypt nakładki w ogóle trafia do przeglądarki, więc pod nim nie ma nakładki, do
+której krok mógłby wrócić. Krok proszący o `mode: shim` przy globalnym `native`
+zostaje odrzucony już przy wczytywaniu scenariusza, z podaniem numeru kroku — zamiast
+sypać się kilka minut w render, gdy kursor kliknął już na filmie coś niezwiązanego.
+
 ### `scroll`
 
 ```yaml
@@ -559,8 +580,10 @@ podobnie jak liczbowy `wait`. `to` przyjmuje `up`, `down`, `top` lub `bottom`; s
 większość wysokości okna.
 
 Służy do wprowadzenia w kadr treści spod „linii zgięcia" — zwłaszcza treści, których
-resolver **nie** potrafi wskazać, jak podgląd w `<iframe>` czy lista opcji natywnego
-selecta. Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
+resolver **nie** potrafi wskazać, jak podgląd w `<iframe>`. (Lista opcji natywnego
+selecta należała kiedyś do tej wyliczanki, ale już nie: nakładka rysuje ją w DOM-ie,
+więc `select` steruje nią bezpośrednio.)
+Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
 nakładką (render) przewijanie jest animowane; podczas `compile` skacze wprost. Ponieważ
 nie rozwiązuje żadnego elementu, `scroll` nie wymaga `compile` i nie przyjmuje `optional`.
 

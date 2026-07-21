@@ -310,8 +310,27 @@ drives.
 cosmetic chrome fields (`config.py:381-385`). This is safe only because identity
 is ancestry-stable; it would not be under a wrapper design.
 
-The per-step `mode` rides in the step, not the config, and therefore enters the
-fingerprint through `compiled_from` like any other step content.
+The per-step `mode` rides in the step, not the config, and enters the fingerprint
+through `compiled_from` — but through a `compiled_from()` of its own
+(`resolver/resolution.py`), not through `step_instruction`. The two used to be one
+function, which is why this claim was false for a while: both fingerprint builders
+returned `select.from_` alone, so deleting `mode: native` from a step left
+`compile_up_to_date()` true — no browser opened, and the drivability probe below
+never ran. They cannot simply be merged either: `step_instruction` is the prompt
+the Reasoner resolves against, and folding a YAML keyword into it would put
+`mode: native` in front of the LLM as part of the author's description of the
+control. So `compiled_from()` is `step_instruction()` plus a ` [mode: …]` suffix,
+appended only when the step sets one — every fingerprint frozen before this
+existed therefore stays valid.
+
+The global and per-step values are **not** symmetric, and the configuration now
+rejects the combination that pretends they are. `config.selects.mode: native`
+makes `install_selects` return `None`: no widget script reaches the browser
+context at all. A step asking for `mode: shim` underneath that has nothing to opt
+into, so `Scenario` rejects it while the scenario loads, naming the step. The
+alternative — letting a global `native` inject the script anyway, inert — was
+rejected because it makes the global hatch stop meaning "this feature is off on
+this site", which is the one thing an author reaches for it to say.
 
 ### 6. One validation change
 
@@ -321,6 +340,52 @@ fingerprint through `compiled_from` like any other step content.
 Without it, `display: none` hiders (Tom Select) cannot be compiled at all.
 `_is_native_select` (`validate.py:125-128`) is unchanged: the target remains a
 real `<select>`.
+
+"The `<select>` itself" is decided by the `visible` half of the shared predicate
+of §7, never by Playwright's `is_visible()`. The two disagree on exactly the case
+this relaxation exists for: select2 leaves its original in place clipped to 1x1
+px, which Playwright calls visible and the shim calls hidden — so validation used
+to accept a control the render choreography then refused to drive, and the two
+compile-time checks contradicted each other about the same page.
+
+The predicate's `markerClass` half is deliberately *not* consulted here: it
+answers "should the shim touch this control", not "does the viewer see one". A
+full-size `<select class="select2-hidden-accessible">` is on screen and
+clickable, so it validates, and the render then tells the author to reach for
+`mode: native` — advice that would be impossible to follow if validation
+rejected the target under every mode.
+
+There is no "fall back to the shim button" step: the shim only ever takes on a
+select the predicate calls visible, so the first step always answers for a
+shimmed one, and the `<select>` is the click target on camera anyway (the button
+is `pointer-events: none`).
+
+### 7. One predicate for "already enhanced"
+
+`selects/visibility.js` holds the rule — computed `display`/`visibility`, an 8x8
+box floor, and the marker classes — as a bare `(el) => {visible, markerClass,
+enhanced}` expression, and `selects/visibility.py` is its Python accessor. Three
+consumers read it and none restates it: `selects.js`'s `isEnhanced` (through the
+`__guidebot_select_shape` global the controller prepends to the widget body), the
+recorder's `_SHIM_STATE_JS` (which embeds the source), and `user_visible_control`
+(through `select_shape`). It is shared as *source* rather than as a runtime object
+because the recorder and the validator both run where no widget was installed — a
+global `native`, a health probe, a unit-test page — and must still not disagree
+with it.
+
+`markerClass` is the class name rather than a boolean so an error message can name
+the class that actually caused the failure; deriving the wording from geometry
+alone left the author with a message that never mentioned it.
+
+`ASSOCIATED_CONTROL_JS`'s `hasBox` deliberately stays separate: it asks whether a
+*candidate widget* has any box at all, not whether a `<select>` is still the
+viewer's control, and applying an 8x8 floor there would disqualify small widgets.
+
+Label→index resolution is unified the same way and for the same reason: exact
+after whitespace collapsing, everywhere. `optionIndexFor` used to add a
+case-insensitive fallback that neither `select_option(label=…)` (compile) nor
+`_OPTION_INDEX_JS` (the listbox path) had, so one scenario resolved differently
+depending on the control's shape.
 
 ## Error handling
 
@@ -337,6 +402,27 @@ class the shim honours, `mode: native` pinned onto it, or no shim installed in
 that context). Reporting both as "the page must have enhanced this itself" is
 what made the multi-select regression unreadable, so the wording is derived from
 the select's own computed geometry, not from "the shim declined it".
+
+**A click is not evidence, so beat 2 ends by reading the select back.** Every
+on-camera path finishes at `row.click()`, and on all three of them a click can
+land and achieve nothing: a `disabled` row is rendered (at `opacity: .45`) and
+both `onListClick` and `choose` return early for it; the page-widget scan takes
+the first *newly added* node carrying the label, which a toast or live region can
+win on document order; and a page can cancel the event outright. In each case the
+value never changes and nothing raises — unlike compile's direct path, where
+`select_option` throws. So after beat 2 each path reads
+`el.selectedOptions[0].label`, normalised exactly as `optionLabel` normalises it,
+and fails naming both the option asked for and the one actually selected. Two
+narrower guards sit in front of it: a row carrying `data-guidebot-option-disabled`
+is refused before the cursor is ever sent to it, and a missing
+`window.__guidebot_select_snapshot` is a hard error rather than a wildcard match —
+without the snapshot the "appeared after the click" filter matches everything on
+the page, up to `<html>` itself.
+
+Reading it back is not a belt-and-braces nicety. Compile is skipped entirely when
+`compile_up_to_date()` holds, so a page that disables an option after the artifact
+was frozen never reaches the compile-time check at all; the render is the only
+place left that can notice.
 
 There is deliberately **no silent fallback** to `select_option()`. Falling back
 would restore precisely the invisible magic this feature exists to remove, and

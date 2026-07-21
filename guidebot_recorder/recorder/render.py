@@ -67,6 +67,7 @@ from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
     TargetAbsent,
+    compiled_from,
     heuristic_expect,
     resolve_step_target,
     step_instruction,
@@ -1726,20 +1727,18 @@ def _resolve_url(scenario: Scenario, url: str) -> str:
 
 
 def _compiled_from(step: Step) -> str:
-    kind = step.command_kind()
-    if kind == "teach":
-        return step.teach
-    if kind == "click":
-        return step.click
-    if kind == "hover":
-        return step.hover
-    if kind == "enterText":
-        return step.enter_text.into
-    if kind == "select":
-        return step.select.from_
-    if kind == "wait" and isinstance(step.wait, WaitUntil):
-        return step.wait.until
-    raise ValueError(f"krok {kind} nie wymaga cachedAction")
+    """What ``compile`` froze this step's fingerprint against.
+
+    A thin alias, deliberately not a second implementation: render's copy of
+    this rule used to be a verbatim duplicate of the compiler's, so extending
+    one side (with the per-step ``select.mode``) would have made every sidecar
+    look stale to the other.
+    """
+
+    try:
+        return compiled_from(step)
+    except ValueError as exc:
+        raise ValueError(f"krok {step.command_kind()} nie wymaga cachedAction") from exc
 
 
 def _compiled_action_is_current(
@@ -1844,7 +1843,7 @@ def _freeze_resolved(
         input_text=resolved.input_text,
         fingerprint=Fingerprint(
             command_kind=kind,
-            compiled_from=step_instruction(step),
+            compiled_from=_compiled_from(step),
             expect=expect,
             config_hash=scenario_hash,
             state=resolved.state,

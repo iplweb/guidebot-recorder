@@ -21,6 +21,7 @@ from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
 from guidebot_recorder.resolver.widget import associated_control
+from guidebot_recorder.selects.visibility import SELECT_SHAPE_JS
 
 # WaitState → the state accepted by Playwright's locator.wait_for
 _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enabled": "visible"}
@@ -52,7 +53,8 @@ class SelectDriveError(RuntimeError):
     """
 
 
-#: (el) => {installed, shimmed, listbox, hidden} — how this select is presented.
+#: (el) => {installed, shimmed, listbox, hidden, markerClass} — how this select
+#: is presented.
 #:
 #: ``installed`` distinguishes "the widget ran and decided not to shim this
 #: select" (so the page enhanced it itself, or ``mode: native`` is in force)
@@ -62,23 +64,36 @@ class SelectDriveError(RuntimeError):
 #: ``listbox`` is the shim's own non-goal, read back here: ``multiple`` and
 #: ``size > 1`` render their option list in the page already, so the shim never
 #: touches them — which is precisely why they need their own path rather than
-#: the page-widget one. ``hidden`` mirrors the geometric half of the shim's
-#: ``isEnhanced`` test, and is what tells "the page replaced this control"
-#: apart from "the control is on screen but carries no DOM list".
-_SHIM_STATE_JS = """(el) => {
+#: the page-widget one.
+#:
+#: ``hidden`` and ``markerClass`` are the two halves of the *shared* predicate
+#: (``selects/visibility.js``), embedded rather than restated: ``hidden`` tells
+#: "the page replaced this control" apart from "the control is on screen but
+#: carries no DOM list", and ``markerClass`` names the class that caused the
+#: latter, so the error message can say which one it was.
+_SHIM_STATE_JS = f"""(el) => {{
   const api = window.__guidebot_selects;
-  const computed = window.getComputedStyle(el);
-  const rect = el.getBoundingClientRect();
-  return {
+  const shape = ({SELECT_SHAPE_JS})(el);
+  return {{
     installed: !!api,
     shimmed: !!(api && api.isShimmed(el)),
     listbox: !!el.multiple || el.size > 1,
-    hidden:
-      computed.display === "none" ||
-      computed.visibility === "hidden" ||
-      rect.width < 8 ||
-      rect.height < 8,
-  };
+    hidden: !shape.visible,
+    markerClass: shape.markerClass,
+  }};
+}}"""
+
+#: (el) => string | null — the label of the option currently selected.
+#:
+#: Normalised exactly the way ``optionLabel`` normalises it in ``selects.js``,
+#: which is in turn the rule Playwright's ``select_option(label=…)`` applies:
+#: the ``label`` attribute when present, the option's text otherwise. Anything
+#: else would let the read-back disagree with the write it is verifying.
+_SELECTED_LABEL_JS = """(el) => {
+  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
+  const option = el.selectedOptions[0];
+  if (!option) return null;
+  return norm(option.label ? option.label : option.textContent);
 }"""
 
 #: (el, label) => number — index of the first ``<option>`` carrying ``label``.
@@ -135,19 +150,34 @@ _DESCRIBE_JS = """(el) => {
 #: Remember every element that existed *before* the list was opened, so the
 #: second beat can tell the page's freshly-rendered option rows from whatever
 #: already carried the same text elsewhere on the page.
+#:
+#: A ``WeakSet``, not a ``Set``: this is parked on ``window`` until the next
+#: ``select:`` step overwrites it, and a strong set of every element in the
+#: document would keep every node the page detaches in the meantime alive with
+#: it. Membership is all this is ever asked, and ``WeakSet`` answers that.
 _SNAPSHOT_JS = """() => {
-  window.__guidebot_select_snapshot = new Set(document.querySelectorAll("*"));
+  window.__guidebot_select_snapshot = new WeakSet(document.querySelectorAll("*"));
 }"""
+
+#: () => boolean — is the pre-click snapshot still on this document?
+_HAS_SNAPSHOT_JS = "() => !!window.__guidebot_select_snapshot"
 
 #: (label) => Element | null — the first *newly added* visible element whose
 #: trimmed text is exactly the option label. ``querySelectorAll`` yields
 #: document order, so the first hit is the document-order tie-break of spec §4.
+#:
+#: A missing snapshot yields ``null``, never a match. It used to be spelled
+#: ``if (seen && seen.has(node))``, which turned the "appeared after" filter
+#: into a no-op the moment beat 1 replaced the document — every node on the page
+#: then qualified, up to and including ``<html>`` itself. The caller checks for
+#: the snapshot explicitly and says so; this is the second lock on the same door.
 _APPEARED_NODE_JS = """(label) => {
   const seen = window.__guidebot_select_snapshot;
+  if (!seen) return null;
   const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
   const wanted = norm(label);
   for (const node of document.querySelectorAll("*")) {
-    if (seen && seen.has(node)) continue;
+    if (seen.has(node)) continue;
     if (norm(node.textContent) !== wanted) continue;
     const rect = node.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
@@ -386,13 +416,21 @@ class Recorder:
     ) -> SelectDriveError:
         """Name the situation the select is actually in, not just the empty result.
 
-        Two different pages end up here and they need different fixes, so the
-        message must not collapse them. Either the page hid the ``<select>`` and
-        the association heuristic found nothing standing in for it (a widget
-        library that failed to initialise, or one whose control loads over the
-        network), or the select is on screen but carries no DOM option list of
-        ours (a marker class the shim honours, ``mode: native`` pinned onto it,
-        or no shim installed in this context at all).
+        Three different pages end up here and they need three different fixes,
+        so the message must not collapse them:
+
+        * the page hid the ``<select>`` and the association heuristic found
+          nothing standing in for it — a widget library that failed to
+          initialise, or one whose control loads over the network;
+        * the select is on screen and there is no shim layer in this context at
+          all, which is ``config.selects.mode: native`` (or a bare context such
+          as a health probe). Nothing is going to unfurl, ever;
+        * the select is on screen, the shim ran, and it declined this one —
+          a marker class it honours, or ``mode: native`` pinned onto it.
+
+        The middle case used to be unreachable: the caller sent it into the
+        association heuristic, which always finds *something*, so the run
+        clicked an unrelated sibling on camera and then blamed the option.
         """
 
         tail = f'nie da się pokazać na filmie wyboru opcji „{option}"'
@@ -402,9 +440,23 @@ class Recorder:
                 f"strona ukryła {described} i nie znaleziono widocznej kontrolki, "
                 f"która ją zastępuje — {tail}"
             )
+        if not state["installed"]:
+            return SelectDriveError(
+                f"{described} jest widoczna, ale w tym kontekście nie zainstalowano "
+                f"nakładki select, więc nie ma czego rozwinąć — {tail}. Najczęstsza "
+                f"przyczyna to `config.selects.mode: native` (wtedy skrypt nakładki "
+                f"w ogóle nie jest wstrzykiwany) — użyj `config.selects.mode: shim` "
+                f"albo `mode: native` na tym kroku"
+            )
+        marker = state["markerClass"]
+        cause = (
+            f"nakładka pominęła ją z powodu klasy `{marker}`"
+            if marker
+            else "nakładka jej nie objęła"
+        )
         return SelectDriveError(
-            f"{described} jest widoczna, ale nie ma listy opcji w DOM — nakładka jej "
-            f"nie objęła, a listę natywnego selecta rysuje system operacyjny; {tail} "
+            f"{described} jest widoczna, ale nie ma listy opcji w DOM — {cause}, "
+            f"a listę natywnego selecta rysuje system operacyjny; {tail} "
             f"(użyj `mode: native`, jeśli sam wybór wystarczy)"
         )
 
@@ -412,6 +464,36 @@ class Recorder:
         return SelectDriveError(
             f"po rozwinięciu {await self._describe(locator)} nie pojawiła się "
             f'opcja „{option}" (limit {OPTION_WAIT_MS} ms)'
+        )
+
+    async def _confirm_selected(self, locator: Locator, option: str) -> None:
+        """Read the select back after the click, and fail if it did not take.
+
+        The whole branch exists so a run that would produce an unwatchable video
+        fails loudly rather than succeeding quietly. Every on-camera path ends
+        at ``row.click()``, and a click is not evidence: a disabled row refuses
+        it, a page widget can hand back a decoy node carrying the same label, and
+        a page can cancel the event outright. In all three the value never
+        changes and there is no exception anywhere to notice — unlike compile's
+        direct path, where ``select_option`` throws.
+
+        So the last thing every path does is ask the ``<select>`` what it is
+        actually showing. That is the only observation that means the step is
+        watchable.
+        """
+
+        # ``" ".join(split())`` is the Python spelling of the page's own
+        # ``replace(/\s+/g, " ").trim()``, so the two sides of the comparison
+        # are normalised by the same rule.
+        actual = await locator.evaluate(_SELECTED_LABEL_JS)
+        if actual == " ".join(option.split()):
+            return
+        described = await self._describe(locator)
+        shown = f'„{actual}"' if actual is not None else "nic"
+        raise SelectDriveError(
+            f'kliknięcie opcji „{option}" w {described} nie zmieniło wyboru — '
+            f"wybrane jest {shown}. Opcja mogła być wyłączona (`disabled`), "
+            f"albo kursor trafił w element, który tylko powtarza tę etykietę"
         )
 
     async def _probe_drivable(self, locator: Locator, option: str) -> None:
@@ -467,6 +549,7 @@ class Recorder:
         row = locator.locator("option").nth(index)
         await self._approach(row, click_sound=True)
         await row.click()
+        await self._confirm_selected(locator, option)
 
     async def _select_in_two_beats(self, locator: Locator, state: dict, option: str) -> None:
         """Open the list, then click the option — both with the cursor visible."""
@@ -476,6 +559,13 @@ class Recorder:
             # The shim button is ``pointer-events: none``, so the <select> is the
             # hit target; its mousedown handler is what unfurls the DOM list.
             control = locator
+        elif not state["installed"] and not state["hidden"]:
+            # A visible select in a context with no shim layer. "Not shimmed" is
+            # not evidence of a page widget here — there is nothing that *could*
+            # have shimmed it. Sending this to the association heuristic makes it
+            # click whatever sits next to the select, on camera, and then blame
+            # the option for not appearing.
+            raise await self._no_control_error(locator, option, state)
         else:
             control = await self._page_widget(locator, state, option)
         # Beat 2 of the page-widget path recognises the option rows by "appeared
@@ -490,6 +580,7 @@ class Recorder:
             await self._click_shim_option(locator, option)
         else:
             await self._click_appeared_option(locator, option)
+        await self._confirm_selected(locator, option)
 
     async def _page_widget(self, locator: Locator, state: dict, option: str) -> ElementHandle:
         """The visible control a page's own dropdown widget puts in the select's place."""
@@ -523,6 +614,17 @@ class Recorder:
             await row.wait_for(state="visible", timeout=OPTION_WAIT_MS)
         except PlaywrightError as exc:
             raise await self._no_option_error(locator, option) from exc
+        # Visible is not the same as clickable. A disabled row is rendered — at
+        # `opacity: .45`, so a viewer can read it — and both `onListClick` and
+        # `choose` return early for it. Clicking it would be a no-op the run has
+        # no other way to notice, and sending the cursor there at all would film
+        # a choice the page was never going to accept.
+        if await row.get_attribute("data-guidebot-option-disabled") is not None:
+            raise SelectDriveError(
+                f'opcja „{option}" na liście {await self._describe(locator)} jest '
+                f"wyłączona (`disabled`) — nie da się jej wybrać ani na filmie, "
+                f"ani bezpośrednio"
+            )
         # Scroll the list *before* the glide: the cursor must travel to a row the
         # viewer can already see, not to one that scrolls under it on arrival.
         await locator.evaluate(
@@ -532,8 +634,21 @@ class Recorder:
         await row.click()
 
     async def _click_appeared_option(self, locator: Locator, option: str) -> None:
-        """Beat 2 for a page's own widget: click the row it just rendered."""
+        """Beat 2 for a page's own widget: click the row it just rendered.
 
+        "The row it just rendered" is defined entirely by the snapshot taken
+        before beat 1, so a missing snapshot is not a degraded search — it is no
+        search at all, and must be said out loud rather than answered with the
+        first node on the page that happens to carry the label.
+        """
+
+        if not await self.frame.evaluate(_HAS_SNAPSHOT_JS):
+            raise SelectDriveError(
+                f"stan sprzed rozwinięcia listy {await self._describe(locator)} zniknął "
+                f"— dokument został podmieniony w trakcie kroku, więc nie da się odróżnić "
+                f"świeżo narysowanych opcji od reszty strony; nie da się pokazać na "
+                f'filmie wyboru opcji „{option}"'
+            )
         try:
             handle = await self.frame.wait_for_function(
                 _APPEARED_NODE_JS, arg=option, timeout=OPTION_WAIT_MS
@@ -552,10 +667,14 @@ class Recorder:
     async def scroll(self, spec: Scroll) -> None:
         """Scroll the site — a render-only visual with no agent target.
 
-        Content the resolver cannot target (native-select option lists, iframe
-        previews) still appears in the recording; scrolling brings below-the-fold
-        content into view. With an overlay (render) the scroll is animated as a
-        stepped glide; without one (compile) it jumps directly.
+        Content the resolver cannot target (an iframe preview, for instance)
+        still appears in the recording; scrolling brings below-the-fold content
+        into view. With an overlay (render) the scroll is animated as a stepped
+        glide; without one (compile) it jumps directly.
+
+        A native ``<select>``'s option list used to head that list and no longer
+        does: ``selects.js`` renders it into the DOM, so :meth:`select` drives it
+        directly and nothing about it needs scrolling into frame here.
         """
 
         metrics = await self.frame.evaluate(

@@ -848,11 +848,18 @@ def test_selects_config_rejects_negative_settle_ms():
         SelectsConfig(settle_ms=-1)
 
 
-def test_selects_config_rejects_zero_settle_ms():
+def test_selects_config_accepts_zero_settle_ms():
+    """`0` means "no settle window", which is a legitimate thing to ask for.
+
+    The floor used to be 1 ms, so the one page shape the window exists to
+    accommodate — a site with no widget library at all, where waiting only
+    delays every classification pass — had no way to switch it off. The widget
+    already clamps at zero and simply schedules the pass on the next task.
+    """
+
     from guidebot_recorder.models.config import SelectsConfig
 
-    with pytest.raises(ValidationError):
-        SelectsConfig(settle_ms=0)
+    assert SelectsConfig(settle_ms=0).settle_ms == 0
 
 
 def test_selects_config_rejects_max_visible_options_zero():

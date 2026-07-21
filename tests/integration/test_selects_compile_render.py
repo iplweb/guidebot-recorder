@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from playwright.async_api import async_playwright
 
+import guidebot_recorder.resolver.validate as validate_module
 from guidebot_recorder.models.config import TtsConfig, config_hash
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.recorder.compile import run_compile, run_compile_in_browser
@@ -660,6 +661,18 @@ async def test_artifact_compiled_without_the_shim_still_renders_with_it(
 # --- the undriveable widget -------------------------------------------------
 
 
+async def _the_select_itself(locator):
+    """``user_visible_control`` as it behaved before the predicate was shared.
+
+    Playwright's ``is_visible()`` is true for select2's 1x1-clipped original, so
+    the old first step handed the ``<select>`` straight back and validation
+    passed. Standing in for it here is what produces the artifact this test
+    needs: one an older Guidebot could really have written.
+    """
+
+    return await locator.element_handle()
+
+
 async def test_undriveable_widget_fails_loudly_instead_of_setting_the_value(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -667,9 +680,23 @@ async def test_undriveable_widget_fails_loudly_instead_of_setting_the_value(
 
     There is deliberately no fallback to ``select_option()``: it would restore
     exactly the invisible value change the branch exists to remove, and would do
-    it unobservably. Both phases are covered — compile probes drivability so the
-    failure lands before a multi-minute render is paid for, and a pre-existing
-    artifact that never went through that probe still fails at render.
+    it unobservably.
+
+    Compile stops it, and *where* it stops is the point. The 1x1-clipped original
+    is hidden to the shared predicate, so validation refuses the page and
+    ``Recorder.select`` is never reached at all — a step that never runs cannot
+    touch the value. Validation used to accept it (Playwright calls a 1x1 box
+    visible) and leave the rejecting to the drivability probe one layer down; the
+    two compile-time checks disagreeing about the same page is the drift the
+    shared predicate removes.
+
+    The second half covers the artifact frozen by an older, more permissive
+    validator. Render re-validates a frozen target before reusing it, so this one
+    is refused there — the run stops rather than degrading to a silent
+    ``select_option``, which is the property that matters. It stops with the
+    generic "recompile" verdict of the reuse check rather than the choreography's
+    own wording, because it never gets as far as the choreography; recompiling is
+    what surfaces the full diagnosis, and the first half is that recompile.
     """
 
     path = _write(tmp_path, "orphan.scenario.yaml", UNDRIVEABLE_SCENARIO, UNDRIVEABLE_FIXTURE)
@@ -683,23 +710,26 @@ async def test_undriveable_widget_fails_loudly_instead_of_setting_the_value(
             await run_compile_in_browser(path, browser, SelectReasoner())
         message = str(compile_error.value)
         assert "nie znaleziono widocznej kontrolki" in message
-        assert "select#sierota" in message
-        assert "Mazowieckie" in message
-        # The value was not quietly set on the way out.
-        assert spy.selects[-1]["selected"] == ["Lubelskie"]
+        assert "lista województw" in message  # names the step's own instruction
+        # Nothing was ever driven, so nothing could have been quietly set.
+        assert spy.selects == []
 
-        # An artifact compiled before the probe existed still fails at render
-        # rather than degrading to a silent select_option.
+        # Freeze the artifact the way a Guidebot that still trusted Playwright's
+        # `is_visible()` would have frozen it, then render that.
+        monkeypatch.setattr(validate_module, "user_visible_control", _the_select_itself)
         context = await browser.new_context(viewport={"width": 800, "height": 600})
         page = await context.new_page()
         await run_compile(path, page, SelectReasoner(), selects=None)
         await context.close()
+        monkeypatch.undo()
 
         spy.reset()
+        spy.install(monkeypatch)
         with pytest.raises(RenderError) as render_error:
             await run_render(path, tmp_path / "orphan.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert "nie znaleziono widocznej kontrolki" in str(render_error.value)
-    assert "Mazowieckie" in str(render_error.value)
-    assert spy.selects[-1]["selected"] == ["Lubelskie"]
+    assert "krok 2" in str(render_error.value)
+    assert "compile" in str(render_error.value)  # points at the run that diagnoses it
+    # Again: refused before anything was driven, so the value was never set.
+    assert spy.selects == []

@@ -131,7 +131,13 @@ async def test_associated_control_prefers_aria_controls_over_following_sibling(p
     assert await handle.get_attribute("id") == "via-controls"
 
 
-# --- user_visible_control: precedence select > shim button > associated ----
+# --- user_visible_control: precedence select > associated ------------------
+# A shimmed select needs no step of its own. The shim only ever takes on a
+# select the shared predicate calls un-enhanced, so step 1 always answers for
+# it — and the <select> is the click target on camera anyway, since the shim
+# button is `pointer-events: none`. The old middle step, "fall back to the shim
+# button", could only fire for a `display:none` select that was nonetheless
+# shimmed, which `selects.js` never produces.
 
 
 async def test_user_visible_control_prefers_the_select_when_it_is_visible(page):
@@ -145,21 +151,6 @@ async def test_user_visible_control_prefers_the_select_when_it_is_visible(page):
     handle = await user_visible_control(page.locator("#sel"))
 
     assert await handle.evaluate("element => element.tagName.toLowerCase()") == "select"
-
-
-async def test_user_visible_control_falls_back_to_the_shim_button(page):
-    await page.set_content(
-        """
-        <select id="sel" data-guidebot-shimmed="uid-1" style="display:none;">
-          <option>a</option>
-        </select>
-        <div data-guidebot-select-button data-guidebot-for="uid-1"
-             style="width:100px;height:20px;"></div>
-        """
-    )
-    handle = await user_visible_control(page.locator("#sel"))
-
-    assert await handle.get_attribute("data-guidebot-select-button") is not None
 
 
 async def test_user_visible_control_ignores_a_different_selects_visible_shim_button(page):
@@ -213,16 +204,73 @@ async def test_user_visible_control_returns_none_when_nothing_qualifies(page):
     assert handle is None
 
 
-async def test_user_visible_control_returns_none_when_shim_button_itself_is_hidden(page):
+async def test_user_visible_control_never_answers_with_a_shim_button(page):
+    """The shim button is never "the control", even when it is the only box around.
+
+    It is `pointer-events: none` by construction, so the click on camera always
+    lands on the `<select>` underneath it. A page state where the button would
+    be the only candidate — a `display:none` select that is somehow still
+    shimmed — is one `selects.js` cannot produce, and answering it here only
+    created a fourth opinion about what "visible" means.
+    """
+
     await page.set_content(
         """
         <select id="sel" data-guidebot-shimmed="uid-1" style="display:none;">
           <option>a</option>
         </select>
         <div data-guidebot-select-button data-guidebot-for="uid-1"
-             style="display:none;"></div>
+             style="width:100px;height:20px;"></div>
         """
     )
     handle = await user_visible_control(page.locator("#sel"))
 
     assert handle is None
+
+
+# --- user_visible_control: one owner for "already enhanced" -----------------
+
+
+async def test_user_visible_control_does_not_call_a_1px_clipped_select_the_control(page):
+    """select2 leaves its original in place, clipped to 1x1 px.
+
+    Playwright calls that visible; the shim calls it enhanced. Answering step 1
+    in Playwright's terms let validation accept the clipped `<select>` as "the
+    control the viewer sees" while `_probe_drivable`, reading the shim's own
+    rule, rejected the very same page.
+    """
+
+    await page.set_content(
+        """
+        <select id="sel" style="position:absolute;width:1px;height:1px;overflow:hidden;">
+          <option>a</option>
+        </select>
+        <div id="widget" style="width:100px;height:20px;">widget</div>
+        """
+    )
+    handle = await user_visible_control(page.locator("#sel"))
+
+    assert await handle.get_attribute("id") == "widget"
+
+
+async def test_user_visible_control_still_answers_for_a_full_size_marker_classed_select(page):
+    """The marker half of the predicate is not this function's question.
+
+    `markerClass` decides whether the *shim* should touch a control, not whether
+    the viewer can see one. A full-size `<select class="tomselected">` is on
+    screen and clickable: it validates, and the render then tells the author to
+    reach for `mode: native`. Rejecting it here would make that advice
+    impossible to follow — the step could not compile under either mode.
+    """
+
+    await page.set_content(
+        """
+        <select id="sel" class="tomselected" style="width:200px;height:30px;">
+          <option>a</option>
+        </select>
+        <div id="widget" style="width:100px;height:20px;">widget</div>
+        """
+    )
+    handle = await user_visible_control(page.locator("#sel"))
+
+    assert await handle.evaluate("element => element.id") == "sel"

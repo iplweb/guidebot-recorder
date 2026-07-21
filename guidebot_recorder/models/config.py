@@ -282,7 +282,11 @@ class SelectsConfig(BaseModel):
     # Milliseconds to wait after page load before classifying raw vs enhanced selects.
     # The page's own initialization (select2, Chosen, Tom Select) has this much time
     # to hide/enhance its original <select> before the shim classifies it.
-    settle_ms: int = Field(default=1000, ge=1, alias="settleMs")
+    # ``0`` switches the window off: the pass is then scheduled on the next task
+    # rather than after a delay. Correct only for a site that enhances nothing,
+    # where waiting can do no good; anywhere else it reopens the race the window
+    # exists to prevent.
+    settle_ms: int = Field(default=1000, ge=0, alias="settleMs")
     # Number of options visible in the list at once before scrolling within it.
     max_visible_options: int = Field(default=8, ge=1, alias="maxVisibleOptions")
     # Milliseconds to hold the unfurled list open for the viewer to read it,

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from playwright.async_api import ElementHandle, JSHandle, Locator
 
+from guidebot_recorder.selects.visibility import select_shape
+
 #: (el) => Element | null
 #:
 #: Given a hidden ``<select>``, resolve the on-page widget standing in for
@@ -41,6 +43,12 @@ from playwright.async_api import ElementHandle, JSHandle, Locator
 #:    treat the select as having no visible stand-in.
 ASSOCIATED_CONTROL_JS = """
 (el) => {
+  // Deliberately *not* the shared "is this select enhanced?" predicate: this
+  // asks a different question of a different element. The predicate decides
+  // whether a <select> is still the viewer's control (8x8 px, marker classes —
+  // rules about how widget libraries hide an original). This only rejects a
+  // sibling with no box at all, so a candidate widget is not disqualified for
+  // being small.
   const hasBox = (node) => {
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
@@ -84,26 +92,6 @@ ASSOCIATED_CONTROL_JS = """
 }
 """
 
-#: (el) => Element | null
-#:
-#: Task 2's shim contract: a shimmed select carries
-#: ``data-guidebot-shimmed="<uid>"``, and its stand-in button carries
-#: ``data-guidebot-select-button`` plus ``data-guidebot-for="<uid>"``. Both
-#: attributes are read here rather than assumed, because a select that was
-#: never shimmed (or was unshimmed again, per the spec's late-hydration case)
-#: simply has no ``data-guidebot-shimmed`` attribute, and this must return
-#: ``null`` rather than match some unrelated button.
-_SHIM_BUTTON_JS = """
-(el) => {
-  const uid = el.getAttribute("data-guidebot-shimmed");
-  if (!uid) return null;
-  const escaped = CSS.escape(uid);
-  return el.ownerDocument.querySelector(
-    `[data-guidebot-select-button][data-guidebot-for="${escaped}"]`
-  );
-}
-"""
-
 
 async def _handle_to_element(handle: JSHandle) -> ElementHandle | None:
     element = handle.as_element()
@@ -130,26 +118,35 @@ async def user_visible_control(locator: Locator) -> ElementHandle | None:
 
     Tries, in order:
 
-    1. the select itself, if it is visible (the common, unshimmed case, and
-       select2's 1x1-clipped original — clipping still leaves a non-empty
-       box, so Playwright already considers it visible);
-    2. its shim button (Task 2's overlay), if the select was hidden and
-       shimmed by ``selects.js``;
-    3. the widget resolved by :func:`associated_control`, for pages that
-       enhance their own selects (select2, Tom Select, Chosen) without going
-       through the shim at all.
+    1. the select itself, if it still has a control the viewer could point at —
+       the ``visible`` half of the one shared predicate
+       (:func:`guidebot_recorder.selects.select_shape`), never Playwright's
+       ``is_visible()``. The two disagree on exactly the case this function
+       exists for: select2 leaves its original in place clipped to 1x1 px, which
+       Playwright calls visible and the shim calls hidden. Answering it here in
+       Playwright's terms made validation accept a control the render
+       choreography then refused to drive;
+    2. the widget resolved by :func:`associated_control`, for pages that
+       enhance their own selects (select2, Tom Select, Chosen).
+
+    The predicate's *other* half, ``markerClass``, is deliberately not consulted
+    here. It answers "should the shim touch this control", not "does the viewer
+    see it" — a full-size ``<select class="select2-hidden-accessible">`` is on
+    screen and clickable, so it validates, and the render then tells the author
+    to reach for ``mode: native``. Rejecting it here would make that advice
+    impossible to follow: the step could not compile under either mode.
+
+    A shimmed select needs no step of its own: the shim only ever takes on a
+    select this predicate calls visible, so step 1 always answers for it — and
+    it is the ``<select>``, not the shim button, that is the click target on
+    camera (the button is ``pointer-events: none``).
 
     Returns ``None`` when nothing in that list is visible — nothing the user
     could see qualifies as "the control".
     """
 
-    if await locator.is_visible():
+    if (await select_shape(locator))["visible"]:
         return await locator.element_handle()
-
-    shim_handle = await locator.evaluate_handle(_SHIM_BUTTON_JS)
-    shim_button = await _handle_to_element(shim_handle)
-    if shim_button is not None and await shim_button.is_visible():
-        return shim_button
 
     control = await associated_control(locator)
     if control is not None and await control.is_visible():

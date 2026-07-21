@@ -19,8 +19,10 @@ from pathlib import Path
 
 import pytest
 from playwright.async_api import Browser, async_playwright
+from pydantic import ValidationError
 
 import guidebot_recorder.recorder.compile as compile_module
+from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Select, Step
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
@@ -30,7 +32,12 @@ from guidebot_recorder.recorder.compile import (
     select_mode,
 )
 from guidebot_recorder.recorder.recorder import SelectDriveError
-from guidebot_recorder.recorder.render import RenderError, _render_step
+from guidebot_recorder.recorder.render import (
+    RenderError,
+    _compiled_action_is_current,
+    _compiled_from,
+    _render_step,
+)
 from guidebot_recorder.recorder.session import (
     SetupNeedsCompile,
     _manual_finish,
@@ -38,7 +45,11 @@ from guidebot_recorder.recorder.session import (
     replay_setup,
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
-from guidebot_recorder.resolver.resolution import ResolvedTarget
+from guidebot_recorder.resolver.resolution import (
+    ResolvedTarget,
+    compiled_from,
+    step_instruction,
+)
 from guidebot_recorder.selects import Selects, install_selects
 
 # charset is explicit: without it Chromium decodes a data: URL as latin-1 and the
@@ -188,14 +199,86 @@ def test_select_mode_inherits_the_config_mode() -> None:
     assert select_mode(step, _config(selects=SelectsConfig(mode="native"))) == "native"
 
 
-def test_step_mode_overrides_the_config_mode_in_both_directions() -> None:
+def test_a_step_can_opt_out_of_the_shim_but_never_opt_back_into_it() -> None:
+    """The override is one-way, and the scenario says so before a browser opens.
+
+    This used to be spelled "overrides the config mode in both directions" and
+    asserted the dispatch flag `select_mode` returns — which was true and
+    meaningless: under `config.selects.mode: native` nothing installs the widget,
+    so a step asking for `shim` reached a page with no shim on it and failed
+    mid-render, having already clicked an unrelated element on camera. The flag
+    said "shim"; the outcome was a broken run.
+
+    The reachable direction keeps working, and the unreachable one is now a load
+    error, so no run can start in that state at all.
+    """
+
     native_step = Step(
         select=Select(**{"from": "lista", "option": "Mazowieckie", "mode": "native"})
     )
     shim_step = Step(select=Select(**{"from": "lista", "option": "Mazowieckie", "mode": "shim"}))
 
+    # Opting one control out of a global shim: supported, and the whole point.
     assert select_mode(native_step, _config()) == "native"
-    assert select_mode(shim_step, _config(selects=SelectsConfig(mode="native"))) == "shim"
+    assert select_mode(shim_step, _config()) == "shim"
+
+    # Opting one control *into* a shim that was never installed: rejected while
+    # the scenario loads, naming the step and the setting that fights it.
+    with pytest.raises(ValidationError) as excinfo:
+        Scenario(config=_config(selects=SelectsConfig(mode="native")), steps=[shim_step])
+
+    message = str(excinfo.value)
+    assert "krok 0" in message
+    assert "config.selects.mode: native" in message
+
+
+def test_a_steps_select_mode_is_part_of_its_own_fingerprint() -> None:
+    """Deleting `mode: native` from a step must force a recompile.
+
+    The spec claims the per-step mode "enters the fingerprint through
+    `compiled_from` like any other step content". It did not: both fingerprint
+    builders returned `select.from_` alone, so removing the escape hatch left
+    `compile_up_to_date()` true, no browser was launched, and the drivability
+    probe — one of the two mitigations the spec's error handling leans on —
+    never ran.
+    """
+
+    assert compiled_from(_select_step()) == "Województwo"  # unchanged when unset
+    assert compiled_from(_select_step("native")) != compiled_from(_select_step())
+    assert compiled_from(_select_step("shim")) != compiled_from(_select_step("native"))
+    # render and compile must agree about it, or a render would recompile forever
+    assert _compiled_from(_select_step("native")) == compiled_from(_select_step("native"))
+
+
+def test_the_reasoner_still_sees_only_the_step_sentence() -> None:
+    """The fingerprint is not the prompt.
+
+    `step_instruction` is what the LLM resolves against; folding a YAML
+    keyword into it would put `mode: native` in front of the reasoner as if it
+    were part of the author's description of the control.
+    """
+
+    assert step_instruction(_select_step("native")) == "Województwo"
+    assert step_instruction(_select_step()) == "Województwo"
+
+
+def test_a_frozen_action_is_stale_once_the_step_drops_its_mode() -> None:
+    """The outcome the fingerprint exists for, asserted end to end."""
+
+    frozen = CachedAction(
+        action="select",
+        target=RoleTarget(role="combobox", name="Województwo", exact=True),
+        expect="none",
+        fingerprint=Fingerprint(
+            command_kind="select",
+            compiled_from=compiled_from(_select_step("native")),
+            expect="none",
+            config_hash="h",
+        ),
+    )
+
+    assert _compiled_action_is_current(_select_step("native"), frozen, "h") is True
+    assert _compiled_action_is_current(_select_step(), frozen, "h") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -360,12 +443,14 @@ async def test_render_select_uses_the_config_mode_by_default() -> None:
 
 
 async def test_render_select_honours_the_per_step_override() -> None:
+    """Only one direction reaches a render: `mode: shim` under a global `native`
+    no longer loads at all (``Scenario`` rejects it), so there is nothing left
+    here to dispatch."""
+
     recorder = await _run_render_select(_select_step("native"), _config())
     assert recorder.calls == [("Mazowieckie", True)]
 
-    recorder = await _run_render_select(
-        _select_step("shim"), _config(selects=SelectsConfig(mode="native"))
-    )
+    recorder = await _run_render_select(_select_step("shim"), _config())
     assert recorder.calls == [("Mazowieckie", False)]
 
 
@@ -412,9 +497,7 @@ async def test_compile_select_honours_the_per_step_override(monkeypatch) -> None
     recorder = await _run_compile_select(_select_step("native"), _config(), monkeypatch)
     assert recorder.calls == [("Mazowieckie", True)]
 
-    recorder = await _run_compile_select(
-        _select_step("shim"), _config(selects=SelectsConfig(mode="native")), monkeypatch
-    )
+    recorder = await _run_compile_select(_select_step("shim"), _config(), monkeypatch)
     assert recorder.calls == [("Mazowieckie", False)]
 
 

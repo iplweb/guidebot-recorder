@@ -90,11 +90,6 @@
   // classification runs regardless of further mutations.
   const MAX_DEFERRAL_FACTOR = 3;
 
-  // Belt-and-braces only: the geometric test below is the primary signal,
-  // because it is library-agnostic (select2 clips the original to 1x1 px,
-  // Tom Select uses display:none, Chosen hides it too).
-  const MARKER_CLASSES = ["select2-hidden-accessible", "tomselected", "chosen-select"];
-
   // --- Re-injection guard ----------------------------------------------------
   const previous = window[API_KEY];
   if (
@@ -210,26 +205,19 @@
   /**
    * True when the page (or a widget library) has already taken this select over.
    *
-   * The geometric test is the primary signal on purpose: every library that
-   * enhances a select keeps the original and merely hides it. Selects the page
-   * deliberately keeps hidden are skipped by the same rule, which is correct —
-   * an invisible control must not grow a visible shim.
+   * The rule itself lives in `selects/visibility.js` and is published here as
+   * `window.__guidebot_select_shape` by the Python controller, which prepends it
+   * to this file. It is deliberately not restated inline: the recorder and the
+   * compile-time validator ask the same question from Python, in contexts where
+   * this widget may not be installed at all, and an answer that drifts between
+   * the three is how a select ends up "enhanced" to one of them and "the control
+   * the viewer sees" to another.
+   *
+   * Selects the page deliberately keeps hidden are skipped by the same rule,
+   * which is correct — an invisible control must not grow a visible shim.
    */
   function isEnhanced(select) {
-    const computed = window.getComputedStyle(select);
-    if (computed.display === "none" || computed.visibility === "hidden") {
-      return true;
-    }
-    const rect = select.getBoundingClientRect();
-    if (rect.width < 8 || rect.height < 8) {
-      return true;
-    }
-    for (const name of MARKER_CLASSES) {
-      if (select.classList.contains(name)) {
-        return true;
-      }
-    }
-    return false;
+    return window.__guidebot_select_shape(select).enhanced;
   }
 
   /**
@@ -1231,8 +1219,16 @@
   /**
    * Index into `select.options` of the option whose label matches `label`.
    *
-   * Whitespace is collapsed and trimmed on both sides; an exact match wins and a
-   * case-insensitive match is the fallback. Returns -1 when absent.
+   * Whitespace is collapsed and trimmed on both sides; the comparison is then
+   * exact. Returns -1 when absent.
+   *
+   * Case-insensitive matching used to be the fallback here and nowhere else:
+   * compile drives through Playwright's `select_option(label=…)` and the
+   * listbox path through `_OPTION_INDEX_JS`, both exact. A scenario whose
+   * option label differed only in case therefore resolved one way on a shimmed
+   * select and failed outright on the other two shapes — the same scenario
+   * behaving differently depending on the control's shape is exactly the drift
+   * this branch exists to remove.
    */
   function optionIndexFor(element, label) {
     const select = resolveSelect(element);
@@ -1243,12 +1239,6 @@
     const options = select.options;
     for (let index = 0; index < options.length; index += 1) {
       if (optionLabel(options[index]) === wanted) {
-        return index;
-      }
-    }
-    const lowered = wanted.toLowerCase();
-    for (let index = 0; index < options.length; index += 1) {
-      if (optionLabel(options[index]).toLowerCase() === lowered) {
         return index;
       }
     }

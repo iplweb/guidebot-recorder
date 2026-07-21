@@ -76,7 +76,11 @@ class TargetAbsent:
 
 
 def step_instruction(step: Step) -> str:
-    """The natural-language text the Reasoner resolves for this step."""
+    """The natural-language text the Reasoner resolves for this step.
+
+    The author's own sentence and nothing else — see :func:`compiled_from` for
+    the fingerprint, which is a different question with a different answer.
+    """
 
     kind = step.command_kind()
     if kind == "teach":
@@ -92,6 +96,31 @@ def step_instruction(step: Step) -> str:
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok bez instrukcji do rozwiązania: {kind}")
+
+
+def compiled_from(step: Step) -> str:
+    """The step content a frozen action is fingerprinted against.
+
+    Everything the compiler resolved *from* has to be in here, or editing it
+    leaves a stale sidecar looking current. That is more than the sentence the
+    reasoner sees: a ``select:`` step also carries a per-step ``mode``, and
+    deleting ``mode: native`` from one used to leave ``compile_up_to_date()``
+    true — no browser opened, the drivability probe never ran, and the render
+    drove a widget nothing had checked.
+
+    Kept apart from :func:`step_instruction` on purpose, even though the two
+    differ by one line. ``step_instruction`` is the prompt the Reasoner resolves
+    against; folding a YAML keyword into that would hand the LLM ``mode:
+    native`` as though it were part of the author's description of the control.
+    The suffix is appended only when the step actually sets a mode, so every
+    fingerprint frozen before this existed stays valid and no scenario needs a
+    recompile for the change itself.
+    """
+
+    instruction = step_instruction(step)
+    if step.command_kind() == "select" and step.select.mode is not None:
+        return f"{instruction} [mode: {step.select.mode}]"
+    return instruction
 
 
 def action_for(kind: str, resolved: ActionKind) -> ActionKind:
@@ -196,6 +225,18 @@ async def resolve_step_target(
                 if isinstance(relaxed_validation, ValidationOk):
                     target, validation = relaxed, relaxed_validation
             if not isinstance(validation, ValidationOk):
+                if action == "select" and validation.reason == "not_visible":
+                    # Not a reasoner miss to be re-prompted away silently: the
+                    # page has no control a viewer could see for this select, so
+                    # the choice cannot be filmed at all. Re-prompting may still
+                    # find a *different* select, so the loop continues — but if
+                    # it does not, the run must say which situation this is
+                    # rather than "could not validate the target".
+                    resolution_error = (
+                        f"nie znaleziono widocznej kontrolki dla listy {instruction!r} "
+                        "— strona ukryła <select> i nic widocznego go nie zastępuje, "
+                        "więc nie da się pokazać wyboru na filmie"
+                    )
                 continue
         if infers_text and await is_sensitive_type_target(validation.locator):
             resolution_error = (

@@ -24,8 +24,13 @@ from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder import recorder as recorder_module
 from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
+from guidebot_recorder.selects.visibility import shape_prelude
 
-SELECTS_JS = files("guidebot_recorder.selects").joinpath("selects.js").read_text("utf-8")
+# Body plus the shared "already enhanced?" predicate the Python controller
+# prepends in production (``selects/visibility.py``).
+SELECTS_JS = shape_prelude() + files("guidebot_recorder.selects").joinpath("selects.js").read_text(
+    "utf-8"
+)
 
 
 @pytest.fixture
@@ -310,6 +315,193 @@ async def test_enhanced_widget_is_driven_through_its_own_control_and_list(page):
     assert events == ["click", "click"]
 
 
+# --- beat 2 verifies the click actually chose the option --------------------
+# The branch exists so a run that would produce an unwatchable video fails
+# loudly. A beat 2 that ends at `row.click()` without reading the select back
+# does the opposite on every path where the click lands on the wrong node: the
+# value never changes and `Recorder.select` returns success.
+
+
+_DISABLED_OPTION_SELECT = (
+    "<body style='margin:0'>"
+    "<select aria-label='Raport' style='width:220px'>"
+    "<option>lista</option><option disabled>tabela</option><option>BibTeX</option>"
+    "</select></body>"
+)
+
+
+async def test_a_disabled_option_on_a_shimmed_select_fails_instead_of_doing_nothing(page):
+    """A disabled row is visible — `opacity: .45` — and refuses the click.
+
+    Both `onListClick` and `choose` return early for a disabled row, so the
+    click lands, nothing happens, and the value stays where it was. Waiting for
+    the row to be *visible* cannot tell the two apart, so the step used to
+    report success on a select the viewer watches not change.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert "tabela" in str(excinfo.value)
+    assert await page.locator("select").input_value() == "lista"  # never changed
+
+
+def _enhanced_with_decoy(labels: list[str], rows: list[str], decoy: str) -> str:
+    """The page-widget pattern plus a live region that echoes the option label.
+
+    The decoy is prepended to ``<body>``, so it precedes the widget's own list
+    in document order — which is exactly the tie-break the "appeared after the
+    click" heuristic applies. A toast, an aria-live region or a "current
+    selection" readout is an everyday piece of a dropdown widget.
+    """
+
+    return (
+        "<body style='margin:0'>"
+        "<select id='s' data-testid='s' style='display:none'>"
+        + "".join(f"<option>{label}</option>" for label in labels)
+        + "</select>"
+        "<div data-testid='w' id='w' style='width:200px;height:30px;border:1px solid #000'>"
+        f"{labels[0]}</div>"
+        "<script>"
+        "document.getElementById('w').addEventListener('click', () => {"
+        "  const toast = document.createElement('div');"
+        "  toast.id = 'toast';"
+        f"  toast.textContent = {json.dumps(decoy)};"
+        "  toast.style.cssText = 'width:200px;height:20px';"
+        "  document.body.prepend(toast);"
+        "  const list = document.createElement('div');"
+        "  list.id = 'fake-list';"
+        "  list.style.cssText = 'position:fixed;top:120px;left:0;width:200px;background:#fff';"
+        f"  for (const label of {json.dumps(rows)}) {{"
+        "    const row = document.createElement('div');"
+        "    row.textContent = label;"
+        "    row.style.cssText = 'padding:4px';"
+        "    row.addEventListener('click', () => {"
+        "      const sel = document.getElementById('s');"
+        "      sel.value = label;"
+        "      sel.dispatchEvent(new Event('change', {bubbles: true}));"
+        "      list.remove();"
+        "    });"
+        "    list.appendChild(row);"
+        "  }"
+        "  document.body.appendChild(list);"
+        "});"
+        "</script></body>"
+    )
+
+
+async def test_a_decoy_node_carrying_the_option_label_fails_instead_of_reporting_success(page):
+    """The page-widget path clicks the first *newly added* node with that text.
+
+    A toast that echoes the label wins the document-order tie-break over the
+    real row, so the pointer lands on it, the widget never commits anything and
+    the select keeps its old value.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_enhanced_with_decoy(["Alfa", "Beta"], ["Alfa", "Beta"], "Beta"))
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    message = str(excinfo.value)
+    assert "Beta" in message
+    assert "Alfa" in message  # says what *is* selected, not only what was asked for
+    assert await page.locator("#s").input_value() == "Alfa"
+
+
+def _enhanced_losing_the_snapshot(labels: list[str], rows: list[str]) -> str:
+    """The page-widget pattern where beat 1 takes the pre-click snapshot with it.
+
+    ``window.__guidebot_select_snapshot`` is what tells a freshly rendered
+    option row from text that was already on the page; a beat 1 that navigates
+    or replaces the document drops it. The static ``#decoy`` below carries the
+    option label and existed *before* the click, so it is precisely what the
+    snapshot exists to exclude.
+    """
+
+    return (
+        "<body style='margin:0'>"
+        f"<div id='decoy' style='width:200px;height:20px'>{rows[-1]}</div>"
+        "<select id='s' data-testid='s' style='display:none'>"
+        + "".join(f"<option>{label}</option>" for label in labels)
+        + "</select>"
+        "<div data-testid='w' id='w' style='width:200px;height:30px;border:1px solid #000'>"
+        f"{labels[0]}</div>"
+        "<script>"
+        "document.getElementById('w').addEventListener('click', () => {"
+        # exactly what a beat 1 that navigates or replaces the document does
+        "  delete window.__guidebot_select_snapshot;"
+        "  const list = document.createElement('div');"
+        "  list.style.cssText = 'position:fixed;top:120px;left:0;width:200px;background:#fff';"
+        f"  for (const label of {json.dumps(rows)}) {{"
+        "    const row = document.createElement('div');"
+        "    row.textContent = label;"
+        "    row.style.cssText = 'padding:4px';"
+        "    row.addEventListener('click', () => {"
+        "      const sel = document.getElementById('s');"
+        "      sel.value = label;"
+        "      sel.dispatchEvent(new Event('change', {bubbles: true}));"
+        "    });"
+        "    list.appendChild(row);"
+        "  }"
+        "  document.body.appendChild(list);"
+        "});"
+        "</script></body>"
+    )
+
+
+async def test_a_lost_pre_click_snapshot_is_a_hard_error_not_a_wildcard_match(page):
+    """Without the snapshot the "appeared after" filter evaporates.
+
+    Every node on the page then qualifies, so the document-order scan hands back
+    whatever carries the label — here a static decoy that was on screen all
+    along — and clicking it changes nothing.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_enhanced_losing_the_snapshot(["Alfa", "Beta"], ["Alfa", "Beta"]))
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    assert "Beta" in str(excinfo.value)
+    assert await page.locator("#s").input_value() == "Alfa"
+
+
+async def test_a_listbox_click_that_selects_nothing_is_not_reported_as_success(page):
+    """The one-beat path needs the same read-back as the two-beat ones.
+
+    A page that cancels the click on an ``<option>`` leaves the listbox exactly
+    as it was, and there is no exception anywhere to notice it.
+    """
+
+    overlay = await _listbox_page(page, "multiple size='3'", ["zwykłe", "pilne", "archiwalne"])
+    await page.evaluate(
+        "() => document.querySelector('select').addEventListener("
+        "'mousedown', (event) => event.preventDefault(), true)"
+    )
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "pilne")
+
+    assert "pilne" in str(excinfo.value)
+    assert await page.evaluate(_SELECTED_JS) == []
+
+
 async def test_beat_two_without_a_matching_node_raises_naming_the_option(page, monkeypatch):
     monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
     overlay = Overlay()
@@ -567,6 +759,45 @@ async def test_error_for_a_visible_unshimmed_select_says_the_shim_skipped_it(pag
     assert "Beta" in message
     assert "ukryła" not in message  # this select is *not* hidden
     assert "mode: native" in message
+    # ...and it names the marker class that actually caused it, which is the one
+    # thing the author can act on. Reading "the shim declined it" off geometry
+    # alone could never say this.
+    assert "select2-hidden-accessible" in message
+
+
+async def test_a_visible_select_with_no_shim_in_the_context_blames_the_missing_shim(
+    page, monkeypatch
+):
+    """`installed: false` is not "the page enhanced it" — it is "there is no shim here".
+
+    This is `config.selects.mode: native` plus a per-step `mode: shim`, and the
+    bare contexts (health probe, unit-test page) besides. The old code sent it
+    straight to the association heuristic, which always finds *something*: the
+    cursor clicked an unrelated sibling on camera, the diagnosis blamed the
+    option, and it burned the whole option wait to get there.
+    """
+
+    monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' style='width:220px'>"
+        "<option>Alfa</option><option>Beta</option></select>"
+        "<span class='hint' style='width:200px;height:20px;display:block'>podpowiedź</span>"
+        "</body>"
+    )
+    await overlay.install(page)
+    # deliberately no `_install_selects`: there is no shim layer in this context
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    message = str(excinfo.value)
+    assert "select#s" in message
+    assert "mode: native" in message  # names the configuration, not the option
+    assert "nie pojawiła się" not in message  # not "the option never showed up"
+    assert overlay.pos == (0.0, 0.0)  # the cursor never set off towards the hint
+    assert await page.locator("#s").input_value() == "Alfa"
 
 
 # --- compile-path drivability probe ----------------------------------------

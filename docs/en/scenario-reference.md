@@ -454,8 +454,8 @@ selects:
 
 | YAML field | Default | Meaning |
 |---|---:|---|
-| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the collapsed control — the cursor still travels to it and clicks, but the list never unfurls and the value changes at once. A per-step `select.mode` overrides this for one control. |
-| `settleMs` | `1000` | Milliseconds to wait after page load before classifying each `<select>` as raw or already enhanced. Gives the page's own select2/Tom Select/Chosen initialization time to hide or replace the original control before the shim decides whether to touch it. |
+| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the collapsed control — the cursor still travels to it and clicks, but the list never unfurls and the value changes at once. A per-step `select.mode: native` opts one control out of a global `shim`; the reverse is not possible, because `native` injects no shim script for a step to opt back into, and a step that asks for it is rejected when the scenario loads. |
+| `settleMs` | `1000` | Milliseconds to wait after page load before classifying each `<select>` as raw or already enhanced. Gives the page's own select2/Tom Select/Chosen initialization time to hide or replace the original control before the shim decides whether to touch it. `0` switches the window off — correct only on a site that enhances nothing, where waiting cannot help. |
 | `maxVisibleOptions` | `8` | Number of options shown in the unfurled list at once before it scrolls internally. |
 | `openHoldMs` | `350` | Milliseconds the unfurled list stays open for the viewer to read before the cursor moves to the chosen option. |
 
@@ -642,13 +642,27 @@ As always for `select`, this picks **one** option: clicking it deselects whateve
 else was selected, exactly as setting the value directly does. There is no way to
 choose several options in one step.
 
+`option` is matched against the option's visible label with whitespace collapsed,
+and is then **case-sensitive** — the same rule on every shape of control, so one
+scenario cannot resolve one way on a shimmed select and another on a widget the
+page enhanced itself.
+
 If nothing can be clicked — no visible control associated with an already-enhanced
 select, a select that is on screen but carries no option list Guidebot can open,
-or no row matching `option` after opening it — the run **fails** rather than
-silently setting the value; a widget the shim cannot drive is not one Guidebot will
-pretend to have shown. The error message says which of those situations it is in.
-`compile` also probes an enhanced widget's drivability up front, so an undriveable
-one is caught there instead of partway through a render.
+no shim installed in that context at all, or no row matching `option` after
+opening the list — the run **fails** rather than silently setting the value; a
+widget the shim cannot drive is not one Guidebot will pretend to have shown. The
+error message says which of those situations it is in, naming the marker class
+where one is the cause. `compile` also probes an enhanced widget's drivability up
+front, so an undriveable one is caught there instead of partway through a render.
+
+**A click that lands on nothing fails too.** After clicking the row, Guidebot
+reads the `<select>` back and checks that it really shows `option`; if it does
+not, the step fails instead of reporting success. That covers the cases where
+there *is* a row to click and clicking it achieves nothing — a `disabled` option,
+or a widget whose list is accompanied by a toast or live region repeating the same
+label. Without the read-back such a run would finish green and produce a video in
+which the dropdown visibly never changes.
 
 For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
 loads its options over the network, for instance — use the per-step **`mode:
@@ -669,6 +683,14 @@ its DOM list:
     mode: native          # optional; defaults to config.selects.mode
 ```
 
+The override is **one-way**. `config.selects.mode: native` is not a default a step
+can override in the other direction: it decides whether the shim script is
+injected into the browser at all, so underneath it there is no shim for a step to
+opt back into. A step that asks for `mode: shim` while the global mode is `native`
+is rejected when the scenario loads, naming the step — rather than failing several
+minutes into a render, after the cursor has already clicked something unrelated on
+camera.
+
 Pair a `select` step with a `say` such as "from this list I choose …" to narrate
 the intent.
 
@@ -687,7 +709,9 @@ for `top`/`bottom`; without it, `down`/`up` moves by most of a viewport.
 
 Its purpose is to bring below-the-fold content into view so the recording shows it —
 in particular content the resolver **cannot** target, such as a live-preview
-`<iframe>` or a native select's option list. The cursor still cannot enter an iframe,
+`<iframe>`. (A native select's option list used to belong on that list and no
+longer does: the shim renders it into the DOM, so `select` drives it directly.)
+The cursor still cannot enter an iframe,
 but the scroll brings the iframe into frame. With an overlay (render) the scroll is
 an animated glide; during `compile` it jumps directly. Because it resolves no
 element, `scroll` needs no `compile` for its own sake and takes no `optional`.

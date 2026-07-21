@@ -19,6 +19,7 @@ from importlib.resources import files
 from playwright.async_api import BrowserContext
 
 from guidebot_recorder.models.config import Config, SelectsConfig
+from guidebot_recorder.selects.visibility import shape_prelude
 
 # Floor for :meth:`Selects.wait_ready`'s deadline, in seconds. Generous next to
 # the default ``settle_ms``, so it only ever fires when something is truly
@@ -33,24 +34,39 @@ DEFERRAL_FACTOR = 3
 # round trip through the CDP connection.
 READY_MARGIN = 5.0
 
-_AWAIT_READY = """(timeoutMs) => {
+# The two page-side failures, spelled as markers rather than as prose: they
+# travel back through Playwright as the text of a `playwright.Error`, and
+# :meth:`Selects.wait_ready` matches on them to raise its own Polish
+# :class:`SelectsNotReadyError`. Nothing user-facing is ever phrased here — a
+# page-side `Error` surfaces in English and as the wrong exception type,
+# contradicting the method's documented `Raises:`.
+_READY_TIMEOUT_MARKER = "guidebot selects ready timeout"
+_API_MISSING_MARKER = "guidebot selects api unavailable"
+
+_AWAIT_READY = f"""(timeoutMs) => {{
     const api = window.__guidebot_selects;
-    if (!api || !api.ready) {
-        throw new Error("guidebot selects API is unavailable after injection");
-    }
+    if (!api || !api.ready) {{
+        throw new Error({_API_MISSING_MARKER!r});
+    }}
     // Race in the page as well as in Python: an unresolved `ready` must surface
     // as an error, never as an evaluate that never returns.
     return Promise.race([
         api.ready,
-        new Promise((_resolve, reject) => {
-            window.setTimeout(() => reject(new Error("guidebot selects ready timeout")), timeoutMs);
-        }),
+        new Promise((_resolve, reject) => {{
+            window.setTimeout(() => reject(new Error({_READY_TIMEOUT_MARKER!r})), timeoutMs);
+        }}),
     ]);
-}"""
+}}"""
 
 
 class SelectsNotReadyError(RuntimeError):
-    """The widget never reported readiness for a frame within the timeout."""
+    """The widget never reported readiness for a frame within the timeout.
+
+    Also raised when the injected API is not in the frame at all: from the
+    caller's side "the widget never became usable here" is one situation with
+    one fix, and it must not reach them as a raw ``playwright.Error`` in
+    English.
+    """
 
 
 class Selects:
@@ -73,7 +89,11 @@ class Selects:
             "maxVisibleOptions": self.config.max_visible_options,
         }
         prelude = f"window.__guidebot_selects_config = {json.dumps(settings)};\n"
-        self._script = prelude + body
+        # The "is this select already enhanced?" predicate is prepended, not
+        # restated inside the widget: the recorder and the compile-time
+        # validator evaluate the same source from Python, in contexts where this
+        # widget may not be installed at all. See ``selects/visibility.py``.
+        self._script = prelude + shape_prelude() + body
 
     @property
     def script(self) -> str:
@@ -104,14 +124,25 @@ class Selects:
         """
         await context.add_init_script(script=self._script)
 
+    @staticmethod
+    def _frame_url(frame) -> str:
+        return getattr(frame, "url", "") or "(nieznany adres)"
+
     def _not_ready(self, frame, timeout: float) -> SelectsNotReadyError:
         """The user-facing failure: which frame gave up, and what to try next."""
-        url = getattr(frame, "url", "") or "(nieznany adres)"
         return SelectsNotReadyError(
             f"widget select nie zgłosił gotowości w ciągu {timeout:.1f} s "
-            f"dla ramki {url}. Zwiększ selects.settleMs, jeśli strona długo się "
-            f"inicjalizuje, albo ustaw selects.mode: native, aby zrezygnować "
-            f"z podmiany list rozwijanych na tej stronie."
+            f"dla ramki {self._frame_url(frame)}. Zwiększ selects.settleMs, jeśli "
+            f"strona długo się inicjalizuje, albo ustaw selects.mode: native, aby "
+            f"zrezygnować z podmiany list rozwijanych na tej stronie."
+        )
+
+    def _not_installed(self, frame) -> SelectsNotReadyError:
+        """The other way the barrier fails: the script never ran in this frame."""
+        return SelectsNotReadyError(
+            f"widget select nie został wstrzyknięty do ramki {self._frame_url(frame)} "
+            f"— skrypt nakładki nie wykonał się w tym dokumencie. Sprawdź, czy "
+            f"kontekst przeglądarki powstał przez install_selects()."
         )
 
     async def wait_ready(self, frame, timeout: float | None = None) -> None:
@@ -126,7 +157,8 @@ class Selects:
         default bound is :attr:`ready_timeout`, which tracks ``settle_ms``.
 
         Raises:
-            SelectsNotReadyError: the widget did not settle within ``timeout``.
+            SelectsNotReadyError: the widget did not settle within ``timeout``,
+                or never ran in this frame at all.
         """
         if timeout is None:
             timeout = self.ready_timeout
@@ -141,7 +173,13 @@ class Selects:
         except TimeoutError as exc:
             raise self._not_ready(frame, timeout) from exc
         except Exception as exc:
-            if "guidebot selects ready timeout" not in str(exc):
+            # Both page-side markers are this method's own documented failure,
+            # so both leave as `SelectsNotReadyError`. Anything else is a real
+            # page error and belongs to the caller unchanged.
+            message = str(exc)
+            if _API_MISSING_MARKER in message:
+                raise self._not_installed(frame) from exc
+            if _READY_TIMEOUT_MARKER not in message:
                 raise
             raise self._not_ready(frame, timeout) from exc
 

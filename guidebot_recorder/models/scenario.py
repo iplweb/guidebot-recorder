@@ -313,6 +313,38 @@ class Scenario(BaseModel):
                 _validate_translations(entry, str(index), expected)
         return self
 
+    @model_validator(mode="after")
+    def _step_shim_mode_needs_a_global_shim(self) -> Scenario:
+        """A step cannot opt *into* a shim the scenario never installs.
+
+        ``config.selects.mode: native`` is not a per-step default a step may
+        override in either direction — it decides whether the widget script is
+        injected into the browser context at all (``install_selects`` returns
+        ``None`` for it). Underneath it there is no shim to drive: the step
+        would reach a page with a raw ``<select>``, no DOM option list, and an
+        association heuristic that finds some unrelated sibling to click on
+        camera before failing.
+
+        Rejecting the combination here means the author learns while the
+        scenario loads, rather than several minutes into an unattended render.
+        """
+
+        if self.config.selects.mode != "native":
+            return self
+        for index, entry in enumerate(self.steps):
+            children = entry.steps if isinstance(entry, WhenBlock) else [entry]
+            for child_index, child in enumerate(children):
+                if child.select is None or child.select.mode != "shim":
+                    continue
+                label = f"{index}.{child_index}" if isinstance(entry, WhenBlock) else str(index)
+                raise ValueError(
+                    f"krok {label}: `select.mode: shim` przy `config.selects.mode: native` "
+                    "— nakładka nie jest wtedy w ogóle wstrzykiwana, więc nie ma czego "
+                    "rozwinąć. Usuń `mode: shim` z kroku albo włącz nakładkę globalnie "
+                    "(`config.selects.mode: shim`) i wyłącz ją per krok przez `mode: native`"
+                )
+        return self
+
 
 def _validate_translations(step: Step, label: str, expected: set[str]) -> None:
     actual = set(step.translations)

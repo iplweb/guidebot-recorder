@@ -21,7 +21,14 @@ from importlib.resources import files
 import pytest
 from playwright.async_api import Page, Route, async_playwright
 
-SELECTS_JS = files("guidebot_recorder.selects").joinpath("selects.js").read_text("utf-8")
+from guidebot_recorder.selects.visibility import shape_prelude
+
+# The widget body plus the one thing it is not self-contained without: the
+# shared "is this select already enhanced?" predicate, which the Python
+# controller prepends for exactly the same reason (``selects/visibility.py``).
+SELECTS_JS = shape_prelude() + files("guidebot_recorder.selects").joinpath("selects.js").read_text(
+    "utf-8"
+)
 
 # Must stay strictly below the cursor's own z-index (overlay/cursor.js:18), so
 # the synthetic cursor is never painted underneath the option list.
@@ -1172,9 +1179,19 @@ async def test_optgroups_are_headings_and_disabled_options_are_not_clickable(pag
     assert state == {"events": [], "index": 0}
 
 
-async def test_option_index_for_normalizes_whitespace_and_falls_back_to_case_insensitive(
+async def test_option_index_for_normalizes_whitespace_but_matches_case_exactly(
     page: Page,
 ) -> None:
+    """Whitespace is collapsed; case is not.
+
+    The case-insensitive fallback lived here and nowhere else: compile resolves
+    through Playwright's `select_option(label=…)` and the listbox path through
+    `_OPTION_INDEX_JS`, both exact. One scenario, one option label — and three
+    different answers depending on the control's shape. A label that differs
+    only in case must now miss on every path, which is what compile would have
+    said all along.
+    """
+
     await page.set_content(
         "<body style='margin:0'><select id='s' style='width:220px'>"
         "<option>Pierwszy</option>"
@@ -1196,7 +1213,7 @@ async def test_option_index_for_normalizes_whitespace_and_falls_back_to_case_ins
       ];
     }"""
     )
-    assert found == [1, 1, 1, 0, -1]
+    assert found == [1, 1, -1, 0, -1]
 
 
 async def test_the_label_attribute_wins_over_the_option_text_like_select_option_does(
