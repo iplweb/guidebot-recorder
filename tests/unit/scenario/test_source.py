@@ -15,7 +15,10 @@ from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.scenario.source import ScenarioSource, StepLocation, build_source
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLES = sorted((REPO_ROOT / "examples").glob("*.scenario.yaml"))
+#: ``rglob``, nie ``glob``: przykłady mieszkają też w podkatalogach
+#: (``examples/newwindow/`` — jedyny scenariusz z popupem), a to właśnie one
+#: najmocniej sprawdzają zgodność spanów z ``flat_steps()``.
+EXAMPLES = sorted((REPO_ROOT / "examples").rglob("*.scenario.yaml"))
 
 
 def _line_of(text: str, needle: str) -> int:
@@ -95,6 +98,54 @@ BROKEN_STEPS = CONFIG + textwrap.dedent(
         state: visible
         steps:
           - nope: 1
+    """
+)
+
+# Alias listy: ``lc.item(i)`` dla ``- *consent`` zwraca pozycję **definicji
+# kotwicy**, nie miejsca użycia — span wyszedłby wstecz i pociągnął cudze kroki.
+ANCHOR_ALIAS = CONFIG + textwrap.dedent(
+    """\
+    steps:
+      - say: "start"
+      - &consent
+        when: "baner zgody"
+        state: visible
+        steps:
+          - click: "Accept"
+      - navigate: "https://example.test"
+      - teach: "click login"
+      - *consent
+      - say: "koniec"
+    """
+)
+
+# Merge key: dziecko sklejonego bloku wskazuje na sekcję definicji.
+MERGE_KEY = CONFIG + textwrap.dedent(
+    """\
+    steps:
+      - say: "start"
+      - &base
+        when: "baner zgody"
+        state: visible
+        steps:
+          - click: "Accept"
+      - say: "środek"
+      - <<: *base
+        timeout: 9
+      - say: "koniec"
+    """
+)
+
+# Klucz bloku ``when:`` zapisany *po* liście ``steps:`` — nie należy do
+# ostatniego dziecka.
+TRAILING_BLOCK_KEY = CONFIG + textwrap.dedent(
+    """\
+    steps:
+      - when: "baner"
+        steps:
+          - click: "ok"
+        timeout: 5
+      - say: "koniec"
     """
 )
 
@@ -178,6 +229,82 @@ def test_last_step_span_stops_before_the_next_top_level_key():
 
     assert only.line == _line_of(TRAILING_KEY, '- say: "jedyny"')
     assert only.end_line == only.line  # `# ogon` i pusta linia przycięte
+
+
+def test_last_child_stops_before_a_block_key_written_after_the_children():
+    src = _source(TRAILING_BLOCK_KEY)
+    child = src.location(1)
+
+    assert child.line == _line_of(TRAILING_BLOCK_KEY, '- click: "ok"')
+    assert child.end_line == child.line  # `timeout: 5` należy do bloku, nie do dziecka
+    assert src.index_at_line(_line_of(TRAILING_BLOCK_KEY, "timeout: 5")) is None
+
+
+# --- aliasy i merge keys: spany muszą zostać monotoniczne -----
+
+
+def _spans(src: ScenarioSource) -> list[tuple[int, int] | None]:
+    return [None if loc is None else (loc.line, loc.end_line) for loc in src.steps]
+
+
+def _flat_count(text: str) -> int:
+    raw = YAML(typ="safe").load(text)
+    return len(Scenario.model_validate(raw).flat_steps())
+
+
+def test_alias_entry_degrades_to_a_placeholder_instead_of_a_backwards_span():
+    src = _source(ANCHOR_ALIAS)
+
+    # `- *consent` (bramka + dziecko) wskazywałby na linie definicji kotwicy
+    assert _spans(src) == [(8, 8), (9, 11), (13, 13), (14, 14), (15, 15), None, None, (17, 17)]
+    assert src.location(5) is None
+    assert src.location(6) is None
+
+
+def test_merge_key_child_degrades_to_a_placeholder():
+    src = _source(MERGE_KEY)
+
+    # bramka `- <<: *base` ma własną pozycję, ale jej dziecko wraca do definicji
+    assert _spans(src) == [(8, 8), (9, 11), (13, 13), (14, 14), (15, 16), None, (17, 17)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [pytest.param(ANCHOR_ALIAS, id="alias"), pytest.param(MERGE_KEY, id="merge-key")],
+)
+def test_placeholders_keep_the_index_alignment_with_flat_steps(text):
+    src = _source(text)
+
+    assert len(src.steps) == _flat_count(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(ANCHOR_ALIAS, id="alias"),
+        pytest.param(MERGE_KEY, id="merge-key"),
+        pytest.param(SIMPLE, id="prosty"),
+    ],
+)
+def test_known_spans_stay_increasing_and_disjoint(text):
+    src = _source(text)
+    total = len(text.splitlines())
+
+    previous_end = 0
+    for loc in src.steps:
+        if loc is None:
+            continue
+        assert 1 <= loc.line <= loc.end_line <= total
+        assert loc.line > previous_end
+        previous_end = loc.end_line
+
+
+def test_index_at_line_ignores_placeholders():
+    src = _source(ANCHOR_ALIAS)
+
+    # linia definicji kotwicy należy do kroku, który ją definiuje, a nie do aliasu
+    assert src.index_at_line(_line_of(ANCHOR_ALIAS, '- click: "Accept"')) == 2
+    assert src.index_at_line(_line_of(ANCHOR_ALIAS, "- *consent")) is None
 
 
 # --- luki i index_at_line -----

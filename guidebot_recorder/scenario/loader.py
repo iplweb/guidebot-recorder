@@ -132,10 +132,26 @@ def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Sce
     raw = _parse_source(text)
     if _looks_like_compiled_sidecar(raw, path):
         raise CompiledSidecarError(_sidecar_message(path))
-    substituted = substitute_scenario_values(raw, env)
     # zbudowane z surowego tekstu, sprzed podstawienia ${ENV}: w snippecie
     # diagnostyki widać `${HASŁO}`, nigdy samego hasła
     source = build_source(path, text)
+    if not isinstance(raw, Mapping):
+        # przed podstawieniem: `substitute_scenario_values` woła `raw.get(...)`,
+        # więc pusty (albo nie-mapowy) plik wysypywałby się `AttributeError`-em
+        # jeszcze zanim diagnostyka zdążyłaby powiedzieć, o który plik chodzi
+        raise ScenarioValidationError(
+            validation_banner(
+                source=source,
+                line=None,
+                index=None,
+                total=len(source.steps),
+                message=(
+                    "plik nie zawiera mapy YAML — oczekiwano kluczy `config:` i `steps:` "
+                    "na najwyższym poziomie (plik jest pusty albo to nie scenariusz)"
+                ),
+            )
+        )
+    substituted = substitute_scenario_values(raw, env)
     try:
         scenario = Scenario.model_validate(substituted)
     except ValidationError as exc:
@@ -169,8 +185,16 @@ def format_validation_error(
             validation_banner(source=source, line=line, index=index, total=total, message=message)
         )
     if not banners:  # nie powinno się zdarzyć — ale banner bez treści byłby gorszy
+        # Świadomie BEZ `str(exc)`: pydantic dokłada tam `input_value=…`, czyli
+        # wartość **po** podstawieniu `${ENV}` — a bannery mają nie znać sekretów.
         banners.append(
-            validation_banner(source=source, line=None, index=None, total=total, message=str(exc))
+            validation_banner(
+                source=source,
+                line=None,
+                index=None,
+                total=total,
+                message="scenariusz nie przeszedł walidacji (brak szczegółów do przypisania)",
+            )
         )
     return "\n\n".join(banners)
 
@@ -180,9 +204,9 @@ def _relevant_errors(errors: list[dict], raw: object) -> list[dict]:
 
     Jeden błąd autora daje kilka wpisów w ``exc.errors()``: krok z dwiema
     komendami — pięć (cztery z nich to „missing when", „extra_forbidden click"…
-    z niedopasowanego ``WhenBlock``), zagnieżdżony ``when:`` — trzy. Bez filtra
-    użytkownik dostałby banner „Extra inputs are not permitted: when" na kroku,
-    który *ma* być blokiem ``when:``.
+    z niedopasowanego ``WhenBlock``). Bez filtra użytkownik dostałby banner
+    „Extra inputs are not permitted: when" na kroku, który *ma* być blokiem
+    ``when:``.
     """
 
     groups: dict[int, list[dict]] = {}

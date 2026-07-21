@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,24 @@ from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil, WhenBlock
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.recorder import PointResult
+from guidebot_recorder.scenario.loader import load_scenario
+
+#: Scenariusz z pliku — jedyna droga do mapy źródła (`Scenario.source`), więc
+#: jedyna, w której bannery `guide` mogą nieść `plik:linia`.
+SCENARIO_YAML = textwrap.dedent(
+    """\
+    config:
+      title: t
+      viewport: {width: 1280, height: 720}
+      tts: {provider: p, voice: v, lang: eng}
+      baseUrl: "https://example.com"
+    steps:
+      - say: "Zaczynamy."
+      - click: "przycisk zapisu"
+    """
+)
+#: linia `- click: "przycisk zapisu"` w :data:`SCENARIO_YAML`
+CLICK_LINE = 8
 
 
 def _cfg():
@@ -212,6 +231,19 @@ def _click_scenario_and_action():
     return scenario, action
 
 
+def _loaded_scenario(tmp_path):
+    """Scenariusz wczytany z pliku — dokładnie jak w `guidebot guide`."""
+
+    path = tmp_path / "flow.scenario.yaml"
+    path.write_text(SCENARIO_YAML, encoding="utf-8")
+    scenario = load_scenario(path, env={})
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    # krok 0 to `say:` (bez akcji), krok 1 to klikanie
+    return scenario, path, _compiled([None, action])
+
+
 async def test_pause_on_error_pauses_and_reraises_untouched(tmp_path, monkeypatch):
     """A failing step pauses for inspection, then the original exception propagates."""
     pause = _RecordingPause()
@@ -236,6 +268,79 @@ async def test_pause_on_error_pauses_and_reraises_untouched(tmp_path, monkeypatc
     assert index == 0
     assert kind == "action"
     assert isinstance(exc, _Boom)
+    # scenariusz zbudowany w kodzie nie ma mapy źródła — diagnostyka degraduje
+    # się do samego `krok 1/1`, ale kwargi i tak muszą dojść komplet
+    assert pause.location == {"total": 1, "location": None, "source": None}
+
+
+async def test_pause_receives_the_step_location_of_a_loaded_scenario(tmp_path, monkeypatch):
+    """Sześć kwargów zmigrowanych w `capture.py` niesie realny span kroku."""
+
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario, _path, compiled = _loaded_scenario(tmp_path)
+
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            compiled,
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+        )
+
+    assert pause.calls[0][2] == 1  # płaski indeks kroku
+    assert pause.location["total"] == 2
+    assert pause.location["source"] is scenario.source
+    assert pause.location["location"].line == CLICK_LINE
+
+
+async def test_pause_banner_of_a_loaded_scenario_shows_file_and_line(tmp_path, monkeypatch, capsys):
+    """Cała droga: `capture` → `pause_for_inspection` → `step_banner`.
+
+    Bez tego testu `total`/`location`/`source` mogłyby dojechać do
+    `pause_for_inspection` i nie zamienić się w nic widocznego.
+    """
+
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario, path, compiled = _loaded_scenario(tmp_path)
+
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            compiled,
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+            sensitive_values=("hunter2",),
+        )
+
+    printed = capsys.readouterr().out
+    assert f"krok 2/2 — {path}:{CLICK_LINE}" in printed
+    assert '- click: "przycisk zapisu"' in printed
+    assert "hunter2" not in printed  # sekret z treści wyjątku zredagowany
+
+
+async def test_guide_error_banner_shows_file_and_line(tmp_path, monkeypatch):
+    """Komunikat błędu `guide` (nie tylko pauzy) też niesie `plik:linia`."""
+
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_false)
+    scenario, path, compiled = _loaded_scenario(tmp_path)
+
+    with pytest.raises(GuideError) as excinfo:
+        await capture_pages(
+            scenario, compiled, FakePage(), FakeRecorder(), tmp_path / "shots", timeout=15.0
+        )
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:{CLICK_LINE}" in message
+    assert f'{CLICK_LINE} |   - click: "przycisk zapisu"' in message
+    assert "uruchom `compile --force`" in message
 
 
 async def test_without_pause_on_error_the_helper_is_not_called(tmp_path, monkeypatch):

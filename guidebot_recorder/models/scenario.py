@@ -6,6 +6,7 @@ CompiledScenario (``*.compiled.yaml``), not inline on the step.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
@@ -265,20 +266,6 @@ class WhenBlock(BaseModel):
     #: plain steps only — branches do not nest
     steps: list[Step]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_nested_blocks(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        children = data.get("steps")
-        if not isinstance(children, list):
-            return data
-        for index, child in enumerate(children):
-            nested = child.get("when") if isinstance(child, dict) else getattr(child, "when", None)
-            if nested is not None:
-                raise ValueError(f"krok {index}: zagnieżdżony blok `when` nie jest wspierany")
-        return data
-
     def gate_step(self) -> Step:
         """Return the synthetic step the gate compiles and renders as."""
 
@@ -341,6 +328,40 @@ class Scenario(BaseModel):
             entry._replace(location=self._source.location(index))
             for index, entry in enumerate(flat)
         ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_blocks(cls, data: Any) -> Any:
+        """Odrzuć zagnieżdżony blok ``when:`` — wskazując dziecko, nie rodzica.
+
+        Sprawdzenie żyje tu, a nie na :class:`WhenBlock`, bo dopiero stąd widać
+        pozycję bloku-rodzica: :class:`StepPathError` z parą ``(i, j)`` daje
+        diagnostyce linię *zagnieżdżonego* ``when:`` i jeden, spójny numer kroku
+        w nagłówku. Wariant na ``WhenBlock`` musiał doklejać do treści własne,
+        lokalne ``krok {j}:`` — sprzeczne z 1-based numeracją nagłówka.
+
+        Musi być ``mode="before"``: ``WhenBlock.steps`` to ``list[Step]``
+        z ``extra="forbid"``, więc bez tej bramki autor dostałby zamiast
+        komunikatu ścianę „Extra inputs are not permitted: steps.0.when".
+        """
+
+        if not isinstance(data, Mapping):
+            return data
+        entries = data.get("steps")
+        if not isinstance(entries, list):
+            return data
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping) or "when" not in entry:
+                continue
+            children = entry.get("steps")
+            if not isinstance(children, list):
+                continue
+            for child_index, child in enumerate(children):
+                if isinstance(child, Mapping) and child.get("when") is not None:
+                    raise StepPathError(
+                        "zagnieżdżony blok `when` nie jest wspierany", (index, child_index)
+                    )
+        return data
 
     @model_validator(mode="after")
     def _complete_audio_translations(self) -> Scenario:

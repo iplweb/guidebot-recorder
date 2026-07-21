@@ -89,9 +89,19 @@ linię wskazuje.
 - Snippet: `f"{numer_linii:>7} | {treść_linii}"` — numer dosunięty do prawej
   w polu szerokości 7, dosłowna treść linii ze źródła (bez `rstrip`, bez
   zamiany tabów).
-- Snippet dłuższy niż **8 linii** ucinany: pierwsze 8 linii + wiersz
-  `        … (jeszcze {n} linii)`. **Ucięcie robi wyłącznie `render_banner`** —
-  patrz „Właściciel ucięcia" niżej.
+- Snippet dłuższy niż **8 linii** ucinany do okna 8 linii. Okno zaczyna się od
+  początku snippetu, **chyba że `caret_line` wypadłaby poza nie** — wtedy
+  przesuwa się tak, by wyśrodkować winną linię (i tak, by nie wyjść poza koniec
+  snippetu). Karetka bez swojej linii jest bezużyteczna, a snippet bez winnej
+  linii wprowadza w błąd — nagłówek wskazuje wtedy linię, której w cytacie nie
+  ma.
+  - Po każdej stronie, z której coś ucięto, dochodzi wiersz elipsy mówiący, ile
+    linii ukryto **z tej strony**: `        … (wcześniej {n} linii)` przed oknem,
+    `        … (jeszcze {n} linii)` po nim.
+  - Rzeczownik odmienia się przez przypadki: `1 linia`, `2/3/4 linie`,
+    `5 linii`, `12–14 linii`, `22/23/24 linie`, `112/113 linii`.
+  - **Ucięcie robi wyłącznie `render_banner`** — patrz „Właściciel ucięcia"
+    niżej.
 - Wiersz karetki: `" " * 10 + "^ tutaj"` — kolumna 11 to pierwszy znak treści
   linii w snippecie (7 na numer + 3 na `" | "`).
 - Treść komunikatu wcięta trzema spacjami; wielolinijkowe komunikaty zachowują
@@ -182,8 +192,9 @@ class StepLocation:
 @dataclass(frozen=True)
 class ScenarioSource:
     path: Path
-    lines: tuple[str, ...]              # linie pliku, bez znaku końca linii
-    steps: tuple[StepLocation, ...]     # indeksowane płaskim indeksem kroku
+    lines: tuple[str, ...]                     # linie pliku, bez znaku końca linii
+    steps: tuple[StepLocation | None, ...]     # indeksowane płaskim indeksem kroku;
+                                               # None = krok nielokalizowalny (placeholder)
 
     def location(self, index: int) -> StepLocation | None
     def snippet(self, loc: StepLocation) -> list[tuple[int, str]]   # PEŁNY span
@@ -230,7 +241,30 @@ Wymagania:
   span = `[start, start]`. Klucze bloku zapisane *po* liście `steps:` nie trafią
   do snippetu bramki — świadome uproszczenie na rzecz ciągłego fragmentu;
 - dzieci bloku — ta sama reguła następnego rodzeństwa, w obrębie
-  `node["steps"]`; koniec ostatniego dziecka = koniec bloku.
+  `node["steps"]`; koniec ostatniego dziecka = **ostatnia linia o wcięciu
+  głębszym niż klucz `steps:` bloku**, nie koniec bloku. Inaczej klucz zapisany
+  po liście dzieci (`timeout: 5` pod `steps:`) trafiłby do snippetu ostatniego
+  dziecka, choć należy do bloku. Te linie zostają niczyje — lustrzanie do
+  uproszczenia po stronie bramki.
+
+#### Kroki nielokalizowalne: placeholder `None`
+
+`steps.lc.item(i)` dla aliasu listy (`- *consent`) i dla merge key
+(`<<: *base`) zwraca pozycję **definicji kotwicy**, nie miejsca użycia. Span
+cofnąłby się i zacytował cudze kroki, a nagłówek wskazałby linię, w której
+danego kroku nie ma.
+
+Dlatego **spany są wymuszenie monotoniczne**: gdy wyliczony `start` nie jest
+większy od `end` poprzedniego znanego spanu, wpis zamienia się w placeholder
+`None` (stąd `tuple[StepLocation | None, ...]`). Tak samo, gdy `lc` w ogóle nie
+poda pozycji.
+
+Placeholder **zajmuje pozycję na liście, nie znika**: `len(source.steps)` zawsze
+równa się `len(Scenario.flat_steps())`, więc wyrównanie indeksów jest
+niezależne od tego, ile kroków dało się zlokalizować. Dla bloku `when:`
+placeholder zajmuje `1 + len(dzieci)` pozycji. `location()` zwraca dla takiego
+kroku `None` i banner degraduje do samego `krok n/total` bez snippetu (patrz
+„Degradacja"); `index_at_line` placeholdery pomija.
 
 **Spany nie pokrywają całego pliku.** Przycinanie zostawia luki: komentarze
 i puste linie *między* krokami nie należą do żadnego kroku (`lc.item(i)`
@@ -258,10 +292,10 @@ Zwraca linię najgłębszego trafionego węzła; `None`, gdy nie skonsumowano ni
 
 #### Właściciel ucięcia
 
-`snippet(loc)` zwraca **pełny** span. Ucięcie do 8 linii i wiersz
-`… (jeszcze n linii)` robi wyłącznie `render_banner`, bo tylko on zna `n`
-i tylko on umie wypisać wiersz bez numeru linii (który nie mieści się
-w `tuple[int, str]`). `snippet` **nie ma** parametru `max_lines`.
+`snippet(loc)` zwraca **pełny** span. Ucięcie do 8 linii, wybór okna wokół
+karetki i wiersze elipsy robi wyłącznie `render_banner`, bo tylko on zna
+`caret_line` i tylko on umie wypisać wiersz bez numeru linii (który nie mieści
+się w `tuple[int, str]`). `snippet` **nie ma** parametru `max_lines`.
 
 #### Wydajność
 
@@ -392,6 +426,11 @@ w testach) nie ma `_source`. Wtedy `FlatStep.location is None`, banner traci
 `— plik:linia` i snippet, a zostaje `krok 4/8 — treść`. To zamierzone: nie
 wolno wymuszać źródła tam, gdzie go nie ma, ani wysypywać się na jego braku.
 
+Ta sama degradacja obejmuje pojedynczy krok z placeholderem (alias, merge key —
+patrz „Kroki nielokalizowalne"): reszta kroków tego samego pliku zachowuje
+`plik:linia` i snippet, a nielokalizowalny dostaje sam numer. Zgadywanie jest
+tu gorsze niż milczenie — zły snippet cytuje cudzy krok.
+
 ## Plan testów (TDD — najpierw testy, wszystko bez przeglądarki)
 
 | Plik | Co sprawdza |
@@ -399,8 +438,9 @@ wolno wymuszać źródła tam, gdzie go nie ma, ani wysypywać się na jego brak
 | `tests/unit/scenario/test_source.py` | spany kroków top-level; blok `when:` → span bramki bez dzieci; spany dzieci; ostatni krok w pliku; `steps:` niebędące ostatnim kluczem top-level; **luki**: `index_at_line` zwraca `None` dla komentarza/pustej linii między krokami i dla linii w `config:` |
 | `tests/unit/scenario/test_source.py` | **totalność**: `steps:` skalarem, wpis listy skalarem, blok `when:` bez `steps:`, brak `steps:`, plik składniowo zepsuty → `ScenarioSource` bez wyjątku |
 | `tests/unit/scenario/test_source.py` | `node_line` na **realnych** ścieżkach: `('steps', 0, 'function-after[...]', 'enterText', 'text')`, `('steps', 1, 'WhenBlock', 'steps', 0)` (musi dać linię **dziecka**, nie bloku), `('config', 'viewport')`, `()`, ścieżka nieadresowalna |
+| `tests/unit/scenario/test_source.py` | **alias i merge key**: `- *consent` / `<<: *base` → placeholder `None` zamiast spanu cofającego się do kotwicy; `len(steps)` dalej równe `len(flat_steps())`; znane spany rosnące i rozłączne; `index_at_line` pomija placeholdery; klucz bloku zapisany po `steps:` nie należy do ostatniego dziecka |
 | `tests/unit/scenario/test_source.py` (parametryzowany) | **regresja spójności:** dla każdego `examples/*.scenario.yaml` zachodzi `len(build_source(...).steps) == len(load_scenario(...).flat_steps())`, spany rosnące i rozłączne |
-| `tests/unit/test_diagnostics.py` | banner z lokalizacją i bez; bramka vs dziecko bramki vs top-level; ucięcie po 8 liniach z wierszem elipsy; karetka pod właściwą linią; wcięcie treści wielolinijkowej; `warning=True` → prefiks `⚠ `; `sensitive` → redakcja całego bannera |
+| `tests/unit/test_diagnostics.py` | banner z lokalizacją i bez; bramka vs dziecko bramki vs top-level; ucięcie po 8 liniach z wierszem elipsy; karetka pod właściwą linią; **okno przesunięte na karetkę** wypadającą za ucięcie, z elipsą po stronie (obu stronach), z której coś ucięto; **odmiana** liczebnika w wierszu elipsy (1/2/5/12/22/112); wcięcie treści wielolinijkowej; `warning=True` → prefiks `⚠ `; `sensitive` → redakcja całego bannera |
 | `tests/unit/scenario/test_loader_validation.py` | **filtr wariantów unii**: dwie komendy w kroku → dokładnie 1 banner (nie 5); zagnieżdżony `when` → dokładnie 1 banner (nie 3); błąd pola / walidator kroku / walidator scenariusza (`StepPathError`); błąd w `config:` → banner bez `(krok n/total)`; fallback bez lokalizacji; **test bezpieczeństwa** ze `${SECRET}` |
 | `tests/unit/models/test_scenario.py:404` | `test_flat_step_is_a_named_tuple` — aktualizacja na 4-krotkę (zadanie A) |
 | `tests/unit/scenario/test_loader.py:192+` | istniejące asercje `match="brak tłumaczeń.*en-US"` itd. mają przechodzić bez zmian |

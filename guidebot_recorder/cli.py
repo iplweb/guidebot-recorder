@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import typer
@@ -50,27 +52,50 @@ def _render_reasoner() -> CodexReasoner | None:
     return CodexReasoner() if shutil.which("codex") is not None else None
 
 
-def _load_set_or_exit(path: Path) -> RenderSetPlan:
+@contextmanager
+def _scenario_errors(code: int) -> Iterator[None]:
+    """Zgłoś `ScenarioValidationError` jako gotowy banner i wyjdź z kodem `code`.
+
+    Wspólna dla wszystkich poleceń, bo scenariusz wczytuje się w każdym z nich —
+    czasem dopiero po starcie przeglądarki (`guide`, `render`). Bez tego Typer
+    renderował wyjątek jako panel tracebacku Richa, który łamie linie w środku
+    ścieżek: `plik:linia` przestawał być kopiowalny do edytora.
+
+    Banner idzie na stderr **dosłownie**: niesie własny nagłówek
+    `BŁĄD walidacji — plik:linia` i wielolinijkowy fragment YAML, więc doklejenie
+    prefiksu dałoby `BŁĄD walidacji: BŁĄD walidacji — …`, a `typer.echo` (czyli
+    `click.echo`) zapisuje tekst bez zawijania i bez znaczników Richa.
+    """
+
     try:
-        return load_render_set(path)
-    except Exception as exc:  # noqa: BLE001 — CLI reports the full manifest/scenario error
-        typer.echo(f"BŁĄD zestawu: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+        yield
+    except ScenarioValidationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=code) from None
+
+
+def _load_set_or_exit(path: Path) -> RenderSetPlan:
+    with _scenario_errors(code=1):
+        try:
+            return load_render_set(path)
+        except ScenarioValidationError:
+            raise  # gotowy banner — puszcza go `_scenario_errors`, bez prefiksu
+        except Exception as exc:  # noqa: BLE001 — CLI reports the full manifest/scenario error
+            typer.echo(f"BŁĄD zestawu: {exc}", err=True)
+            raise typer.Exit(code=1) from None
 
 
 @app.command("validate")
 def validate_cmd(path: Path) -> None:
     """Wczytaj i zwaliduj schemat scenariusza (bez przeglądarki)."""
-    try:
-        load_scenario(path)
-    except ScenarioValidationError as exc:
-        # Banner niesie własny nagłówek `BŁĄD walidacji — plik:linia`; doklejenie
-        # tu drugiego dałoby `BŁĄD walidacji: BŁĄD walidacji — …`.
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from None
-    except Exception as exc:  # noqa: BLE001 — CLI: raportujemy każdy błąd walidacji
-        typer.echo(f"BŁĄD walidacji: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+    with _scenario_errors(code=1):
+        try:
+            load_scenario(path)
+        except ScenarioValidationError:
+            raise  # gotowy banner — patrz `_scenario_errors`
+        except Exception as exc:  # noqa: BLE001 — CLI: raportujemy każdy błąd walidacji
+            typer.echo(f"BŁĄD walidacji: {exc}", err=True)
+            raise typer.Exit(code=1) from None
     typer.echo("OK")
 
 
@@ -91,9 +116,11 @@ def compile_cmd(
     except CompiledSidecarError as exc:
         typer.echo(f"BŁĄD: {exc}", err=True)
         raise typer.Exit(code=2) from None
-    if not force and compile_up_to_date(path):
-        typer.echo("nic do skompilowania (aktualne)")
-        return
+    # kod 2 jak sąsiednie odrzucenie wejścia (`CompiledSidecarError`) wyżej
+    with _scenario_errors(code=2):
+        if not force and compile_up_to_date(path):
+            typer.echo("nic do skompilowania (aktualne)")
+            return
 
     async def _run() -> None:
         async with async_playwright() as pw:
@@ -111,7 +138,9 @@ def compile_cmd(
             finally:
                 await browser.close()
 
-    asyncio.run(_run())
+    # `run_compile_in_browser` wczytuje scenariusz ponownie — po starcie przeglądarki
+    with _scenario_errors(code=2):
+        asyncio.run(_run())
     typer.echo("skompilowano")
 
 
@@ -130,13 +159,15 @@ def compile_set_cmd(
 
     plan = _load_set_or_exit(path)
     if not force:
-        try:
-            if render_set_up_to_date(plan):
-                typer.echo("nic do skompilowania (wszystkie warianty aktualne)")
-                return
-        except RenderSetError as exc:
-            typer.echo(f"BŁĄD: {exc}", err=True)
-            raise typer.Exit(code=1) from None
+        # kod 1 jak reszta obsługi błędów zestawu w tym poleceniu
+        with _scenario_errors(code=1):
+            try:
+                if render_set_up_to_date(plan):
+                    typer.echo("nic do skompilowania (wszystkie warianty aktualne)")
+                    return
+            except RenderSetError as exc:
+                typer.echo(f"BŁĄD: {exc}", err=True)
+                raise typer.Exit(code=1) from None
 
     async def _run() -> None:
         async with async_playwright() as pw:
@@ -157,11 +188,12 @@ def compile_set_cmd(
             "skompilowano warianty: " + (", ".join(result.compiled) if result.compiled else "brak")
         )
 
-    try:
-        asyncio.run(_run())
-    except RenderSetError as exc:
-        typer.echo(f"BŁĄD: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+    with _scenario_errors(code=1):
+        try:
+            asyncio.run(_run())
+        except RenderSetError as exc:
+            typer.echo(f"BŁĄD: {exc}", err=True)
+            raise typer.Exit(code=1) from None
 
 
 @app.command("setup")
@@ -196,11 +228,13 @@ def setup_cmd(
         else:
             typer.echo("session refreshed and cached")
 
-    try:
-        asyncio.run(_run())
-    except (SetupNeedsCompile, SetupSessionError) as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(1) from None
+    # `establish_session` też wczytuje scenariusz — po starcie przeglądarki
+    with _scenario_errors(code=1):
+        try:
+            asyncio.run(_run())
+        except (SetupNeedsCompile, SetupSessionError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
 
 
 @app.command("render")
@@ -244,7 +278,9 @@ def render_cmd(
         typer.echo(f"BŁĄD: {exc}", err=True)
         raise typer.Exit(code=2) from None
 
-    scenario = load_scenario(path)
+    # kod 2 jak sąsiednie odrzucenia wejścia w tym poleceniu
+    with _scenario_errors(code=2):
+        scenario = load_scenario(path)
     cfg = scenario.config
     # `run_render` reloads the scenario from `path` itself, so the hold-frame
     # flags are passed to it as explicit overrides rather than mutated onto this
@@ -293,7 +329,9 @@ def render_cmd(
             finally:
                 await browser.close()
 
-    asyncio.run(_run())
+    # `run_render` wczytuje scenariusz ponownie — już po starcie przeglądarki
+    with _scenario_errors(code=2):
+        asyncio.run(_run())
     typer.echo(f"zrenderowano: {out}")
 
 
@@ -318,12 +356,13 @@ def render_set_cmd(
             err=True,
         )
         raise typer.Exit(code=2)
-    try:
-        render_set_output_paths(plan, out_dir)
-        ensure_render_set_compiled(plan)
-    except RenderSetError as exc:
-        typer.echo(f"BŁĄD: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+    with _scenario_errors(code=1):  # kod 1 jak reszta obsługi błędów zestawu
+        try:
+            render_set_output_paths(plan, out_dir)
+            ensure_render_set_compiled(plan)
+        except RenderSetError as exc:
+            typer.echo(f"BŁĄD: {exc}", err=True)
+            raise typer.Exit(code=2) from None
 
     async def _run() -> list[Path]:
         async with async_playwright() as pw:
@@ -343,11 +382,12 @@ def render_set_cmd(
             finally:
                 await browser.close()
 
-    try:
-        outputs = asyncio.run(_run())
-    except RenderSetError as exc:
-        typer.echo(f"BŁĄD: {exc}", err=True)
-        raise typer.Exit(code=1) from None
+    with _scenario_errors(code=1):
+        try:
+            outputs = asyncio.run(_run())
+        except RenderSetError as exc:
+            typer.echo(f"BŁĄD: {exc}", err=True)
+            raise typer.Exit(code=1) from None
     for output in outputs:
         typer.echo(f"zrenderowano: {output}")
 
@@ -382,11 +422,13 @@ def guide_cmd(
             finally:
                 await browser.close()
 
-    try:
-        count = asyncio.run(_run())
-    except GuideError as exc:
-        typer.echo(f"BŁĄD: {exc}", err=True)
-        raise typer.Exit(code=2) from None
+    # `run_guide` wczytuje scenariusz po starcie przeglądarki; kod 2 jak `GuideError`
+    with _scenario_errors(code=2):
+        try:
+            count = asyncio.run(_run())
+        except GuideError as exc:
+            typer.echo(f"BŁĄD: {exc}", err=True)
+            raise typer.Exit(code=2) from None
     typer.echo(f"zbudowano przewodnik: {out} ({count} stron)")
 
 

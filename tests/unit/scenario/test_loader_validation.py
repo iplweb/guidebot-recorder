@@ -12,7 +12,12 @@ import textwrap
 
 import pytest
 
-from guidebot_recorder.scenario.loader import ScenarioValidationError, load_scenario
+from guidebot_recorder.scenario.loader import (
+    ScenarioValidationError,
+    format_validation_error,
+    load_scenario,
+)
+from guidebot_recorder.scenario.source import build_source
 
 ENV: dict[str, str] = {}
 
@@ -69,7 +74,12 @@ def test_two_commands_in_a_step_give_exactly_one_banner(tmp_path):
 
 
 def test_nested_when_block_gives_exactly_one_banner(tmp_path):
-    """Zmierzone: 3 błędy, z czego 2 to śmieci z wariantu `Step`."""
+    """Jeden banner — i jedna, niesprzeczna numeracja kroku.
+
+    Nagłówek dawał `krok 1/2` (płaski, 1-based, linia **rodzica**), a treść
+    doklejała własne `krok 0:` (0-based, lokalne dla bloku). Wskazanie ma iść na
+    dziecko, które zagnieżdża, a numer kroku ma być tylko jeden.
+    """
 
     message, path = _error(
         tmp_path,
@@ -84,8 +94,14 @@ def test_nested_when_block_gives_exactly_one_banner(tmp_path):
     )
 
     assert _banners(message) == 1
-    assert f"{path}:7" in message
+    # linia zagnieżdżonego `when:`, nie linia bloku-rodzica (7)
+    assert f"{path}:9" in message
+    assert f"{path}:7" not in message
+    assert "krok 3/3" in message  # bramka + dziecko + `say` z HEAD
     assert "zagnieżdżony blok `when` nie jest wspierany" in message
+    # treść nie dokłada konkurencyjnego numeru — w całym bannerze jest jeden
+    assert "krok 0" not in message
+    assert message.count("krok ") == 1
     assert "Extra inputs" not in message
 
 
@@ -215,6 +231,36 @@ def test_falls_back_to_a_bare_headline_without_a_location(tmp_path):
     assert "steps" in message
 
 
+def test_empty_file_gives_a_banner_instead_of_an_attribute_error(tmp_path):
+    """Pusty plik: ``AttributeError: 'NoneType' object has no attribute 'get'``.
+
+    Leciał z ``substitute_scenario_values`` — czyli *przed* diagnostyką, więc
+    użytkownik nie dostawał nawet nazwy pliku.
+    """
+
+    message, path = _error(tmp_path, "")
+
+    assert _banners(message) == 1
+    assert str(path) in message
+    assert "NoneType" not in message
+    assert "mapy" in message
+
+
+def test_non_mapping_document_gives_a_banner(tmp_path):
+    """Lista na najwyższym poziomie to też nie scenariusz."""
+
+    message, path = _error(
+        tmp_path,
+        """\
+    - say: "Pierwszy."
+""",
+    )
+
+    assert _banners(message) == 1
+    assert str(path) in message
+    assert "AttributeError" not in message
+
+
 def test_snippet_never_leaks_a_substituted_secret(tmp_path):
     """Snippet pochodzi z tekstu sprzed podstawienia `${ENV}`."""
 
@@ -230,6 +276,33 @@ def test_snippet_never_leaks_a_substituted_secret(tmp_path):
 
     assert "hunter2" not in message
     assert "${SECRET}" in message
+
+
+def test_fallback_banner_never_dumps_the_raw_pydantic_message(tmp_path):
+    """Awaryjna gałąź nie ma prawa nieść `str(exc)`.
+
+    Pydantikowe `str(exc)` zawiera `input_value=…`, czyli wartość **po**
+    podstawieniu `${ENV}` — czyli dokładnie ten sekret, którego snippet
+    diagnostyki starannie unika.
+    """
+
+    class _NoRelevantErrors(ValueError):
+        def __str__(self) -> str:
+            return "1 validation error for Scenario\n  input_value='hunter2', input_type=str"
+
+        def errors(self) -> list[dict]:
+            return []
+
+    path = tmp_path / "flow.scenario.yaml"
+    text = textwrap.dedent(HEAD)
+    path.write_text(text, encoding="utf-8")
+    source = build_source(path, text)
+
+    message = format_validation_error(_NoRelevantErrors(), source, {"steps": []})
+
+    assert _banners(message) == 1
+    assert "hunter2" not in message
+    assert "input_value" not in message
 
 
 def test_validation_error_stays_a_value_error():

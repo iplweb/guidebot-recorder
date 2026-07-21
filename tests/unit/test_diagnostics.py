@@ -11,6 +11,8 @@ import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from guidebot_recorder.diagnostics import render_banner, step_banner, validation_banner
 
 
@@ -214,7 +216,7 @@ def test_render_banner_ucina_snippet_po_osmiu_liniach():
               6 | linia 6
               7 | linia 7
               8 | linia 8
-                … (jeszcze 4 linii)
+                … (jeszcze 4 linie)
            komunikat
         """
     )
@@ -235,10 +237,38 @@ def test_render_banner_respektuje_wlasny_max_lines():
         NAGŁÓWEK
               1 | linia 1
               2 | linia 2
-                … (jeszcze 2 linii)
+                … (jeszcze 2 linie)
            komunikat
         """
     )
+
+
+@pytest.mark.parametrize(
+    ("hidden", "form"),
+    [
+        (1, "1 linia"),
+        (2, "2 linie"),
+        (3, "3 linie"),
+        (4, "4 linie"),
+        (5, "5 linii"),
+        (11, "11 linii"),
+        (12, "12 linii"),
+        (13, "13 linii"),
+        (14, "14 linii"),
+        (21, "21 linii"),
+        (22, "22 linie"),
+        (23, "23 linie"),
+        (24, "24 linie"),
+        (25, "25 linii"),
+        (112, "112 linii"),
+        (113, "113 linii"),
+        (122, "122 linie"),
+    ],
+)
+def test_render_banner_odmienia_liczbe_ukrytych_linii(hidden: int, form: str):
+    snippet = [(nr, f"linia {nr}") for nr in range(1, 1 + hidden)]
+    banner = render_banner("NAGŁÓWEK", snippet, "komunikat", max_lines=0)
+    assert banner.splitlines()[1] == f"        … (jeszcze {form})"
 
 
 def test_render_banner_stawia_karetke_pod_wlasciwa_linia_nie_na_koncu():
@@ -275,11 +305,55 @@ def test_render_banner_pomija_karetke_dla_linii_spoza_snippetu():
     assert "^ tutaj" not in banner
 
 
-def test_render_banner_pomija_karetke_gdy_linia_wypadla_przez_uciecie():
+def test_render_banner_przesuwa_okno_gdy_karetka_wypada_za_uciecie():
     snippet = [(nr, f"linia {nr}") for nr in range(1, 13)]
     banner = render_banner("NAGŁÓWEK", snippet, "komunikat", caret_line=11)
-    assert "^ tutaj" not in banner
-    assert banner.splitlines()[-2] == "        … (jeszcze 4 linii)"
+    assert banner == expected(
+        """
+        NAGŁÓWEK
+                … (wcześniej 4 linie)
+              5 | linia 5
+              6 | linia 6
+              7 | linia 7
+              8 | linia 8
+              9 | linia 9
+             10 | linia 10
+             11 | linia 11
+                  ^ tutaj
+             12 | linia 12
+           komunikat
+        """
+    )
+
+
+def test_render_banner_centruje_okno_na_karetce_i_ucina_z_obu_stron():
+    snippet = [(nr, f"linia {nr}") for nr in range(1, 21)]
+    banner = render_banner("NAGŁÓWEK", snippet, "komunikat", caret_line=12)
+    assert banner == expected(
+        """
+        NAGŁÓWEK
+                … (wcześniej 8 linii)
+              9 | linia 9
+             10 | linia 10
+             11 | linia 11
+             12 | linia 12
+                  ^ tutaj
+             13 | linia 13
+             14 | linia 14
+             15 | linia 15
+             16 | linia 16
+                … (jeszcze 4 linie)
+           komunikat
+        """
+    )
+
+
+def test_render_banner_nie_rusza_okna_gdy_karetka_miesci_sie_w_uciecu():
+    snippet = [(nr, f"linia {nr}") for nr in range(1, 13)]
+    banner = render_banner("NAGŁÓWEK", snippet, "komunikat", caret_line=8)
+    assert banner.splitlines()[1] == "      1 | linia 1"
+    assert "wcześniej" not in banner
+    assert banner.splitlines()[-2] == "        … (jeszcze 4 linie)"
 
 
 def test_render_banner_zachowuje_doslowna_tresc_linii():

@@ -43,22 +43,56 @@ def render_banner(
     """Złóż banner: nagłówek, ponumerowany fragment źródła i wcięta treść.
 
     `snippet` to pary `(numer_linii, dosłowna_treść)` — pełny span kroku;
-    ucięcie do `max_lines` (plus wiersz `… (jeszcze n linii)`) robi wyłącznie
-    ta funkcja. Karetka trafia bezpośrednio pod linię `caret_line`, o ile ta
-    linia jest w widocznej części snippetu.
+    ucięcie do `max_lines` (plus wiersze elipsy) robi wyłącznie ta funkcja.
+
+    Okno zaczyna się od początku snippetu, ale gdy `caret_line` wypadłaby poza
+    nie — przesuwa się tak, żeby wyśrodkować winną linię. Karetka bez swojej
+    linii jest bezużyteczna, a snippet bez winnej linii wprowadza w błąd.
     """
 
+    start = _window_start(snippet, caret_line, max_lines)
+    visible = snippet[start : start + max_lines] if max_lines > 0 else []
+
     lines = [headline]
-    visible = snippet[:max_lines] if max_lines > 0 else []
+    if start > 0:
+        lines.append(f"{_ELLIPSIS_INDENT}… (wcześniej {_count_of_lines(start)})")
     for number, text in visible:
         lines.append(f"{number:>{_NUMBER_WIDTH}}{_SEPARATOR}{text}")
         if caret_line is not None and number == caret_line:
             lines.append(_CARET_LINE)
-    hidden = len(snippet) - len(visible)
+    hidden = len(snippet) - start - len(visible)
     if hidden > 0:
-        lines.append(f"{_ELLIPSIS_INDENT}… (jeszcze {hidden} linii)")
+        lines.append(f"{_ELLIPSIS_INDENT}… (jeszcze {_count_of_lines(hidden)})")
     lines.extend(_indented(message))
     return "\n".join(lines)
+
+
+def _window_start(snippet: list[tuple[int, str]], caret_line: int | None, max_lines: int) -> int:
+    """Indeks pierwszej pokazywanej linii snippetu — 0, chyba że karetka wypada dalej."""
+
+    if max_lines <= 0 or caret_line is None or len(snippet) <= max_lines:
+        return 0
+    caret_index = next((i for i, (number, _) in enumerate(snippet) if number == caret_line), None)
+    if caret_index is None or caret_index < max_lines:
+        return 0
+    centred = caret_index - (max_lines - 1) // 2
+    return min(centred, len(snippet) - max_lines)
+
+
+def _count_of_lines(count: int) -> str:
+    """`count` z odmienionym rzeczownikiem: 1 linia, 2 linie, 5 linii, 22 linie, 112 linii."""
+
+    return f"{count} {_lines_noun(count)}"
+
+
+def _lines_noun(count: int) -> str:
+    """Forma rzeczownika „linia" dla liczebnika `count` (polska odmiana przez przypadki)."""
+
+    if count == 1:
+        return "linia"
+    if 12 <= count % 100 <= 14:
+        return "linii"
+    return "linie" if count % 10 in (2, 3, 4) else "linii"
 
 
 def step_banner(

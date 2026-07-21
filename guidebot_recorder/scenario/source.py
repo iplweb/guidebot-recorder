@@ -11,6 +11,12 @@ Moduł jest **totalny**: ``build_source`` woła się przed walidacją, więc dos
 także pliki niepoprawne i składniowo zepsute. Każdy taki plik daje częściowy
 albo pusty :class:`ScenarioSource` — nigdy wyjątek. Diagnostyka nie ma prawa
 wysypać się na pliku, o którym właśnie miała powiedzieć, co jest z nim nie tak.
+
+Nie każdy krok da się zlokalizować. Dla aliasu (``- *consent``) i merge key
+(``<<: *base``) ruamel zwraca pozycję **definicji kotwicy**, nie miejsca użycia —
+span cofnąłby się i pociągnął cudze linie. Takie kroki dostają placeholder
+``None``, który **zajmuje pozycję na liście**: ``len(steps)`` zawsze równa się
+``len(Scenario.flat_steps())``, a banner degraduje do samego ``krok n/total``.
 """
 
 from __future__ import annotations
@@ -46,13 +52,20 @@ class ScenarioSource:
     path: Path
     #: linie pliku, bez znaku końca linii
     lines: tuple[str, ...]
-    #: spany kroków w kolejności ``flat_steps()``
-    steps: tuple[StepLocation, ...]
+    #: spany kroków w kolejności ``flat_steps()``; ``None`` dla kroku, którego
+    #: pozycji nie da się wiarygodnie ustalić (alias, merge key) — placeholder
+    #: zajmuje pozycję, żeby indeksy zgadzały się z ``flat_steps()``
+    steps: tuple[StepLocation | None, ...]
     #: drzewo round-trip (dla :meth:`node_line`); poza porównaniem i reprezentacją
     document: Any = field(default=None, compare=False, repr=False)
 
     def location(self, index: int) -> StepLocation | None:
-        """Span kroku o płaskim indeksie ``index`` albo ``None``, gdy go nie znamy."""
+        """Span kroku o płaskim indeksie ``index`` albo ``None``, gdy go nie znamy.
+
+        ``None`` znaczy dwie rzeczy naraz: indeks poza zakresem albo krok
+        z placeholderem (alias, merge key). Dla wołającego to ta sama sytuacja —
+        lokalizacji nie ma, banner degraduje.
+        """
 
         if 0 <= index < len(self.steps):
             return self.steps[index]
@@ -99,11 +112,12 @@ class ScenarioSource:
         """Płaski indeks kroku obejmującego ``line``.
 
         ``None`` dla linii niczyich: komentarzy i pustych linii *między* krokami
-        (przycinanie spanów zostawia luki) oraz całej sekcji ``config:``.
+        (przycinanie spanów zostawia luki), całej sekcji ``config:`` oraz linii
+        kroków z placeholderem — tych po prostu nie znamy.
         """
 
         for index, loc in enumerate(self.steps):
-            if loc.line <= line <= loc.end_line:
+            if loc is not None and loc.line <= line <= loc.end_line:
                 return index
         return None
 
@@ -159,6 +173,12 @@ def _is_filler(line: str) -> bool:
     return not stripped or stripped.startswith("#")
 
 
+def _indent_of(line: str) -> int:
+    """Liczba znaków wcięcia linii."""
+
+    return len(line) - len(line.lstrip())
+
+
 def _trim(lines: tuple[str, ...], start: int, end: int) -> int:
     """Przytnij koniec spanu z pustych linii i komentarzy; nigdy poniżej ``start``."""
 
@@ -182,8 +202,12 @@ def _steps_block_end(root: Any, lines: tuple[str, ...]) -> int:
     return min(following) - 1 if following else len(lines)
 
 
-def _step_locations(document: Any, lines: tuple[str, ...]) -> list[StepLocation]:
-    """Spany kroków w kolejności ``flat_steps()``; przy każdej wątpliwości pomijamy wpis."""
+def _step_locations(document: Any, lines: tuple[str, ...]) -> list[StepLocation | None]:
+    """Spany kroków w kolejności ``flat_steps()``; przy wątpliwości placeholder ``None``.
+
+    Lista ma **zawsze** tyle pozycji, ile ``flat_steps()`` — krok, którego nie
+    umiemy zlokalizować, zajmuje swoje miejsce jako ``None``, nigdy nie znika.
+    """
 
     if not isinstance(document, CommentedMap):
         return []
@@ -192,46 +216,103 @@ def _step_locations(document: Any, lines: tuple[str, ...]) -> list[StepLocation]
         return []
 
     block_end = _steps_block_end(document, lines)
-    locations: list[StepLocation] = []
+    locations: list[StepLocation | None] = []
     for index, entry in enumerate(steps):
+        is_block = isinstance(entry, CommentedMap) and "when" in entry
         start = _item_line(steps, index)
         if start is None:
+            locations.extend([None] * _flat_width(entry if is_block else None))
             continue
         next_start = _item_line(steps, index + 1) if index + 1 < len(steps) else None
         end = _trim(lines, start, next_start - 1 if next_start else block_end)
 
-        if isinstance(entry, CommentedMap) and "when" in entry:
+        if is_block:
             locations.extend(_block_locations(entry, lines, start, end))
         else:
             locations.append(StepLocation(line=start, end_line=end, is_gate=False, gate_line=None))
-    return locations
+    return _monotonic(locations)
+
+
+def _flat_width(block: CommentedMap | None) -> int:
+    """Ile pozycji ``flat_steps()`` zajmuje wpis: blok to bramka plus dzieci, reszta to 1."""
+
+    if block is None:
+        return 1
+    children = block.get("steps")
+    return 1 + (len(children) if isinstance(children, CommentedSeq) else 0)
+
+
+def _monotonic(locations: list[StepLocation | None]) -> list[StepLocation | None]:
+    """Wymuś spany rozłączne i rosnące — cofający się span zastąp placeholderem.
+
+    Alias listy (``- *consent``) i merge key (``<<: *base``) dostają z ruamela
+    pozycję **definicji kotwicy**. Bez tej bramki span cytowałby cudze kroki,
+    a nagłówek wskazywał linię, w której danego kroku nie ma.
+    """
+
+    checked: list[StepLocation | None] = []
+    previous_end = 0
+    for loc in locations:
+        if loc is None or loc.line <= previous_end:
+            checked.append(None)
+            continue
+        checked.append(loc)
+        previous_end = loc.end_line
+    return checked
 
 
 def _block_locations(
     entry: CommentedMap, lines: tuple[str, ...], start: int, end: int
-) -> list[StepLocation]:
+) -> list[StepLocation | None]:
     """Bramka bloku ``when:`` plus jego dzieci — w kolejności wykonania.
 
     Span bramki kończy się linię przed kluczem ``steps:`` bloku; klucze zapisane
-    *po* liście dzieci nie trafią do snippetu bramki — świadome uproszczenie na
-    rzecz ciągłego fragmentu.
+    *po* liście dzieci nie trafią ani do snippetu bramki, ani do snippetu
+    ostatniego dziecka — świadome uproszczenie na rzecz ciągłego fragmentu.
     """
 
     children_key_line = _key_line(entry, "steps")
     gate_end = end if children_key_line is None else _trim(lines, start, children_key_line - 1)
-    locations = [StepLocation(line=start, end_line=gate_end, is_gate=True, gate_line=start)]
+    locations: list[StepLocation | None] = [
+        StepLocation(line=start, end_line=gate_end, is_gate=True, gate_line=start)
+    ]
 
     children = entry.get("steps")
     if not isinstance(children, CommentedSeq):
         return locations
 
+    children_end = (
+        end if children_key_line is None else _children_end(lines, children_key_line, end)
+    )
     for index, _child in enumerate(children):
         child_start = _item_line(children, index)
         if child_start is None:
+            locations.append(None)
             continue
         next_start = _item_line(children, index + 1) if index + 1 < len(children) else None
-        child_end = _trim(lines, child_start, next_start - 1 if next_start else end)
+        child_end = _trim(lines, child_start, next_start - 1 if next_start else children_end)
         locations.append(
             StepLocation(line=child_start, end_line=child_end, is_gate=False, gate_line=start)
         )
     return locations
+
+
+def _children_end(lines: tuple[str, ...], key_line: int, end: int) -> int:
+    """Ostatnia linia listy dzieci: przed pierwszym powrotem do wcięcia klucza ``steps:``.
+
+    Bez tego ostatnie dziecko połknęłoby klucze bloku zapisane *po* liście
+    (``timeout: 5`` pod ``steps:``), które należą do bloku, nie do kroku.
+    """
+
+    if not 1 <= key_line <= len(lines):
+        return end
+    key_indent = _indent_of(lines[key_line - 1])
+    last = key_line
+    for number in range(key_line + 1, min(end, len(lines)) + 1):
+        text = lines[number - 1]
+        if _is_filler(text):
+            continue
+        if _indent_of(text) <= key_indent:
+            break
+        last = number
+    return last
