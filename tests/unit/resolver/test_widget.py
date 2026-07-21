@@ -162,22 +162,32 @@ async def test_user_visible_control_falls_back_to_the_shim_button(page):
     assert await handle.get_attribute("data-guidebot-select-button") is not None
 
 
-async def test_user_visible_control_ignores_shim_button_for_a_different_select(page):
+async def test_user_visible_control_ignores_a_different_selects_visible_shim_button(page):
+    """Step 3's sibling scan must skip another select's shim button even when
+    that button is genuinely on-screen -- its normal, non-``display:none``
+    state, since a shim button is pinned to the rectangle of a real element.
+    Shim overlays are appended to ``<body>`` right alongside the selects they
+    replace, so a foreign button landing as this select's nearest following
+    sibling is a realistic arrangement, not a contrived one. It must never be
+    mistaken for this select's own widget.
+    """
     await page.set_content(
         """
         <select id="sel" data-guidebot-shimmed="uid-1" style="display:none;">
           <option>a</option>
         </select>
         <div data-guidebot-select-button data-guidebot-for="uid-OTHER"
-             style="display:none;"></div>
-        <div id="widget" style="width:50px;height:10px;">fallback widget</div>
+             style="width:50px;height:10px;"></div>
+        <div id="widget" style="width:100px;height:20px;">fallback widget</div>
         """
     )
     handle = await user_visible_control(page.locator("#sel"))
 
-    # No matching shim button for this select's uid, so it falls through to
-    # the associated-control heuristic (step 3: nearest following sibling with
-    # a non-empty box — the other select's hidden button does not have one).
+    # No matching shim button for this select's own uid, so the uid lookup
+    # falls through to the associated-control heuristic. Step 3 must skip the
+    # foreign shim button -- which has a genuine, non-empty box here, unlike a
+    # display:none button that the ordinary bounding-box check would already
+    # exclude -- and continue on to the real fallback widget.
     assert await handle.get_attribute("id") == "widget"
 
 

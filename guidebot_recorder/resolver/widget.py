@@ -30,7 +30,13 @@ from playwright.async_api import ElementHandle, JSHandle, Locator
 #:    left in place and immediately followed by the widget replacing them, so
 #:    this is a reasonable structural fallback once no explicit relationship
 #:    exists. "Following" (not preceding) matches how these libraries inject
-#:    their replacement markup.
+#:    their replacement markup. This step skips this branch's own shim
+#:    elements (``[data-guidebot-select-button]``, ``[data-guidebot-select-list]``,
+#:    and anything nested inside either) — a shim element is never, by
+#:    construction, the page's own widget, and shim overlays live at
+#:    ``<body>`` alongside the selects they replace, so a *different*
+#:    select's shim element can easily land as this select's nearest
+#:    following sibling.
 #: 4. otherwise ``null`` — the caller has exhausted every signal and must
 #:    treat the select as having no visible stand-in.
 ASSOCIATED_CONTROL_JS = """
@@ -39,6 +45,9 @@ ASSOCIATED_CONTROL_JS = """
     const rect = node.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   };
+
+  const isShimElement = (node) =>
+    node.closest("[data-guidebot-select-button], [data-guidebot-select-list]") !== null;
 
   const byIdRefList = (attr) => {
     const value = el.getAttribute(attr);
@@ -67,6 +76,7 @@ ASSOCIATED_CONTROL_JS = """
     sibling;
     sibling = sibling.nextElementSibling
   ) {
+    if (isShimElement(sibling)) continue;
     if (hasBox(sibling)) return sibling;
   }
 
