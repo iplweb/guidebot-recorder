@@ -405,6 +405,23 @@ def test_flat_step_is_a_named_tuple():
     assert tuple(flat) == (flat.step, None, False)
 
 
+# --- caption (PDF guide) -----
+
+
+def test_step_accepts_optional_caption():
+    step = Step(click="the login button", caption='Kliknij duży niebieski przycisk "Zaloguj".')
+    assert step.caption == 'Kliknij duży niebieski przycisk "Zaloguj".'
+
+
+def test_step_caption_defaults_to_none():
+    assert Step(say="hello").caption is None
+
+
+def test_step_with_only_caption_is_still_empty_step():
+    with pytest.raises(ValidationError):
+        Step(caption="tekst bez komendy i bez say")
+
+
 def test_desktop_is_a_visual_only_command():
     s = Step.model_validate({"desktop": {"icon": "firefox", "label": "FF"}, "say": "otwieram"})
     assert s.command_kind() == "desktop"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import NamedTuple
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Frame, Locator, Page
@@ -23,6 +24,12 @@ from guidebot_recorder.resolver.validate import build_locator
 
 # WaitState → the state accepted by Playwright's locator.wait_for
 _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enabled": "visible"}
+
+
+class PointResult(NamedTuple):
+    locator: Locator
+    box: dict | None
+    center: tuple[float, float] | None
 
 
 class Recorder:
@@ -64,26 +71,43 @@ class Recorder:
         """The SFX hook (or ``None`` when muted) — reused for the address bar."""
         return self._on_sfx
 
-    async def _point_and_prepare(self, target: Target, *, click_sound: bool = False) -> Locator:
+    async def point(
+        self, target: Target, *, ripple: bool = True, click_sound: bool = False
+    ) -> PointResult:
+        """Resolve the target, scroll it into view, move the cursor onto it.
+
+        Returns the locator plus the target's bounding box and center (viewport
+        pixels) so callers (e.g. the PDF guide) can annotate without re-resolving.
+        ``ripple=False`` suppresses the click ring — a still capture wants a
+        clean frame. ``box``/``center`` are None when the element has no box.
+        """
         locator = await build_locator(self.frame, target)
         # scroll to the target on BOTH axes — an element can be off-screen horizontally
         # too, and Playwright's auto-scroll is vertically centric
         await locator.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+        box: dict | None = None
+        center: tuple[float, float] | None = None
         rippled = False
         if self.overlay is not None:
             box = await locator.bounding_box()
             if box is not None:
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
+                center = (cx, cy)
                 await self.overlay.move_to(self.page, cx, cy)
-                await self.overlay.ripple(self.page, flash=click_sound)
-                if click_sound and self._on_sfx is not None:
-                    self._on_sfx("click")  # AT ripple time, before the settle pause
-                rippled = True
-                await self.page.wait_for_timeout(self.settle_ms)
+                if ripple:
+                    await self.overlay.ripple(self.page, flash=click_sound)
+                    if click_sound and self._on_sfx is not None:
+                        self._on_sfx("click")  # AT ripple time, before the settle pause
+                    rippled = True
+                    await self.page.wait_for_timeout(self.settle_ms)
         if click_sound and not rippled and self._on_sfx is not None:
             self._on_sfx("click")  # fallback: no overlay / no bbox
-        return locator
+        return PointResult(locator, box, center)
+
+    async def _point_and_prepare(self, target: Target, *, click_sound: bool = False) -> Locator:
+        res = await self.point(target, ripple=True, click_sound=click_sound)
+        return res.locator
 
     async def navigate(self, url: str) -> None:
         # For the main window ``self.frame`` is the site iframe, so this navigates
