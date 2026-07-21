@@ -24,7 +24,12 @@ from playwright.async_api import Page, async_playwright
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder import recorder as recorder_module
-from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
+from guidebot_recorder.recorder.recorder import (
+    OPTION_MISSING,
+    UNDRIVABLE,
+    Recorder,
+    SelectDriveError,
+)
 from guidebot_recorder.selects import SelectsNotReadyError
 from guidebot_recorder.selects.visibility import shape_prelude
 
@@ -1091,3 +1096,197 @@ async def test_ripple_false_keeps_the_click_ring_out_of_a_still_frame(page):
     assert rings == []
     assert await page.locator("select").input_value() == "BibTeX"
     assert overlay.pos != (0.0, 0.0)  # the cursor still travelled
+
+
+# --- a select the page adds mid-run ----------------------------------------
+
+
+#: A form that grows a criteria row on demand, the shape every "add another
+#: filter" page has. The new row's ``<select>`` exists only after the click, so
+#: it is classified by a *later* pass than the one ``ready`` reports.
+_GROWING_FORM = (
+    "<body style='margin:0'>"
+    "<button id='add' style='width:200px;height:30px'>Dodaj pole</button>"
+    "<div id='rows'></div>"
+    "<script>"
+    "document.getElementById('add').addEventListener('click', () => {"
+    "  const s = document.createElement('select');"
+    "  s.setAttribute('aria-label', 'Pole');"
+    "  s.style.width = '220px';"
+    "  s.innerHTML = '<option>Tytuł pracy</option><option>Zakres lat</option>';"
+    "  document.getElementById('rows').appendChild(s);"
+    "});"
+    "</script></body>"
+)
+
+
+async def test_a_select_added_mid_run_is_driven_through_the_shim(page):
+    """The readiness barrier must cover the pass a *mutation* owes, not just the first.
+
+    `ready` resolves once, at the first classification pass, and never re-arms.
+    A select the page appends mid-run is therefore unshimmed for a whole settle
+    window while every barrier in compile and render reports "ready" — so a
+    `select:` step landing inside that window found a bare `<select>`, could not
+    unfurl a DOM list for it, and failed with "nakładka jej nie objęła".
+
+    Recorded against the real symptom: a criteria row added by an "add field"
+    button, then chosen from in the very next step.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_GROWING_FORM)
+    await overlay.install(page)
+    # Long enough that the pass the click owes is still pending when the next
+    # step starts — the production default is 1000 ms.
+    await _install_selects(page, settleMs=400)
+    await page.evaluate(_MOUSEDOWN_SPY)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    await rec.click(RoleTarget(role="button", name="Dodaj pole"))
+    await rec.select(RoleTarget(role="combobox", name="Pole"), "Zakres lat")
+
+    assert await page.locator("#rows select").input_value() == "Zakres lat"
+    # ...and it was chosen *on camera*: beat 2 clicked our option row, which
+    # only exists when the shim covered this select.
+    assert await _hits(page) == ["button", "select", "option:1"]
+
+
+# --- which refusals mean "the option is not on offer" ------------------------
+# `SelectDriveError.reason` is the only thing that separates a step an
+# `optional: true` author asked to be shrugged off from a step that is simply
+# broken, so every raise site is pinned here rather than left to whichever
+# caller happens to read it. The rule is one sentence: `OPTION_MISSING` means
+# the control does not carry that label, and *nothing else* does.
+
+
+async def test_a_label_the_shimmed_select_does_not_carry_is_option_missing(page):
+    overlay = await _raw_page(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "nie ma takiej")
+
+    assert excinfo.value.reason == OPTION_MISSING
+
+
+async def test_a_label_the_listbox_does_not_carry_is_option_missing(page):
+    overlay = await _listbox_page(page, "multiple size='3'", ["zwykłe", "pilne"])
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "nie ma takiej")
+
+    assert excinfo.value.reason == OPTION_MISSING
+
+
+async def test_a_page_widget_whose_select_lost_the_option_is_option_missing(page):
+    """The widget still draws the row; the `<select>` behind it no longer offers it.
+
+    A page widget keeps the original's `<option>` elements — that is what the
+    form submits — so the underlying select is the honest answer to "is this
+    option on offer?", and asking it is what lets this case be told apart from
+    the one below.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_enhanced(["Alfa"], ["Alfa", "Beta"]))
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    assert excinfo.value.reason == OPTION_MISSING
+
+
+async def test_a_widget_that_never_draws_the_row_is_not_option_missing(page, monkeypatch):
+    """The option *is* on offer — the widget failed to render it. That is a bug.
+
+    The mirror image of the test above, and the reason the classification asks
+    the `<select>` rather than reading the timeout as "no such option": here a
+    caller must not skip, because the step it was told to perform is performable
+    and simply did not happen.
+    """
+
+    monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
+    overlay = Overlay()
+    await page.set_content(_enhanced(["Alfa", "Beta"], ["Alfa"]))
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_shim_removed_mid_step_is_not_option_missing(page):
+    """The label is spelled perfectly; the page took the control over mid-step."""
+
+    overlay = Overlay()
+    await page.set_content(_RAW_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    await page.evaluate(
+        """() => {
+      document.querySelector("select").addEventListener("mousedown", () => {
+        document.querySelector("select").classList.add("select2-hidden-accessible");
+      }, true);
+    }"""
+    )
+    rec = Recorder(page, overlay, open_hold_ms=300)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_disabled_option_is_not_option_missing(page):
+    """`disabled` means the option is there and refuses to be chosen."""
+
+    overlay = Overlay()
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_click_that_did_not_take_is_not_option_missing(page):
+    """The decoy case: the cursor landed on a node that only echoes the label."""
+
+    overlay = Overlay()
+    await page.set_content(_enhanced_with_decoy(["Alfa", "Beta"], ["Alfa", "Beta"], "Beta"))
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    assert excinfo.value.reason == UNDRIVABLE
+
+
+async def test_a_control_with_nothing_to_unfurl_is_not_option_missing(page):
+    """A hidden select with no stand-in offers the option; it cannot be driven."""
+
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' style='display:none'>"
+        "<option>Alfa</option><option>Beta</option></select></body>"
+    )
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "Beta")
+
+    assert excinfo.value.reason == UNDRIVABLE

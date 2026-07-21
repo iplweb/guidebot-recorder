@@ -9,13 +9,21 @@ from importlib.resources import files
 from playwright.async_api import BrowserContext, Page
 
 from guidebot_recorder.models.config import CursorConfig, Viewport
+from guidebot_recorder.overlay.geometry import Ellipse, ellipse_perimeter
 
 _API_IS_READY = """() => {
     const api = window.__guidebot_cursor;
-    return !!api && ["ensure", "moveTo", "ripple", "highlight"].every(
+    return !!api && ["ensure", "moveTo", "ripple", "highlight", "encircle"].every(
         (name) => typeof api[name] === "function"
     );
 }"""
+
+#: Bounds on one lap of the `highlight` ellipse. Deliberately NOT the cursor's
+#: min/max glide duration: those are tuned for travel along a straight line, and
+#: an ellipse around a wide table runs several thousand pixels — it would hit that
+#: ceiling and lap *faster* than a small one, backwards from a constant hand speed.
+ENCIRCLE_MIN_MS = 600.0
+ENCIRCLE_MAX_MS = 2600.0
 
 _RESTORE_POSITION = """([x, y]) => {
     const api = window.__guidebot_cursor;
@@ -115,6 +123,52 @@ class Overlay:
             [target[0], target[1], duration],
         )
         self.pos = target
+
+    def lap_duration(self, rx: float, ry: float) -> float:
+        """Duration (ms) of one lap around an ellipse, at the cursor's own speed."""
+
+        perimeter = ellipse_perimeter(Ellipse(cx=0.0, cy=0.0, rx=rx, ry=ry))
+        return max(ENCIRCLE_MIN_MS, min(ENCIRCLE_MAX_MS, perimeter / self.cursor.speed))
+
+    async def encircle(
+        self,
+        page: Page,
+        *,
+        cx: float,
+        cy: float,
+        rx: float,
+        ry: float,
+        loops: int,
+        hold: float,
+        color: str,
+    ) -> None:
+        """Lap the ellipse ``loops`` times, leaving a marker trail, then hold and fade.
+
+        The cursor must already sit on the entry point (3 o'clock) — ``Recorder``
+        glides it there with :meth:`move_to` so the approach keeps the usual arc.
+        ``hold`` is in seconds, like every other pause in a scenario.
+        """
+
+        await self.ensure(page)
+        await page.evaluate(
+            "([cx, cy, rx, ry, options]) =>"
+            " window.__guidebot_cursor.encircle(cx, cy, rx, ry, options)",
+            [
+                cx,
+                cy,
+                rx,
+                ry,
+                {
+                    "loops": loops,
+                    "holdMs": hold * 1000,
+                    "msPerLap": self.lap_duration(rx, ry),
+                    "color": color,
+                },
+            ],
+        )
+        # A whole number of laps ends where it started; keep Python's authoritative
+        # position in step so the next move's arc is measured from the truth.
+        self.pos = (cx + rx, cy)
 
     async def ripple(self, page: Page, *, flash: bool = False) -> None:
         """Start a click ripple at the current cursor position.

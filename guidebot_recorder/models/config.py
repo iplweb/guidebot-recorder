@@ -164,6 +164,22 @@ class DesktopConfig(BaseModel):
     color: str = "#1f3a63"  # granatowy — a calm desktop navy
 
 
+class HighlightConfig(BaseModel):
+    """Film-wide defaults for the ``highlight`` step; each step may override them.
+
+    Not part of :func:`config_hash`: the marks are drawn over an already-resolved
+    target, so changing their look never invalidates a compiled reference.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    color: str = "rgba(250,204,21,.85)"  # żółty zakreślacz
+    padding: float = Field(default=8.0, ge=0)
+    # A ceiling on purpose: past a handful of laps this stops reading as
+    # "look here" and starts reading as a stuck animation.
+    loops: int = Field(default=2, ge=1, le=5)
+    hold: float = Field(default=0.6, ge=0)
+
+
 class FadeConfig(BaseModel):
     """Render-only fade from/to a flat colour at the film's two ends.
 
@@ -338,6 +354,7 @@ class Config(BaseModel):
     sound: SoundConfig = Field(default_factory=SoundConfig)
     intro: IntroConfig = Field(default_factory=IntroConfig)
     desktop: DesktopConfig = Field(default_factory=DesktopConfig)
+    highlight: HighlightConfig = Field(default_factory=HighlightConfig)
     fade: FadeConfig = Field(default_factory=FadeConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
     selects: SelectsConfig = Field(default_factory=SelectsConfig)

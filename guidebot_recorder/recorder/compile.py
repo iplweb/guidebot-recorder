@@ -108,6 +108,8 @@ def _short(step: Step, limit: int = 60) -> str:
         return f"desktop: {step.desktop.icon}"
     if step.enter_text is not None:
         return f"→ {step.enter_text.into}"
+    if step.highlight is not None:
+        return f"◯ {step.highlight.what}"
     if step.wait is not None:
         return step.wait.until if isinstance(step.wait, WaitUntil) else f"{step.wait}s"
     return ""
@@ -819,11 +821,13 @@ async def _compile_step(
         try:
             await recorder.click(target, before_click=before_click)
         except PlaywrightError:
-            # A "close" button whose onclick calls ``window.close()`` can race the
-            # click and raise TargetClosedError once the page tears down. If the
-            # click closed the page, its intent succeeded — swallow it and let the
-            # caller observe the now-closed page (mirrors the apply_readiness
-            # tolerance below). Any other click failure (page still open) raises.
+            # The click *itself* tolerates the window it closed — see
+            # ``Recorder.click``, which both compile and render go through. What
+            # is left for this layer is the run-up: resolving and pointing at a
+            # target on a page that a previous step's drift already tore down.
+            # That is still this window's death rather than a distinct failure,
+            # so hand it to the caller's lifecycle checks the same way. Any
+            # failure with the page still open raises.
             if not page.is_closed():
                 raise
     elif action == "hover":
@@ -849,6 +853,11 @@ async def _compile_step(
             # `config.selects` block whose widget never settled — so both arrive
             # through the banner, with `plik:linia` and the fragment.
             raise RuntimeError(step_message(str(exc))) from exc
+    elif action == "highlight":
+        # Nothing to perform: the command only marks the target, which compile has
+        # already resolved and frozen. Spelled out rather than left to fall off the
+        # end of the chain, so the no-op reads as a decision, not an omission.
+        pass
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

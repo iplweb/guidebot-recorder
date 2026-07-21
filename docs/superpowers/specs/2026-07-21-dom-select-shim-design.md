@@ -197,6 +197,16 @@ per navigation instead of once per step: it resolves nothing (every target is
 already frozen), so the only instant at which the shimmed DOM has to exist is
 after the document it will photograph has loaded.
 
+That promise answers only for page *load*, though, and it never re-arms. A step
+that adds a criteria row leaves the next step facing a `<select>` the pending
+pass has not reached, and the barrier waves it through: the step then finds a
+bare control with no DOM list and fails with "the shim did not cover it". So the
+barrier both sides actually take is `api.settled()` — a promise for the pass
+that is owed *at the moment of asking*, which is `ready` when none is. It is
+deliberately not "wait for the page to go quiet": a document that mutates every
+frame (our own `cursor.js` does, mid-glide) is never quiet, while a pass already
+owed is capped at `MAX_DEFERRAL_FACTOR` settle windows.
+
 ### 4. Choreography — two beats instead of arrow keys
 
 `Recorder._step_option_visibly` (`recorder.py:158-192`) is replaced by:

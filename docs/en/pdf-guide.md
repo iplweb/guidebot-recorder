@@ -43,6 +43,9 @@ Screenshots are overlaid with visual markers:
 - **Red circle** — Mouse click target.
 - **Red frame** — Text entered into a field (from `enterText` or literal `teach` typing).
 - **Glow** (soft halo) — Hover state on an element.
+- **Ellipse** — A `highlight` step's mark, in the colour the scenario chose. Instead of
+  the circling cursor the film shows, the guide draws the finished ellipse around the
+  control or area being pointed at.
 
 ## Dropdowns (`select`)
 
@@ -67,6 +70,13 @@ the error message says so and names the option it was trying to choose.
 
 Both settings are documented in the
 [scenario reference](scenario-reference.md).
+
+A step marked `optional: true` is skipped when the list **does not contain** the wanted
+option — the one case where skipping silently is right, because that is exactly what
+`optional` claims. Every other dropdown failure (a click that did not change the
+selection, a widget that cannot be unfurled, the overlay removed mid-step) stops the
+guide even for an optional step: otherwise the page would vanish from the PDF without a
+word and the defect would stay on the site.
 
 ## Narration text: `say`, `teach`, or `caption`
 

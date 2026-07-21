@@ -212,10 +212,10 @@ legend (arrows, circles, frames, glows).
 | `--verbose`, `-v` | off | Show page-build progress and step details. |
 
 This command makes no LLM calls. Each guide page captures the frame at the moment an
-interactive step (`click`, `hover`, `enterText`, `teach`) completes. `navigate` steps
-produce a single text-only page. `slide` steps insert a visual section divider. `wait`
-and `when` gates produce no output; a missing conditional element causes its whole branch
-to be skipped.
+interactive step (`click`, `hover`, `enterText`, `select`, `highlight`, `teach`)
+completes. `navigate` steps produce a single text-only page. `slide` steps insert a
+visual section divider. `wait` and `when` gates produce no output; a missing
+conditional element causes its whole branch to be skipped.
 
 Use `caption:` on a step to override the PDF text (falls back to `say` or `teach` if
 omitted). See [Building step-by-step PDF guides](pdf-guide.md) for the full

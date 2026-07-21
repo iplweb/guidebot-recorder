@@ -14,7 +14,13 @@ from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Select, Step, WaitUntil, WhenBlock
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.recorder import PointResult, SelectDriveError, SelectReveal
+from guidebot_recorder.recorder.recorder import (
+    OPTION_MISSING,
+    UNDRIVABLE,
+    PointResult,
+    SelectDriveError,
+    SelectReveal,
+)
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.selects import SelectsNotReadyError
 
@@ -565,6 +571,182 @@ async def test_native_mode_installs_no_controller_and_waits_for_nothing(tmp_path
     )  # no `selects=`: must not raise
 
 
+def _recording_reuse_failure(calls, reason=None):
+    """Stand-in for `reuse_failure` that records the `option=` it was handed."""
+
+    async def _f(_frame, _cached, option=None):
+        calls.append(option)
+        return reason
+
+    return _f
+
+
+async def test_select_step_hands_the_wanted_option_to_reuse_validation(tmp_path, monkeypatch):
+    """`guide` is the one caller that knows the label — it has to pass it on.
+
+    Without it `validate_compile_time` only checks the element, so an option
+    that vanished from the DOM between `compile` and `guide` is not caught here
+    and instead hangs `select_option` until Playwright's timeout.
+    """
+
+    calls: list[str | None] = []
+    monkeypatch.setattr(capture, "reuse_failure", _recording_reuse_failure(calls))
+    scenario = Scenario(
+        config=_cfg(), steps=[Step(select=Select(from_="zakres", option="Zakres lat"))]
+    )
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    await capture_pages(
+        scenario, _compiled([action]), FakePage(), FakeRecorder(), tmp_path / "shots", timeout=15.0
+    )
+    assert calls == ["Zakres lat"]
+
+
+async def test_non_select_step_passes_no_option_to_reuse_validation(tmp_path, monkeypatch):
+    """Only a `select` step has a label; everything else must validate as before."""
+
+    calls: list[str | None] = []
+    monkeypatch.setattr(capture, "reuse_failure", _recording_reuse_failure(calls))
+    scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    await capture_pages(
+        scenario, _compiled([action]), FakePage(), FakeRecorder(), tmp_path / "shots", timeout=15.0
+    )
+    assert calls == [None]
+
+
+async def test_select_with_a_vanished_option_fails_with_a_polish_sentence(tmp_path, monkeypatch):
+    """The payoff: a sentence before the action runs, not a Playwright traceback.
+
+    `cli.py` only catches `GuideError`, so the alternative the user saw was an
+    English stack trace after a 10–15s wait.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_reason("option_missing"))
+    scenario = Scenario(
+        config=_cfg(), steps=[Step(select=Select(from_="zakres", option="Zakres lat"))]
+    )
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    recorder = FakeRecorder()
+    with pytest.raises(GuideError) as exc_info:
+        await capture_pages(
+            scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
+        )
+    assert "nie ma żądanej opcji" in str(exc_info.value)
+    # it must fail *before* the control is driven — that is the whole point
+    assert recorder.point_calls == []
+
+
+class SelectFailingRecorder(FakeRecorder):
+    """Points at the control fine, then refuses to choose the option.
+
+    The DOM shape behind a vanished option: the `<select>` is there and `point`
+    succeeds, so the `try/except` around `point` never sees the failure that
+    actually happens — it comes out of the choreography, one call later.
+
+    `reason` is what the recorder tells the caller the refusal *means*, and the
+    default here is the only one an optional step may act on.
+    """
+
+    reason = OPTION_MISSING
+
+    async def select(self, target, option, *, native=False, ripple=True, on_revealed=None):
+        self.select_calls.append((target, option, native, ripple))
+        raise SelectDriveError(
+            f'lista select#zakres nie zawiera opcji „{option}"', reason=self.reason
+        )
+
+
+class UndrivableSelectRecorder(SelectFailingRecorder):
+    """The same shape of failure for a reason that is not the option's absence."""
+
+    reason = UNDRIVABLE
+
+
+async def test_optional_select_with_a_missing_option_skips_the_step(tmp_path, monkeypatch):
+    """`optional: true` has to cover the select, not just the pointing.
+
+    Optional steps skip reuse validation entirely, so a vanished option surfaces
+    from the drive itself. Guarding only `recorder.point` meant an optional
+    select could still take the whole guide down.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[Step(select=Select(from_="zakres", option="Zakres lat"), optional=True)],
+    )
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    pages = await capture_pages(
+        scenario,
+        _compiled([action]),
+        FakePage(),
+        SelectFailingRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+    )
+    assert pages == []
+
+
+async def test_mandatory_select_with_a_missing_option_still_raises(tmp_path, monkeypatch):
+    """Skipping is what `optional` buys; a mandatory step must still fail loud."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(), steps=[Step(select=Select(from_="zakres", option="Zakres lat"))]
+    )
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    with pytest.raises(GuideError, match="nie zawiera opcji"):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            SelectFailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+
+
+async def test_optional_select_still_fails_when_the_control_cannot_be_driven(tmp_path, monkeypatch):
+    """`optional` means "if the option is on offer", not "if the step works".
+
+    The trap this guards: the skip and the loud failures arrive through the same
+    exception type, so a resolution that catches `SelectDriveError` wholesale
+    reads *every* broken dropdown — a click that did not take, a widget with
+    nothing to unfurl, a shim removed mid-step — as "the option was not there"
+    and drops the step from the PDF without a word. That is precisely the silent
+    unwatchable output the choreography was written to make impossible, and it
+    would be invisible: the guide would succeed.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[Step(select=Select(from_="zakres", option="Zakres lat"), optional=True)],
+    )
+    action = CachedAction(
+        action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
+    )
+    with pytest.raises(GuideError, match="nie zawiera opcji"):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            UndrivableSelectRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+
+
 class _Boom(RuntimeError):
     """A step failure that is neither PlaywrightError nor GuideError."""
 
@@ -744,8 +926,13 @@ async def test_pause_receives_the_sensitive_values(tmp_path, monkeypatch):
 async def test_select_action_without_select_step_raises(tmp_path, monkeypatch):
     """The sidecar recorded a `select` action, but the scenario step it maps to
     isn't a select step (e.g. the scenario was edited by hand after freezing).
-    This must raise a GuideError telling the user to re-freeze, not silently
+    This must raise a GuideError telling the user to re-compile, not silently
     call select_option with a nonexistent option.
+
+    A plain `compile` is the right advice: editing the step changed its
+    `command_kind`, so the fingerprint no longer matches and the entry is
+    re-resolved without `--force`. Recommending `--force` would needlessly
+    re-freeze every other step in the scenario.
     """
     monkeypatch.setattr(capture, "reuse_failure", _async_none)
     scenario = Scenario(config=_cfg(), steps=[Step(click="jakiś przycisk")])
@@ -753,10 +940,12 @@ async def test_select_action_without_select_step_raises(tmp_path, monkeypatch):
         action="select", target=_target(), expect="none", fingerprint=_fp(command_kind="select")
     )
     recorder = FakeRecorder()
-    with pytest.raises(GuideError, match="compile --force"):
+    with pytest.raises(GuideError) as exc_info:
         await capture_pages(
             scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
         )
+    assert "uruchom `compile`" in str(exc_info.value)
+    assert "--force" not in str(exc_info.value)
 
 
 async def test_scroll_without_say_calls_recorder_but_makes_no_page(tmp_path):

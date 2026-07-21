@@ -53,10 +53,15 @@ _AWAIT_READY = f"""(timeoutMs) => {{
     if (!api || !api.ready) {{
         throw new Error({_API_MISSING_MARKER!r});
     }}
-    // Race in the page as well as in Python: an unresolved `ready` must surface
+    // `settled()` rather than `ready`: the barrier has to cover the pass a DOM
+    // mutation owes, not only the first one. `ready` never re-arms, so a select
+    // the page appended a moment ago reports ready while still unclassified.
+    // `ready` stays the fallback for a page carrying a partial API object.
+    const barrier = typeof api.settled === "function" ? api.settled() : api.ready;
+    // Race in the page as well as in Python: an unresolved barrier must surface
     // as an error, never as an evaluate that never returns.
     return Promise.race([
-        api.ready,
+        barrier,
         new Promise((_resolve, reject) => {{
             window.setTimeout(() => reject(new Error({READY_TIMEOUT_MARKER!r})), timeoutMs);
         }}),
@@ -151,15 +156,25 @@ class Selects:
         )
 
     async def wait_ready(self, frame, timeout: float | None = None) -> None:
-        """Block until the frame's first classification pass has finished.
+        """Block until the frame owes no classification pass.
 
         Without this barrier a step could resolve or run against a page that has
         not been shimmed yet, so compile and render would see different DOM for
         the same instant.
 
+        "Owes no pass", not "has run its first pass": callers take this before
+        *every* step with a target, and the step before this one may well have
+        added the select this one drives. The widget's ``ready`` promise settles
+        at page load and never re-arms, so awaiting it let a step drive a select
+        that the pending pass had not reached yet — a bare ``<select>`` with no
+        DOM list to unfurl, failing with "the shim did not cover it". The widget
+        answers the right question as ``settled()``.
+
         Bounded on purpose: waiting forever would turn any page whose widget
         never settles into a compile or render that hangs with no diagnosis. The
-        default bound is :attr:`ready_timeout`, which tracks ``settle_ms``.
+        default bound is :attr:`ready_timeout`, which tracks ``settle_ms`` — and
+        still fits, because a pending pass is itself capped at
+        ``DEFERRAL_FACTOR`` settle windows.
 
         Raises:
             SelectsNotReadyError: the widget did not settle within ``timeout``,

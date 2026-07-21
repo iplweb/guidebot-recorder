@@ -9,10 +9,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from guidebot_recorder.models.action import Expect, WaitState
-from guidebot_recorder.models.config import Config
+from guidebot_recorder.models.config import Config, HighlightConfig
 
 if TYPE_CHECKING:  # tylko dla typów — import w runtime zapętliłby się przez `scenario/__init__`
     from guidebot_recorder.scenario.source import ScenarioSource, StepLocation
@@ -40,6 +40,7 @@ PRIMARY_COMMANDS = (
     "hover",
     "enter_text",
     "select",
+    "highlight",
     "scroll",
     "wait",
     "slide",
@@ -89,6 +90,57 @@ class Select(BaseModel):
     from_: str = Field(alias="from")
     option: str
     mode: Literal["shim", "native"] | None = None
+
+
+class ResolvedHighlight(NamedTuple):
+    """A :class:`Highlight` with every knob filled in from ``config.highlight``."""
+
+    what: str
+    padding: float
+    loops: int
+    hold: float
+    color: str
+
+
+class Highlight(BaseModel):
+    """Draw attention to a control or an area without touching it.
+
+    ``what`` is the semantic target — a control ("przycisk Zapisz") or a whole
+    region ("tabela z wynikami"); an area is just a container element, so the
+    resolver treats both alike. In the film the cursor laps an ellipse around the
+    target, leaving a marker trail behind it; in the PDF guide the same ellipse is
+    drawn onto the screenshot. Nothing is clicked, hovered or typed: this is the
+    one command that points at the page without changing it.
+
+    The knobs are ``None`` when the step says nothing about them — :meth:`resolved`
+    fills them from ``config.highlight``, so the inheritance rule lives in exactly
+    one place instead of being re-derived by the film and the guide.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    what: str
+    padding: float | None = Field(default=None, ge=0)
+    loops: int | None = Field(default=None, ge=1, le=5)
+    hold: float | None = Field(default=None, ge=0)
+    color: str | None = None
+
+    @field_validator("what")
+    @classmethod
+    def _what_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("`highlight` bez celu — podaj, co zakreślić")
+        return value
+
+    def resolved(self, defaults: HighlightConfig) -> ResolvedHighlight:
+        """Merge this step's overrides onto the film-wide defaults."""
+
+        return ResolvedHighlight(
+            what=self.what,
+            padding=defaults.padding if self.padding is None else self.padding,
+            loops=defaults.loops if self.loops is None else self.loops,
+            hold=defaults.hold if self.hold is None else self.hold,
+            color=defaults.color if self.color is None else self.color,
+        )
 
 
 class Scroll(BaseModel):
@@ -170,6 +222,7 @@ class Step(BaseModel):
     hover: str | None = None
     enter_text: EnterText | None = Field(default=None, alias="enterText")
     select: Select | None = None
+    highlight: Highlight | None = None
     scroll: Literal["up", "down", "top", "bottom"] | Scroll | None = None
     wait: float | WaitUntil | None = None
     slide: Slide | None = None
@@ -181,6 +234,19 @@ class Step(BaseModel):
     #: tolerate an absent element instead of failing the run (single-step shorthand)
     optional: bool = False
     translations: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("highlight", mode="before")
+    @classmethod
+    def _accept_bare_target(cls, value: Any) -> Any:
+        """``highlight: "przycisk"`` is shorthand for ``highlight: {what: "przycisk"}``.
+
+        Normalizing here rather than in an accessor (the way ``scroll_config``
+        does it) is deliberate: a blank or malformed target then fails while the
+        file is being loaded, where diagnostics can point at `plik:linia` and
+        quote the offending YAML.
+        """
+
+        return {"what": value} if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _exactly_one_command(self) -> Step:
@@ -223,11 +289,17 @@ class Step(BaseModel):
 
     def requires_target(self) -> bool:
         kind = self.command_kind()
-        if kind in ("teach", "enterText", "click", "hover", "select"):
+        if kind in ("teach", "enterText", "click", "hover", "select", "highlight"):
             return True
         if kind == "wait" and isinstance(self.wait, WaitUntil):
             return True
         return False
+
+    def highlight_config(self) -> Highlight:
+        """The step's :class:`Highlight`; call only on a ``highlight`` step."""
+
+        assert self.highlight is not None  # guaranteed by command_kind()
+        return self.highlight
 
     def scroll_config(self) -> Scroll:
         """Normalize the string shorthand and object form to a :class:`Scroll`."""

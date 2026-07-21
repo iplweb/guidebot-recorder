@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol, cast, get_args
 
 from pydantic import TypeAdapter, ValidationError
 
-from guidebot_recorder.models.action import ActionKind
+from guidebot_recorder.models.action import REASONER_ACTIONS, ActionKind
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.resolver.page_context import Candidate
 
@@ -26,7 +26,10 @@ _COMMUNICATE_POLL_SECONDS = 0.1
 
 ErrorReason = Literal["no_action", "multiple_actions", "no_handle"]
 
-_ACTIONS = frozenset(get_args(ActionKind))
+# The model's vocabulary, not render's repertoire — see REASONER_ACTIONS. This
+# set both builds the response schema and gates what comes back, so widening
+# ``ActionKind`` alone must never widen it.
+_ACTIONS = frozenset(REASONER_ACTIONS)
 _ERROR_REASONS = frozenset(get_args(ErrorReason))
 _TARGET_ADAPTER = TypeAdapter(Target)
 

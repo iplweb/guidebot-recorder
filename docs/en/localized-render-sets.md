@@ -38,8 +38,12 @@ See the complete
 and [Polish scenario](https://github.com/iplweb/guidebot-recorder/blob/main/examples/localized-login.pl-PL.scenario.yaml).
 
 Manifest variant keys are canonical BCP 47 language tags such as `en-US` and
-`pl-PL`. Paths under `scenario` are relative to the manifest. Paths under `output`
-are relative to the required `render-set --output-dir`.
+`pl-PL`: 2–3 lowercase language letters, an optional capitalized script, and an
+optional uppercase region or 3-digit region, e.g. `pl-PL`, `en-US`, `zh-Hans-CN`.
+Paths under `scenario` are relative to the manifest. Paths under `output`
+are relative to the required `render-set --output-dir`. The `*.render-set.yaml`
+suffix is a naming convention, not a validated requirement; the manifest itself
+does not expand `${ENV}`.
 
 ## Variant requirements
 
@@ -119,6 +123,27 @@ out/localized-login/
 The shared `.guidebot/audio/` cache and each output's private work directory persist
 until removed manually. Treat them as potentially sensitive because they can contain
 narration text, audio, and recorded application frames.
+
+## Current limitations
+
+- **No `validate-set`, no single-variant filter, and no parallel execution** —
+  `compile-set` and `render-set` always load and process the whole manifest, in
+  manifest order, one variant at a time.
+- **No scenario inheritance or action overlay** — each variant is a complete,
+  independent scenario; there is no way to declare a shared base and let one
+  variant override only its differences.
+- **No automatic translation** — every variant's canonical `teach`/`click`/`hover`
+  instructions, `enterText.into`, `select.from`/`option`, and `highlight.what` are
+  authored (or agent-drafted) directly against that variant's own localized page,
+  not derived from another variant or from `translations`.
+- **Exactly one audio track per variant, one provider per set** — `config.audioTracks`
+  must stay empty on every variant, and the stock CLI requires the same configured
+  TTS provider across the whole manifest.
+- **No cross-variant transaction** — a failing variant does not roll back or
+  discard the outputs of variants that already finished; see
+  [Failure and publication behavior](#failure-and-publication-behavior) above.
+- **Ordinary scenario limits still apply per variant** — at most one pop-up
+  lifecycle and no iframe content, exactly as for a single scenario.
 
 ## Choosing the mode
 

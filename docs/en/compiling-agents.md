@@ -126,6 +126,8 @@ the model response itself.
 | `teach` | Yes on cache miss | May resolve to click/hover or freeze a safe literal `type`; use explicit commands when the action must be fixed. |
 | `click` / `hover` | Yes on cache miss | Action is fixed; target is resolved. |
 | `enterText` | Yes on cache miss | Resolves `into`; never sends `text` directly, though later reflected page text can enter a snapshot. |
+| `select` | Yes on cache miss | Resolves `from`; `option` is validated against the resolved control's own list, not sent to the reasoner. |
+| `highlight` | Yes on cache miss | Resolves `what`; the step never touches the page. |
 | conditional `wait` | Yes on cache miss | Resolves `until`. |
 | any reusable target step | No | Static fast-path reuse opens no browser; during an incremental run live identity is checked before reuse. |
 | `compile-set` | Per stale target | Applies the same resolver independently to each stale localized scenario. |
@@ -194,3 +196,17 @@ leaking values, and leave all page actions to Guidebot. `run_compile_in_browser`
 creates the locale-matched context used by the stock CLI. This code does not make the
 backend selectable through `guidebot compile`; adding a CLI/config selection layer is
 separate work.
+
+The same instance works for a localized render set: pass it to `run_compile_set`
+instead, alongside a manifest loaded with `load_render_set`.
+
+```python
+from guidebot_recorder.recorder.render_set import run_compile_set
+from guidebot_recorder.scenario.render_set import load_render_set
+
+plan = load_render_set("scenarios/login.render-set.yaml")
+await run_compile_set(plan, browser, MyReasoner())
+```
+
+`run_compile_set` applies the resolver independently to each stale variant, in
+manifest order, exactly as `guidebot compile-set` does with `CodexReasoner`.

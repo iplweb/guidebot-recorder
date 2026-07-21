@@ -72,6 +72,9 @@ steps:
 | `typing` | No | object / instant fill | Character-by-character input animation, render-only. |
 | `sound` | No | object / disabled | Opt-in built-in click/key sound effects, render-only. |
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
+| `desktop` | No | object / navy background | Background colour for a `desktop` opener step; render-only and not part of the compile hash. |
+| `fade` | No | object / disabled | Opt-in fade to/from a flat colour at the two ends of the finished film, render-only. |
+| `highlight` | No | object / built-in defaults | Default look of a `highlight` step's mark; render-only and not part of the compile hash. |
 | `holdFrameForNarration` | No | boolean / `true` | Freeze the picture during narration instead of recording in real time, render-only. |
 | `holdFrameSettle` | No | number / `1.0` | Real seconds recorded before the frame freezes, render-only. |
 | `selects` | No | object / built-in shim defaults | DOM select shim that makes a native `<select>`'s option list visible on camera; only `mode` affects the compile hash. |
@@ -376,6 +379,73 @@ identical white bootstrap.
 
 The card is built from `config.title` plus `intro.subtitle` and `intro.notes`.
 
+### `desktop`
+
+Render-only appearance for a [`desktop`](#desktop_1) opener step. Only the
+background colour lives here — it is a film-wide look, so every `desktop` step in
+a film matches without repeating it. Not part of the config hash: the step
+compiles to nothing.
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `color` | `#1f3a63` (navy) | Background CSS color behind the desktop icon. |
+
+```yaml
+config:
+  desktop:
+    color: "#1f3a63"
+```
+
+### `fade`
+
+Render-only, opt-in fade from/to a flat colour at the film's two ends. Off by
+default: enabling it forces a re-encode in the final mux (a fade cannot be
+applied to a copied stream), so a scenario that does not ask for one keeps
+today's output byte-identical. Not part of the config hash — enabling or
+changing a fade never requires a recompile.
+
+```yaml
+config:
+  fade:
+    enabled: true
+    in: 0.6
+    out: 1.0
+```
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `enabled` | `false` | Turn the fade on. |
+| `in` | `0.6` | Seconds to fade in from `color` at the start. |
+| `out` | `0.8` | Seconds to fade out to `color` at the end. |
+| `color` | `black` | The flat colour faded to/from — an ffmpeg color name or `0xRRGGBB`. |
+| `audio` | `true` | Fade every narration bed in step with the picture. Turn off only when the audio must run to its last sample under a picture that still cuts to `color`. |
+
+`in` and `out` may each be `0`, which drops that end's transition. Their sum must
+not exceed the film's length, or the render fails loudly rather than clip a fade
+into nothing.
+
+### `highlight`
+
+Defaults for every `highlight` step in the film; each step may override them field by
+field.
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `color` | `rgba(250,204,21,.85)` | Colour of the film's trail and of the PDF ellipse. |
+| `padding` | `8` | Margin (px) between the element and the ellipse. |
+| `loops` | `2` | Laps the cursor makes around the target (1–5). |
+| `hold` | `0.6` | Seconds the trail stays up after the last lap. |
+
+```yaml
+config:
+  highlight:
+    color: "#22c55e"
+    padding: 12
+```
+
+Not part of `config_hash` — the marks are drawn over an already-resolved target, so
+changing how they look never invalidates a compiled reference.
+
 ### `holdFrameForNarration` and `holdFrameSettle`
 
 Render-only pacing control, **on by default**, and outside the config hash like
@@ -471,7 +541,8 @@ them never requires a recompile.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `select`, `scroll`, `wait`, `slide`, and `closeWindow`;
+  `enterText`, `select`, `highlight`, `scroll`, `wait`, `slide`, `desktop`, and
+  `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -492,10 +563,12 @@ page state and align one generated action slot with each source step.
 | `hover` | Yes | No |
 | `enterText` | Yes, `into` only | Only accompanying `say` |
 | `select` | Yes, `from` only | Only accompanying `say` |
+| `highlight` | Yes, `what` only | Only accompanying `say` |
 | `scroll` | No | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
 | `slide` | No | Only accompanying `say`; on-screen text is shown, not spoken |
+| `desktop` | No | Only accompanying `say` |
 | `closeWindow` | No | Only accompanying `say` |
 
 If `say` accompanies an action, narration is rendered before the action. With
@@ -747,6 +820,44 @@ something unrelated on camera.
 Pair a `select` step with a `say` such as "from this list I choose …" to narrate
 the intent.
 
+### `highlight`
+
+```yaml
+- highlight: "the Save button"        # shorthand: the target alone
+
+- highlight:
+    what: "the results table"
+    padding: 12        # px around the element   (default config.highlight.padding)
+    loops: 3           # laps around the target  (default 2)
+    hold: 1.5          # s the trail stays up    (default 0.6)
+    color: "#22c55e"   # marker colour           (default config.highlight.color)
+  say: "This is where the search results appear."
+```
+
+Draw attention to a control or an area — the one command that points at an element
+**without touching the page**: no click, no hover, no DOM event. `what` is the semantic
+target instruction sent to the reasoner; an area (a table, a section, a form) is just a
+container element as far as the resolver is concerned, so you describe it exactly as
+you would a button.
+
+During `render` the cursor glides to the target, moves to the right edge of the ellipse
+circumscribed around it, and laps that ellipse `loops` times, leaving a growing marker
+trail behind it; after the last lap the trail stays up for `hold` seconds and fades. In
+the PDF guide the same element gets that ellipse drawn onto the screenshot, in the same
+colour. Lap pacing comes from the ellipse's perimeter at a constant cursor speed, so a
+large area is not lapped faster or slower than a small one.
+
+The ellipse is **circumscribed** around the element's box grown by `padding`, so it is
+noticeably larger than the element itself — the whole element sits inside it rather than
+having its corners clipped. If it would leave the frame it is fitted to it: radii are
+shortened first, then the centre is nudged inwards. That keeps the cursor on screen and
+keeps the ellipse from being clipped at the edge of the PDF page.
+
+The step has a target, so it accepts `optional: true` and works inside a `when` block.
+The visual knobs (`padding`, `loops`, `hold`, `color`) are not part of the step's
+fingerprint — restyling the mark does **not** require a re-`compile`. Film-wide defaults
+live in the `config.highlight` block.
+
 ### `scroll`
 
 ```yaml
@@ -860,6 +971,46 @@ window" command.
 Like `slide`, `closeWindow` changes the step count, so it **needs `guidebot compile`**.
 Full example: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
 
+### `desktop`
+
+```yaml
+- desktop:
+    icon: chrome        # optional; built-in name or a path to your own image
+    label: "Open the browser"   # optional; caption under the icon
+    hold: 1.0            # optional; seconds to hold once the window has opened
+  say: "Let's open the browser."   # optional narration
+```
+
+A simulated desktop opener for the start of a film: the cursor arcs to a browser
+icon, double-clicks it, and a window grows out of the icon to reveal the address
+bar the next `navigate` step then types into. Visual-only, like `slide` — it
+compiles to nothing, so it **needs `guidebot compile`** purely because it adds or
+moves a step (render checks the step count).
+
+The desktop's background colour is a film-wide render setting, `config.desktop.color`
+(default navy, `#1f3a63`), not a per-step field, so every `desktop` step in a film
+matches.
+
+`icon` accepts a **built-in name** or a **path to your own file**
+(`.svg`/`.png`/`.jpg`/`.gif`/`.webp`, relative to the scenario's directory). The
+built-in icons are deliberately **generic, hand-drawn** stand-ins, not real browser
+logos — those are trademarks and this package is redistributable. The name only says
+which browser the icon evokes:
+
+| Name | Drawing |
+|---|---|
+| `chrome`, `browser` | a colored ring with a blue center |
+| `firefox`, `flame` | a flame |
+| `iexplore`, `edge`, `legacy` | a blue "e" |
+| `globe` | a plain globe |
+
+Point `icon` at your own file to use a real logo — nothing is then distributed with
+the package.
+
+`label` defaults to the literal string `"Przeglądarka internetowa"` (Polish for
+"web browser") — the built-in default was never translated, so give an English
+scenario its own `label` explicitly rather than relying on the default.
+
 ## Optional branches
 
 Some parts of a flow are genuinely conditional. The canonical case is a cookie consent
@@ -914,9 +1065,10 @@ For a single conditional step, add `optional: true` instead of wrapping it in a 
 ```
 
 It is allowed on steps that resolve a target — `teach`, `click`, `hover`,
-`enterText`, and conditional `wait` — and on a numeric `wait`. It is a **validation
-error** on `say`-only, `navigate`, and `slide` steps: those resolve nothing, so
-"optional" would promise a tolerance Guidebot cannot provide.
+`enterText`, `select`, `highlight`, and conditional `wait` — and on a numeric
+`wait`. It is a **validation error** on `say`-only, `navigate`, and `slide` steps:
+those resolve nothing, so "optional" would promise a tolerance Guidebot cannot
+provide.
 
 ### Compile and render
 
@@ -989,16 +1141,18 @@ use explicit waits and verify the result.
 |---|---:|
 | `cursor` (size, `click`, centred start) | No — render-only |
 | `typing`, `sound`, `intro`, `chrome` | No — render-only |
+| `desktop.color`, `fade` | No — render-only |
 | `holdFrameForNarration`, `holdFrameSettle` | No — render-only |
 | `verifyUserLoggedIn`, `maxAgeHours` (on a setup) | No — render-only, outside the compile hash |
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
 | `select.option` value alone | No — render-only |
+| `highlight` visual knobs (`padding`, `loops`, `hold`, `color`) and the whole `config.highlight` block | No — render-only |
 | `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | No — render-only |
 | `config.setup` (on a target) added, removed, or repointed | Yes — the setup path is folded into the target's compile hash |
 | `config.selects.mode` switched between `shim` and `native` | Yes — folded into the config hash, like `config.setup`, only when non-default |
-| Adding, removing, or reordering a `slide` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
+| Adding, removing, or reordering a `slide` or `desktop` step | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `highlight.what`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
 | Switching a step's command kind | Yes |
 | A frozen `text=` target that matches an `<option label="…">` or `<optgroup label="…">` string | Rarely — see below |
 

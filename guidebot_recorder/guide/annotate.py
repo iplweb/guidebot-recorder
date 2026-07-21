@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from guidebot_recorder.guide.model import Annotation
+from guidebot_recorder.models.scenario import ResolvedHighlight
+from guidebot_recorder.overlay.geometry import ellipse_around, fit_to_bounds
 
 #: fixed click-circle radius (screenshot px, deviceScaleFactor already applied upstream)
 CLICK_RADIUS = 22.0
@@ -23,6 +25,8 @@ def annotations_for(
     box: dict | None,
     row_box: dict | None = None,
     row_center: _Point | None = None,
+    mark: ResolvedHighlight | None = None,
+    bounds: _Point | None = None,
 ) -> list[Annotation]:
     """Build the marks for one target action, omitting any mark that lacks geometry.
 
@@ -75,6 +79,23 @@ def annotations_for(
                     r=_row_click_radius(row_box),
                 )
             )
+    elif action == "highlight" and box is not None and mark is not None:
+        # The same ellipse the film laps the cursor around — shared geometry, so
+        # the page and the recording mark the target identically. `bounds` is the
+        # screenshot: without the fit the ellipse would be clipped by `.shot`.
+        ellipse = ellipse_around(box, mark.padding)
+        if bounds is not None:
+            ellipse = fit_to_bounds(ellipse, width=bounds[0], height=bounds[1])
+        anns.append(
+            Annotation(
+                kind="highlight",
+                cx=ellipse.cx,
+                cy=ellipse.cy,
+                rx=ellipse.rx,
+                ry=ellipse.ry,
+                color=mark.color,
+            )
+        )
     return anns
 
 

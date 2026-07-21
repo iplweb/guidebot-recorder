@@ -17,8 +17,9 @@ from playwright.async_api import Error as PlaywrightError
 
 from guidebot_recorder.chrome.typing import DEFAULT_MAX_DELAY_FACTOR, typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState
-from guidebot_recorder.models.scenario import Scroll
+from guidebot_recorder.models.scenario import ResolvedHighlight, Scroll
 from guidebot_recorder.models.target import Target
+from guidebot_recorder.overlay.geometry import ellipse_around, fit_to_bounds
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
 from guidebot_recorder.resolver.widget import associated_control
@@ -32,6 +33,25 @@ _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enable
 #: Generous, because a page widget may build its list asynchronously (or fetch
 #: it), but bounded: a list that never appears must fail, not hang.
 OPTION_WAIT_MS = 5000
+
+#: :attr:`SelectDriveError.reason` — the control does not offer that option.
+#:
+#: The one cause a caller may legitimately answer with something other than
+#: "fail": an ``optional: true`` step means "do this if it is on offer", and a
+#: dropdown that no longer lists the label is exactly the absence that clause
+#: describes. It is the same verdict ``validate.reuse_failure`` reports as
+#: ``option_missing`` for a step it *does* get to preflight — an optional step
+#: skips that preflight, so the miss can only surface from the drive itself.
+OPTION_MISSING = "option_missing"
+
+#: :attr:`SelectDriveError.reason` — anything else, and therefore a failure.
+#:
+#: Deliberately the default, so a raise site that says nothing is loud: a click
+#: that did not take, a widget with nothing to unfurl, a shim taken off the
+#: select mid-step and a row the page never rendered are all *broken steps*,
+#: and a caller that quietly skipped them would hide the very failures this
+#: choreography exists to surface.
+UNDRIVABLE = "undrivable"
 
 
 class SelectDriveError(RuntimeError):
@@ -49,10 +69,25 @@ class SelectDriveError(RuntimeError):
     remove, and would do it unobservably — the run would succeed and only a
     viewer would ever discover the step is unwatchable.
 
+    ``reason`` splits "this control does not offer that option"
+    (:data:`OPTION_MISSING`) from every other way the step can fail
+    (:data:`UNDRIVABLE`). The split exists because those two answer the
+    ``optional: true`` question differently and nothing else does: a label that
+    is not on the list is the absence an optional step is allowed to shrug off,
+    while a click that did not take, an undrivable widget, a shim removed
+    mid-step and a row that never appeared all mean the step is broken however
+    the author marked it. It is a machine-readable field rather than a message
+    substring for the obvious reason — the messages are Polish prose written to
+    be rewritten.
+
     The render layer catches this and re-raises it as a ``RenderError`` carrying
     the index of the failing step. ``RenderError`` lives in ``render.py``, which
     imports this module, so it cannot be raised from here without a cycle.
     """
+
+    def __init__(self, message: str, *, reason: str = UNDRIVABLE) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 #: (el) => {installed, shimmed, listbox, hidden, markerClass} — how this select
@@ -148,14 +183,21 @@ READY_WAIT_MS = 15_000
 #: and a missing API must degrade to "nothing to wait for", not to an error.
 #:
 #: Bounded by the same page-side ``Promise.race`` idiom ``Selects.wait_ready``
-#: uses, rejecting with the same marker: ``ready`` is a promise the *page*
+#: uses, rejecting with the same marker: the barrier is a promise the *page*
 #: settles, so awaiting it bare makes a wedged page hang the caller — precisely
 #: the failure that barrier exists to prevent.
+#:
+#: ``settled()`` rather than ``ready``, for the reason ``Selects.wait_ready``
+#: gives: ``ready`` reports the *first* classification pass and never re-arms,
+#: so a select the page appended a moment ago is still unclassified when it
+#: resolves — and this method is the last barrier before the step drives that
+#: select. ``ready`` remains the fallback for a partial API object.
 _SELECTS_READY_JS = f"""(timeoutMs) => {{
   const api = window.__guidebot_selects;
   if (!api || !api.ready) return null;
+  const barrier = typeof api.settled === "function" ? api.settled() : api.ready;
   return Promise.race([
-    api.ready,
+    barrier,
     new Promise((_resolve, reject) => {{
       window.setTimeout(() => reject(new Error({READY_TIMEOUT_MARKER!r})), timeoutMs);
     }}),
@@ -372,7 +414,23 @@ class Recorder:
         locator = await self._point_and_prepare(target, click_sound=True)
         if before_click is not None:
             before_click()
-        await locator.click()
+        try:
+            await locator.click()
+        except PlaywrightError:
+            # A click whose handler closes the window (a popup's own "Zamknij",
+            # a logout that shuts the tab) races Playwright's post-dispatch
+            # bookkeeping: the click *lands* — the call log ends at "performing
+            # click action" — and only then the target disappears. Whether the
+            # error surfaces at all depends on which side wins, so re-raising it
+            # would make a supported ending fail at random.
+            #
+            # Liveness is read back from the window rather than sniffed out of
+            # the message: the caller's lifecycle checkpoints act on that same
+            # state, and they say far more precisely than Playwright can whether
+            # this close was the scenario's doing. A window still alive means the
+            # click genuinely failed, so that error keeps travelling.
+            if not self.page.is_closed():
+                raise
 
     async def hover(self, target: Target) -> None:
         locator = await self._point_and_prepare(target)
@@ -467,7 +525,9 @@ class Recorder:
         is narrower than "drivable"; see its docstring for what it cannot see.
 
         Raises:
-            SelectDriveError: nothing visible could be clicked for this select.
+            SelectDriveError: nothing visible could be clicked for this select,
+                or the option is not on offer — :attr:`SelectDriveError.reason`
+                tells the two apart on every path, direct ones included.
             SelectsNotReadyError: the widget is installed in this frame but its
                 first classification pass never finished (see
                 :data:`READY_WAIT_MS`).
@@ -482,14 +542,9 @@ class Recorder:
                 await self._pin_native(locator)
             else:
                 await self._probe_drivable(locator, option)
-            # A select the page enhanced itself is routinely `display: none`
-            # (Tom Select), which Playwright's actionability check would sit out
-            # until it times out. Skipping the check for exactly those is what
-            # makes spec §6's validation relaxation usable: without it a hidden
-            # select would validate and then fail to compile.
-            visible = await locator.is_visible()
+            await self._require_option(locator, option)
             await self._reveal(on_revealed, SelectReveal(None, None))
-            await locator.select_option(label=option, force=not visible)
+            await self._set_option_directly(locator, option)
             return
         if native:
             locator = await build_locator(self.frame, target)
@@ -497,12 +552,16 @@ class Recorder:
             # must be gone before this control is on camera, or the ripple would
             # land on a widget that vanishes out from under it.
             await self._pin_native(locator)
+            # Before the cursor sets off, too: a label this select does not carry
+            # is the one refusal a caller may answer with a skip, and it should
+            # not first cost a glide and a ripple towards a choice that cannot be
+            # made.
+            await self._require_option(locator, option)
             box, center = await self._approach(locator, ripple=ripple, click_sound=True)
-            visible = await locator.is_visible()
             # No row geometry: `native` never unfurls anything, so a still
             # capture can only show the collapsed control.
             await self._reveal(on_revealed, SelectReveal(box, center))
-            await locator.select_option(label=option, force=not visible)
+            await self._set_option_directly(locator, option)
             return
         locator = await build_locator(self.frame, target)
         # Which of the three shapes this is, read from the DOM once and passed
@@ -525,19 +584,24 @@ class Recorder:
             await hook(reveal)
 
     async def _await_selects_ready(self) -> None:
-        """Wait for this frame's first classification pass — but not forever.
+        """Wait until this frame owes no classification pass — but not forever.
 
         Both production callers (compile, render) take
         :meth:`guidebot_recorder.selects.Selects.wait_ready` first, so this
-        normally finds a promise that has already settled. It is written as a
+        normally finds a barrier that has already settled. It is written as a
         bound anyway because that ordering is an invariant of *those* call
         sites, not of this one: a direct caller on a page whose widget is wedged
         would otherwise get an ``evaluate`` that never returns, which is the one
         outcome the barrier design rules out everywhere else.
 
+        Not merely "the first pass has run": every branch below reads whether
+        *this* select is shimmed, and a select the previous step added is still
+        unclassified while the debounced pass it triggered is pending. See
+        :data:`_SELECTS_READY_JS`.
+
         Raises:
-            SelectsNotReadyError: the widget is in this frame and its ``ready``
-                promise did not settle within :data:`READY_WAIT_MS`.
+            SelectsNotReadyError: the widget is in this frame and its barrier
+                did not settle within :data:`READY_WAIT_MS`.
         """
 
         try:
@@ -648,7 +712,66 @@ class Recorder:
         state = await locator.evaluate(_SHIM_STATE_JS)
         return await self._no_control_error(locator, option, state)
 
+    async def _option_missing_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """This ``<select>`` does not carry that label — the one skippable cause.
+
+        The only refusal a caller is allowed to answer with anything other than
+        "fail" (see :data:`OPTION_MISSING`), so it is built in one place and
+        every path that can establish the fact routes through here — including
+        the two direct ones, which would otherwise leave the miss to
+        ``select_option``'s actionability timeout and report it as a Playwright
+        error nobody can classify.
+        """
+
+        return SelectDriveError(
+            f'lista {await self._describe(locator)} nie zawiera opcji „{option}"',
+            reason=OPTION_MISSING,
+        )
+
+    async def _require_option(self, locator: Locator, option: str) -> None:
+        """Refuse up front when the select does not offer ``option``.
+
+        For the two paths that never unfurl a list — compile's direct set and
+        ``mode: native`` — this is the whole of "is the option there?". The
+        on-camera paths learn the same thing from the list they opened, so all
+        four classify a vanished option identically; without it the direct paths
+        would answer a caller's ``optional:`` question with an unclassifiable
+        Playwright timeout instead.
+
+        :data:`_OPTION_INDEX_JS` applies the same ``HTMLOptionElement.label``
+        rule Playwright's ``select_option(label=…)`` matches on, so this and the
+        call it guards agree about which labels exist.
+        """
+
+        if await locator.evaluate(_OPTION_INDEX_JS, option) < 0:
+            raise await self._option_missing_error(locator, option)
+
+    @staticmethod
+    async def _set_option_directly(locator: Locator, option: str) -> None:
+        """Set the value with no list involved, for a control that may be hidden.
+
+        A select the page enhanced itself is routinely ``display: none`` (Tom
+        Select), which Playwright's actionability check would sit out until it
+        times out. Skipping the check for exactly those is what makes spec §6's
+        validation relaxation usable: without it a hidden select would validate
+        and then fail to compile.
+        """
+
+        visible = await locator.is_visible()
+        await locator.select_option(label=option, force=not visible)
+
     async def _no_option_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """The list unfurled but the row never turned up — cause unestablished.
+
+        Deliberately *not* :data:`OPTION_MISSING`. On the shimmed path this is
+        only reached with the option's index already in hand, so the label is
+        demonstrably there and it is the rendering that failed; on the page's own
+        widget the caller has already checked the underlying ``<select>``, so a
+        row that still does not appear means the widget did not draw it. Either
+        way the step is broken, and a caller must not shrug it off as "the option
+        was not on offer".
+        """
+
         return SelectDriveError(
             f"po rozwinięciu {await self._describe(locator)} nie pojawiła się "
             f'opcja „{option}" (limit {OPTION_WAIT_MS} ms)'
@@ -817,9 +940,7 @@ class Recorder:
 
         index = await locator.evaluate(_OPTION_INDEX_JS, option)
         if index < 0:
-            raise SelectDriveError(
-                f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
-            )
+            raise await self._option_missing_error(locator, option)
         row = locator.locator("option").nth(index)
         # The listbox *is* the control the viewer sees, so its own box is the one
         # a still capture frames. Reading it moves no cursor and opens nothing.
@@ -933,9 +1054,7 @@ class Recorder:
         if uid is None:
             raise await self._unshimmed_mid_step_error(locator, option)
         if index is None or index < 0:
-            raise SelectDriveError(
-                f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
-            )
+            raise await self._option_missing_error(locator, option)
         # uid-scoped: the bare index attribute matches every shimmed select on the
         # page, which is a Playwright strict-mode violation.
         row = self.frame.locator(
@@ -971,6 +1090,14 @@ class Recorder:
         before beat 1, so a missing snapshot is not a degraded search — it is no
         search at all, and must be said out loud rather than answered with the
         first node on the page that happens to carry the label.
+
+        The underlying ``<select>`` is consulted before the wait, because it is
+        the only thing here that can tell "the option is not on offer" from "the
+        widget did not draw a row", and those two want different answers from a
+        caller (:data:`OPTION_MISSING`). A page widget keeps the original's
+        ``<option>`` elements — that is what it submits — so the same question
+        ``validate.reuse_failure`` asks at preflight is answerable here. It also
+        saves waiting :data:`OPTION_WAIT_MS` for a row that could not exist.
         """
 
         if not await self.frame.evaluate(_HAS_SNAPSHOT_JS):
@@ -980,6 +1107,7 @@ class Recorder:
                 f"świeżo narysowanych opcji od reszty strony; nie da się pokazać "
                 f'rozwiniętej listy z opcją „{option}"'
             )
+        await self._require_option(locator, option)
         try:
             handle = await self.frame.wait_for_function(
                 _APPEARED_NODE_JS, arg=option, timeout=OPTION_WAIT_MS
@@ -993,6 +1121,40 @@ class Recorder:
         # ``_commit_option``'s approach scrolls the row into view on both axes,
         # which is what scrolls an internally-scrolling widget list to it.
         return row
+
+    async def highlight(self, target: Target, spec: ResolvedHighlight) -> None:
+        """Lap an ellipse around the target, leaving a marker trail — touching nothing.
+
+        The one command that points at the page without changing it: no click, no
+        hover, no DOM event. Only ``render`` calls this (``compile`` freezes the
+        target without acting, and the PDF guide draws its own still ellipse), so
+        the overlay is present in practice; without one, or without a bounding
+        box, the step degrades to the plain cursor move rather than failing.
+        """
+
+        result = await self.point(target, ripple=False)
+        if self.overlay is None or result.box is None:
+            return
+        viewport = self.page.viewport_size or {"width": 1280, "height": 720}
+        ellipse = fit_to_bounds(
+            ellipse_around(result.box, spec.padding),
+            width=float(viewport["width"]),
+            height=float(viewport["height"]),
+        )
+        # Glide to the lap's entry point first: `point` left the cursor in the
+        # middle of the target, and starting the lap from there would teleport it
+        # by `rx` — several hundred pixels for anything table-sized.
+        await self.overlay.move_to(self.page, ellipse.cx + ellipse.rx, ellipse.cy)
+        await self.overlay.encircle(
+            self.page,
+            cx=ellipse.cx,
+            cy=ellipse.cy,
+            rx=ellipse.rx,
+            ry=ellipse.ry,
+            loops=spec.loops,
+            hold=spec.hold,
+            color=spec.color,
+        )
 
     async def scroll(self, spec: Scroll) -> None:
         """Scroll the site — a render-only visual with no agent target.

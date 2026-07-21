@@ -20,7 +20,12 @@ from guidebot_recorder.models.scenario import FlatStep, WaitUntil, select_mode
 # Imported as a bare name (not `from ... import _debug`) so it becomes an attribute
 # of this module and tests can monkeypatch it, like `reuse_failure` below.
 from guidebot_recorder.recorder._debug import pause_for_inspection
-from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError, SelectReveal
+from guidebot_recorder.recorder.recorder import (
+    OPTION_MISSING,
+    Recorder,
+    SelectDriveError,
+    SelectReveal,
+)
 from guidebot_recorder.resolver.validate import reuse_failure
 from guidebot_recorder.selects import Selects, SelectsNotReadyError
 
@@ -121,10 +126,8 @@ async def capture_pages(
 
     ``selects`` is the DOM select shim's controller for this browser context, or
     ``None`` under ``config.selects.mode: native`` (where no widget is injected)
-    — the guide's half of the readiness barrier compile and render also take. It
-    is awaited once per navigation rather than once per step: unlike those two,
-    the guide resolves nothing, so the only instant at which the shimmed DOM has
-    to exist is "after the document that will be photographed has loaded".
+    — the guide's half of the readiness barrier compile and render also take.
+    See :func:`await_selects_ready` below for where it is taken and why.
     """
 
     flat = scenario.flat_steps()
@@ -144,6 +147,33 @@ async def capture_pages(
             message=message,
             sensitive=sensitive_values,
         )
+
+    async def await_selects_ready(entry: FlatStep, entry_index: int) -> None:
+        """Take the shim's readiness barrier, blaming the step that was running.
+
+        Taken twice: after every navigation, because the first frame of a new
+        document is photographed immediately and must show the same DOM compile
+        resolved against; and again before a ``select:`` step drives its control.
+        The second is not covered by the first — ``wait_ready`` answers "is a
+        pass owed *right now*", so a navigation-time answer says nothing about a
+        select the page grew three steps later, and a select the pending pass has
+        not reached yet is a bare ``<select>`` with no DOM list to unfurl.
+
+        ``Recorder.select`` takes a barrier of its own, but that one is
+        explicitly the *backstop* for a direct caller: it reads the page API
+        itself on a flat, generous bound, knowing nothing of ``settle_ms``. The
+        guide is a production caller like compile and render, so like them it
+        takes the controller's bounded barrier first — which is also what turns
+        a wedged widget into this step's banner (`plik:linia` plus the YAML
+        fragment) instead of a bare exception from inside the recorder.
+        """
+
+        if selects is None:
+            return
+        try:
+            await selects.wait_ready(recorder.frame)
+        except SelectsNotReadyError as exc:
+            raise GuideError(banner(entry, entry_index, str(exc))) from exc
 
     # Wrapping the iterator (rather than `bar.update(1)` as render does) is what
     # keeps the count honest here: this loop leaves through a dozen `continue`s
@@ -190,17 +220,7 @@ async def capture_pages(
             if kind == "navigate":
                 url = scenario_resolve_url(scenario, step.navigate_url())
                 await recorder.navigate(url)
-                if selects is not None:
-                    # Readiness barrier: everything after this point either
-                    # photographs the document or drives a `<select>` in it, and
-                    # both must see the shimmed DOM compile resolved against.
-                    try:
-                        await selects.wait_ready(recorder.frame)
-                    except SelectsNotReadyError as exc:
-                        # A wedged widget stops the run before its step begins,
-                        # so without the banner it would be the one failure to
-                        # reach the author with no file, line or YAML fragment.
-                        raise GuideError(banner(fs, index, str(exc))) from exc
+                await await_selects_ready(fs, index)
                 shot, size = await _screenshot(page, shots_dir, index)
                 pages.append(
                     GuidePage(
@@ -272,7 +292,8 @@ async def capture_pages(
                     )
                 continue
 
-            # kind == "action": click / hover / type / select (dispatch on cached.action)
+            # kind == "action": click / hover / type / select / highlight
+            # (dispatch on cached.action)
             if not isinstance(action, CachedAction):
                 if step.optional:
                     if verbose:
@@ -280,8 +301,13 @@ async def capture_pages(
                     continue  # optional branch never compiled -> skip page
                 raise RuntimeError(banner(fs, index, "nierozwiązana akcja obowiązkowa"))
             act = action.action
+            # The one caller that can answer "which option?" — the label lives in
+            # the scenario step, never in the sidecar. Handing it over is what lets
+            # validation reject a dropdown that lost the option, instead of leaving
+            # the miss to `select_option`'s 15s timeout.
+            wanted_option = step.select.option if act == "select" and step.select else None
             if not step.optional and act != "waitFor":
-                reason = await reuse_failure(recorder.frame, action)
+                reason = await reuse_failure(recorder.frame, action, option=wanted_option)
                 if reason is not None:
                     if reason == "not_visible" and act == "select" and step.select is not None:
                         # `not_visible` is a sentence shared with click/hover/type,
@@ -325,6 +351,7 @@ async def capture_pages(
             center, box = res.center, res.box
             row_box: dict | None = None
             row_center: tuple[float, float] | None = None
+            mark = None
             if act == "type":
                 text = (step.enter_text.text if step.enter_text else None) or action.input_text
                 if text is None:
@@ -335,14 +362,21 @@ async def capture_pages(
                 shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
             elif act == "select":
                 if step.select is None:
+                    # Plain `compile`, not `--force`: editing the step changed its
+                    # command_kind, so the fingerprint already fails to match and the
+                    # entry is re-resolved on its own. `--force` would pointlessly
+                    # re-freeze every other step in the scenario.
                     raise GuideError(
                         banner(
                             fs,
                             index,
                             "sidecar mówi `select`, a krok scenariusza nim nie jest "
-                            "— uruchom `compile --force`",
+                            "— uruchom `compile`",
                         )
                     )
+                # The step that actually drives a `<select>`, so the barrier is
+                # taken again here — see `await_selects_ready`.
+                await await_selects_ready(fs, index)
                 # Named `still`, not `frame`: in this codebase `frame` means a
                 # Playwright frame everywhere else.
                 still = _OpenListFrame(page, shots_dir, index)
@@ -357,10 +391,24 @@ async def capture_pages(
                         ripple=False,
                         on_revealed=still,
                     )
-                except (SelectDriveError, SelectsNotReadyError) as exc:
+                except SelectDriveError as exc:
+                    # `optional` has to cover choosing the option, not just
+                    # finding the control: an optional step skips reuse
+                    # validation, so a vanished option shows up here — and only
+                    # here. Narrowed to that one reason on purpose: every other
+                    # `SelectDriveError` (a click that did not take, a widget
+                    # with nothing to unfurl, a shim removed mid-step) says the
+                    # step *is* broken, and skipping those would hide exactly
+                    # the failures this choreography was written to surface.
+                    if step.optional and exc.reason == OPTION_MISSING:
+                        if verbose:
+                            tqdm.write(banner(fs, index, "pomijam: brak żądanej opcji"))
+                        continue
                     # No silent fallback to `select_option`: it would restore
                     # exactly the invisible value change this capture exists to
                     # remove, and the PDF would look fine while being useless.
+                    raise GuideError(banner(fs, index, str(exc))) from exc
+                except SelectsNotReadyError as exc:
                     raise GuideError(banner(fs, index, str(exc))) from exc
                 if still.shot is None or still.size is None or still.reveal is None:
                     raise GuideError(
@@ -369,6 +417,21 @@ async def capture_pages(
                 shot, size = still.shot, still.size
                 center, box = still.reveal.control_center, still.reveal.control_box
                 row_box, row_center = still.reveal.row_box, still.reveal.row_center
+            elif act == "highlight":
+                if step.highlight is None:
+                    raise GuideError(
+                        banner(
+                            fs,
+                            index,
+                            "sidecar mówi `highlight`, a krok scenariusza nim nie jest "
+                            "— uruchom `compile --force`",
+                        )
+                    )
+                # Deliberately no action on the element: `highlight` never touches
+                # the page, and the `else` below would click it. The mark itself is
+                # drawn onto the page by the annotation, not by the browser.
+                mark = step.highlight.resolved(scenario.config.highlight)
+                shot, size = await _screenshot(page, shots_dir, index)
             else:
                 shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
                 if act == "hover":
@@ -389,6 +452,8 @@ async def capture_pages(
                         box=box,
                         row_box=row_box,
                         row_center=row_center,
+                        mark=mark,
+                        bounds=(float(size[0]), float(size[1])),
                     ),
                     screenshot_size=size,
                 )

@@ -51,12 +51,27 @@ navigation, exactly as compile and render do. `config.selects.mode: native`
 makes `install_selects` return `None`, and the per-step override is read with the
 existing `select_mode(step, cfg)` helper — no fourth copy of either rule.
 
-The barrier is taken on the `navigate` arm rather than per step. Compile and
-render take it per step because a step may be resolved by an LLM against a page
-snapshot; the guide resolves nothing — every target is already frozen — so the
-only instant at which the shimmed DOM must exist is "after the document that will
-be photographed has loaded". That is the navigate step, and the guide's own
-`recorder.navigate` already waits for load before it returns.
+The barrier is taken on the `navigate` arm, because the first frame of a new
+document is photographed immediately and must show the same DOM compile resolved
+against — and again on the `select:` arm, before the control is driven.
+
+*Revised while merging `main`.* This section originally argued the navigate
+barrier was enough: compile and render take it per step because a step may be
+resolved by an LLM against a page snapshot, the guide resolves nothing, so "after
+the document that will be photographed has loaded" looked like the only instant
+that mattered. `main` has since changed what the barrier *means* — `wait_ready`
+now awaits the classification pass owed **at the moment of asking**
+(`selects.js::settled()`), precisely because `ready` never re-arms and a select
+the page grows mid-run stays unclassified while every barrier reports ready. A
+navigation-time answer therefore says nothing about a select added three steps
+later, and driving that one finds a bare `<select>` with no list to unfurl. So
+the guide takes it per `select:` step as well.
+
+`Recorder.select` awaits `settled()` itself, but that is documented as the
+*backstop* for a direct caller — a flat bound that knows nothing of `settle_ms`.
+The guide is now a third production caller, so like compile and render it takes
+the controller's bounded barrier first, which is also what wraps a wedged widget
+in the step's own banner.
 
 ### 2. The `select:` arm becomes four phases
 
@@ -195,6 +210,37 @@ The user-facing wording of the two shared messages loses its "na filmie" framing
 ("nie da się pokazać **na filmie** wyboru opcji…") in favour of medium-neutral
 phrasing, since they are now raised by a phase that produces a PDF.
 
+### 7. `optional: true` and a vanished option (added while merging `main`)
+
+`main` grew an optional-step skip for a select whose option is gone —
+"pomijam: brak żądanej opcji" — wrapped around the `select_option` call this
+branch deletes. Losing it to a merge resolution would have deleted a feature, so
+it is restored under the new choreography, but *not* as "an optional select may
+fail quietly": every way a `select:` step can fail now arrives as the same
+`SelectDriveError`, and catching that type wholesale would turn a click that did
+not take, a widget with nothing to unfurl and a shim removed mid-step into
+silently dropped PDF pages — the exact unwatchable-but-successful output §3 and
+the constraints below exist to make impossible.
+
+So `SelectDriveError` gains a machine-readable `reason`:
+
+- `OPTION_MISSING` — the control does not carry that label. Established by
+  reading the real `<select>`'s options, which is what
+  `validate.reuse_failure(option=…)` already asks at preflight for the
+  mandatory steps it does get to check. Raised from all four paths: the shimmed
+  list, the listbox, the page widget (whose underlying `<select>` is consulted
+  *before* the option wait, so "not on offer" is told apart from "the widget did
+  not draw it"), and the two listless direct sets, which previously left the
+  miss to `select_option`'s actionability timeout.
+- `UNDRIVABLE` — everything else, and the default, so a raise site that says
+  nothing stays loud.
+
+Only `OPTION_MISSING` on an `optional: true` step skips. This is also strictly
+narrower than what `main` shipped: `main` caught any `PlaywrightError` from
+`select_option`, which included the actionability timeout §6 measured on a
+`display: none` Tom Select — i.e. "this widget cannot be driven at all" was being
+skipped as "the option is not there".
+
 ## Constraints carried over from the shim
 
 - The `<select>` is never re-parented, wrapped or moved — element identity hashes
@@ -217,8 +263,8 @@ tests whose names claim more than their assertions check.
 | Level | File | Covers |
 | --- | --- | --- |
 | Annotate | `tests/unit/guide/test_annotate.py` | a `select` with row geometry yields a **click circle on the row**, a `selected` rectangle on the **control**, and an arrow **ending at the row**; with no row geometry it yields today's marks byte for byte |
-| Capture | `tests/unit/guide/test_capture.py` | the frame is taken **while the list is open** — i.e. between `on_revealed` and the commit — and never again; `prev_cursor` for the next step is the row centre; the readiness barrier is awaited after navigation; `mode: native` keeps today's shape; the `not_visible` preflight verdict for a `select` becomes the recorder's own diagnosis |
-| Recorder | `tests/unit/recorder/test_recorder_select.py` | `on_revealed` fires exactly once, before the commit, on all four paths (shim, page widget, listbox, native), carrying the row's real rect; `ripple=False` suppresses the ring |
+| Capture | `tests/unit/guide/test_capture.py` | the frame is taken **while the list is open** — i.e. between `on_revealed` and the commit — and never again; `prev_cursor` for the next step is the row centre; the readiness barrier is awaited after navigation; `mode: native` keeps today's shape; the `not_visible` preflight verdict for a `select` becomes the recorder's own diagnosis; an `optional:` step skips **only** `OPTION_MISSING` and still fails on `UNDRIVABLE` (§7) |
+| Recorder | `tests/unit/recorder/test_recorder_select.py` | `on_revealed` fires exactly once, before the commit, on all four paths (shim, page widget, listbox, native), carrying the row's real rect; `ripple=False` suppresses the ring; and one `reason` case per raise site (§7), including the mirror pair "the widget draws the row the `<select>` lost" / "the `<select>` has the option the widget never drew" |
 | Guide wiring | `tests/unit/guide/test_guide.py` | `run_guide` installs the shim through `install_selects` and hands the controller to `capture_pages`; `mode: native` installs nothing |
 | **Integration** | `tests/integration/test_guide_select_reveal.py` | **the central test**: compile + guide `selects.html`, then assert on the produced PNG that the pixels under the click annotation's centre show the **open list** and not the page underneath, and that the annotation's centre falls **inside the option row's rect**. Also: the `display: none` Tom Select control is driven successfully (the `TimeoutError` of §6 is gone), and `mode: native` still produces a page |
 

@@ -1,11 +1,11 @@
 import pytest
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import async_playwright
+from playwright.async_api import Locator, async_playwright
 
 from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.recorder import OPTION_MISSING, Recorder, SelectDriveError
 
 
 @pytest.fixture
@@ -83,6 +83,55 @@ async def test_hover_emits_no_click_sound(page):
     rec = Recorder(page, None, on_sfx=events.append)
     await rec.hover(RoleTarget(role="button", name="ok"))
     assert "click" not in events
+
+
+def _click_raising_after_close(monkeypatch, *, close: bool) -> None:
+    """Make ``Locator.click`` fail the way a self-closing target fails.
+
+    Playwright dispatches the click and only afterwards finds the target gone —
+    the call log of the real CI failure ends at ``performing click action`` — so
+    the raise says nothing about whether the click landed. ``close=False`` is the
+    control case: the same exception with the window still alive.
+    """
+
+    async def raising_click(self, *args, **kwargs):
+        if close:
+            await self.page.close()
+        # TargetClosedError, which is what Playwright actually raises here, is a
+        # PlaywrightError subclass; the recorder classifies by window state, not
+        # by the exception's type or wording, so the base class is enough.
+        raise PlaywrightError("Locator.click: Target page, context or browser has been closed")
+
+    monkeypatch.setattr(Locator, "click", raising_click)
+
+
+async def test_click_accepts_a_target_the_click_itself_closed(page, monkeypatch):
+    """Clicking a button that closes its own window is a completed click.
+
+    A "close this popup" button is a supported scenario action — render owns the
+    aftermath at its own lifecycle checkpoints. Letting Playwright's post-dispatch
+    error escape would turn that supported ending into an opaque crash that only
+    shows up when the machine loses the race.
+    """
+
+    await page.set_content('<button onclick="window.close()">Zamknij</button>')
+    rec = Recorder(page, overlay=None)
+    _click_raising_after_close(monkeypatch, close=True)
+
+    await rec.click(RoleTarget(role="button", name="Zamknij"))
+
+    assert page.is_closed()
+
+
+async def test_click_still_raises_when_the_window_survives(page, monkeypatch):
+    """A live window means the click genuinely failed — do not swallow that."""
+
+    await page.set_content("<button>ok</button>")
+    rec = Recorder(page, overlay=None)
+    _click_raising_after_close(monkeypatch, close=False)
+
+    with pytest.raises(PlaywrightError):
+        await rec.click(RoleTarget(role="button", name="ok"))
 
 
 async def test_enter_text_instant_when_no_delay(page):
@@ -219,10 +268,43 @@ async def test_select_native_sets_value_at_once_with_overlay(page):
 
 
 async def test_select_unknown_option_raises(page):
+    """Even the listless path names the miss instead of timing out on it.
+
+    The direct set (compile, and `mode: native`) has no list to consult, so a
+    label the select does not carry used to reach `select_option` and surface as
+    a 15 s Playwright timeout in English — unclassifiable, so a caller could not
+    tell it from a control it could not drive at all. `reason` is what the PDF
+    guide's `optional:` skip reads, and it has to mean the same thing on all
+    four paths.
+    """
+
     await page.set_content(_SELECT_HTML)
     rec = Recorder(page, overlay=None)
-    with pytest.raises(PlaywrightError):
+    with pytest.raises(SelectDriveError) as exc_info:
         await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej")
+    assert exc_info.value.reason == OPTION_MISSING
+    assert "nie zawiera opcji" in str(exc_info.value)
+
+
+async def test_native_select_with_a_vanished_option_never_moves_the_cursor(page):
+    """`mode: native` refuses before the glide, not after it.
+
+    The refusal a caller may answer with a skip should not first cost an
+    approach and a ripple towards a choice that cannot be made — and on the
+    guide's path it would also mean a still frame taken of a step that is about
+    to be skipped.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_SELECT_HTML)
+    await overlay.install(page)
+    rec = Recorder(page, overlay)
+
+    with pytest.raises(SelectDriveError) as exc_info:
+        await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej", native=True)
+
+    assert exc_info.value.reason == OPTION_MISSING
+    assert overlay.pos == (0.0, 0.0)  # the cursor never set off
 
 
 _TALL_PAGE = "<div style='height:3000px'>tall</div>"

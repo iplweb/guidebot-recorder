@@ -128,6 +128,54 @@ async def test_install_context_shims_every_new_document(context: BrowserContext)
     )
 
 
+async def test_wait_ready_covers_a_select_the_page_added_after_the_first_pass(
+    context: BrowserContext,
+) -> None:
+    """The barrier is per-step, so it must answer for the DOM *this* step sees.
+
+    Compile and render take it before every step with a target, precisely so the
+    step drives shimmed DOM. Awaiting the widget's one-shot `ready` made it
+    answer for page load instead: a select appended by the previous step was
+    still unclassified when this returned, and the `select:` step that followed
+    failed with "the shim did not cover it".
+    """
+    selects = Selects(SelectsConfig(settle_ms=400))
+    await selects.install_context(context)
+    page = await context.new_page()
+    # A real navigation, not `set_content`: the latter replaces
+    # `document.documentElement`, which strands the widget's observer on the
+    # detached root and would make this assert about that instead.
+    await page.goto("data:text/html,<body style='margin:0'></body>")
+    await selects.wait_ready(page)
+
+    await page.evaluate(
+        "() => { const s = document.createElement('select');"
+        " s.id = 'late'; s.style.width = '200px';"
+        " s.innerHTML = '<option>a</option><option>b</option>';"
+        " document.body.appendChild(s); }"
+    )
+    await selects.wait_ready(page)
+
+    assert await page.evaluate(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('late'))"
+    )
+
+
+async def test_wait_ready_falls_back_to_ready_on_a_partial_api(context: BrowserContext) -> None:
+    """An API object without `settled` is still a barrier, not a crash.
+
+    The two sides are injected together in production, so this only ever covers
+    a page carrying a stub or an older copy — but the barrier reaching for a
+    method that is not there would turn that into a `TypeError` in the page,
+    surfacing as neither of this method's documented failures.
+    """
+    page = await context.new_page()
+    await page.set_content("<div></div>")
+    await page.evaluate("() => { window.__guidebot_selects = {ready: Promise.resolve()}; }")
+
+    await Selects().wait_ready(page, timeout=2.0)
+
+
 async def test_install_context_reaches_nested_iframes(context: BrowserContext) -> None:
     """A select in a nested iframe needs shimming just as much (spec §1)."""
     selects = Selects(SelectsConfig(settle_ms=20))

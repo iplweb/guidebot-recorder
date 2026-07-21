@@ -153,9 +153,10 @@ anotowanym zrzutem ekranu na znaczący krok, tekstem narracji obok i legendą wi
 | `--verbose`, `-v` | wyłączone | Pokazuje postęp budowania stron i szczegóły kroków. |
 
 To polecenie nie wykonuje żadnych wywołań LLM. Każda strona przewodnika przechwytuje kadr
-w momencie zakończenia interaktywnego kroku (`click`, `hover`, `enterText`, `teach`).
-Kroki `navigate` tworzą jedną stronę zawierającą tylko tekst. Kroki `slide` wstawiają
-wizualny podział sekcji. Bramy `wait` i `when` nie produkują wyjścia; brak elementu
+w momencie zakończenia interaktywnego kroku (`click`, `hover`, `enterText`, `select`,
+`highlight`, `teach`). Kroki `navigate` tworzą jedną stronę zawierającą tylko tekst.
+Kroki `slide` wstawiają wizualny podział sekcji. Bramy `wait` i `when` nie produkują
+wyjścia; brak elementu
 warunkującego powoduje, że całą gałąź jest pomijana.
 
 Użyj `caption:` na kroku, aby nadpisać tekst PDF (wraca do `say` lub `teach` gdy

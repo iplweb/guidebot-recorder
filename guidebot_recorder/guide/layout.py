@@ -28,6 +28,9 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
 .arrow { stroke: #e11; stroke-width: 4; fill: none; marker-end: url(#ah); }
 .circle { stroke: #e11; stroke-width: 4; fill: none; }
 .rect { stroke: #e11; stroke-width: 4; fill: rgba(238,17,17,0.08); }
+/* The marker colour is per step, so only the shape lives here — `stroke` is set
+   on the element itself. */
+.highlight { stroke-width: 5; fill: none; stroke-linecap: round; }
 """
 
 _ARROW_MARKER = (
@@ -47,6 +50,14 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
         elif a.kind in ("typed", "hover", "selected"):
             parts.append(
                 f'<rect class="rect" x="{a.x}" y="{a.y}" width="{a.w}" height="{a.h}" rx="4"/>'
+            )
+        elif a.kind == "highlight":
+            # The colour comes from the scenario, so it is escaped like any other
+            # author-supplied text before it lands in an attribute.
+            stroke = html.escape(a.color or "#e11", quote=True)
+            parts.append(
+                f'<ellipse class="highlight" cx="{a.cx}" cy="{a.cy}" '
+                f'rx="{a.rx}" ry="{a.ry}" stroke="{stroke}"/>'
             )
     parts.append("</svg>")
     return "".join(parts)

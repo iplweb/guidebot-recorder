@@ -45,6 +45,9 @@ Zrzuty ekranu są nakładane adnotacjami:
 - **Czerwone koło** — Cel kliknięcia myszy.
 - **Czerwona ramka** — Tekst wpisany do pola (z `enterText` lub literalnym `teach` pisaniem).
 - **Glow** (miękki halo) — Stan hover na elemencie.
+- **Elipsa** — Zakreślenie z kroku `highlight`, w kolorze ustawionym w scenariuszu.
+  Zamiast okrężnego ruchu kursora, który widać w filmie, przewodnik pokazuje samą
+  gotową elipsę wokół wskazanego elementu lub obszaru.
 
 ## Listy rozwijane (`select`)
 
@@ -71,6 +74,13 @@ przewodnik nie potrafi obsłużyć; komunikat błędu mówi wprost, o którą sy
 nazwę szukanej opcji.
 
 Obie opcje są opisane w [referencji scenariusza](scenario-reference.md).
+
+Krok z `optional: true` jest pomijany, gdy lista **nie zawiera** szukanej opcji — to
+jedyna sytuacja, w której ciche pominięcie jest poprawne, bo dokładnie o tym mówi
+`optional`. Każda inna porażka listy rozwijanej (kliknięcie, które nie zmieniło wyboru;
+widżet, którego nie da się rozwinąć; nakładka zdjęta w trakcie kroku) zatrzymuje
+przewodnik także dla kroku opcjonalnego — inaczej strona zniknęłaby po cichu z PDF-a,
+a usterka została na stronie.
 
 ## Tekst narracji: `say`, `teach` lub `caption`
 
