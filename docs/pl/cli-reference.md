@@ -4,7 +4,8 @@
 uv run guidebot --help
 ```
 
-Publiczne polecenia to `validate`, `compile`, `render`, `guide`, `compile-set` i `render-set`.
+Publiczne polecenia to `validate`, `compile`, `setup`, `render`, `guide`, `compile-set` i
+`render-set`.
 
 ## `guidebot validate`
 
@@ -41,6 +42,40 @@ widzi zmian samej aplikacji, stanu konta ani wpływu zmienionego `navigate`; wte
 `--timeout` nie steruje Codexem. Każda próba `codex exec` ma osobny limit 60 sekund, a
 ponowienia mogą wydłużyć czas jednego targetu. Scenariusz z `steps: []` nie zapisuje
 sidecara i nie może być renderowany przez standardowe CLI.
+
+## `guidebot setup`
+
+```bash
+uv run guidebot setup SCENARIUSZ_SETUP [OPCJE]
+```
+
+Buduje lub odświeża buforowaną sesję logowania dla scenariusza **setup**,
+odtwarzając go w **nienagrywanym** kontekście. To ręczne wejście do
+[przygotowania środowiska przed nagraniem](scenario-reference.md#setup-verifyuserloggedin-i-maxagehours);
+w typowym przypadku nie uruchamiasz go bezpośrednio, bo `guidebot compile` i
+`guidebot render` celu z `config.setup` same ustanawiają lub ponownie używają
+sesji.
+
+Scenariusz setup musi być już skompilowany (`guidebot compile SCENARIUSZ_SETUP`);
+inaczej polecenie kończy się jawnym błędem z instrukcją skompilowania go.
+Odtworzenie wykonuje **zero wywołań LLM** — odtwarza tylko zamrożone cele setupu.
+
+| Opcja | Domyślnie | Znaczenie |
+|---|---:|---|
+| `--headed` | wyłączone | Pokazuje przeglądarkę. Gdy health-check automatycznego odtworzenia się nie powiedzie, zatrzymuje się, byś dokończył logowanie ręcznie (MFA/captcha), po czym robi snapshot. |
+| `--force` | wyłączone | Zawsze odbudowuje sesję, ignorując cache. |
+| `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
+| `--verbose`, `-v` | wyłączone | Pokazuje postęp. |
+
+Zwykły przebieg działa jako sprawdź-i-użyj-ponownie: przy żywym cache wypisuje
+`session reused (already live)` i nie odtwarza; w przeciwnym razie odtwarza setup
+i wypisuje `session refreshed and cached`. Decyzja o sesji zależy od
+`verifyUserLoggedIn` i `maxAgeHours` setupu — patrz
+[dokumentacja YAML](scenario-reference.md#setup-verifyuserloggedin-i-maxagehours).
+
+Buforowana sesja to poświadczenie na okaziciela zapisane z prawami `0600`
+(katalog `0700`) pod `.guidebot/sessions/`, a polecenie samo tworzy
+`.guidebot/sessions/.gitignore` (`*`), więc nigdy nie trafia do repozytorium.
 
 ## `guidebot compile-set`
 

@@ -1,0 +1,51 @@
+# Setup scenario for pre-recording setup.
+#
+# This is an ORDINARY scenario that happens to teach logging in. A target
+# scenario points at it with `config.setup: teach-login.scenario.yaml` so the
+# target can be recorded ALREADY logged in — the login below never reaches the
+# target's film. See examples/logged-in-tour.scenario.yaml for the consumer.
+#
+# Compile THIS setup scenario first, then compile/render the target:
+#   export DEMO_EMAIL=user@example.com
+#   export DEMO_PASSWORD=replace-me
+#   uv run guidebot validate examples/teach-login.scenario.yaml
+#   uv run guidebot compile  examples/teach-login.scenario.yaml   # needs Codex CLI
+#   uv run guidebot setup    examples/teach-login.scenario.yaml   # build/refresh the cached session
+#
+# Never hardcode secrets — pass them through ${ENV_VAR} in enterText.text.
+config:
+  title: "Logging in to the system"
+  baseUrl: https://example.com
+  viewport: { width: 1280, height: 720 }
+  locale: en-US
+  tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+
+  # Health-check for the cached session. It runs on a throwaway, NON-recording
+  # context seeded with the cached storage_state: the session is "live" when
+  # `containsText` is a plain, CASE-SENSITIVE substring of the page's visible
+  # body.innerText. Choose text that renders ONLY when authenticated — a
+  # username is the robust choice. A logged-out footer that merely contains the
+  # word (e.g. "sign out whenever you like") would false-positive, because the
+  # match has no word boundaries.
+  verifyUserLoggedIn: "Sign out"
+  # Full form, if you need to check on a specific page or change the timeout:
+  # verifyUserLoggedIn:
+  #   containsText: "Sign out"
+  #   url: /dashboard       # optional; defaults to the target scenario's baseUrl
+  #   timeout: 8            # optional; seconds, default 8
+
+  # Optional time-to-live for the cached session. Computed from the cache's
+  # created_at, so it survives `git clean`, copies, and CI restore. Omit both
+  # this and verifyUserLoggedIn and a present cache is trusted until --force
+  # (the tool prints a loud warning in that case).
+  maxAgeHours: 12
+
+steps:
+  - say: "I'll show you how to log in to the system."
+  - navigate: /login
+  - enterText: { into: "the email address field", text: "${DEMO_EMAIL}" }
+    say: "First I enter my email address."
+  - enterText: { into: "the password field", text: "${DEMO_PASSWORD}" }
+    say: "Then my password."
+  - teach: "Click the Log in button"
+  - wait: { until: "the dashboard heading", state: visible, timeout: 10 }

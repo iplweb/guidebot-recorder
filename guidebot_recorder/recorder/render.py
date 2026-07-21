@@ -61,6 +61,7 @@ from guidebot_recorder.recorder._debug import (
     scenario_sensitive_values,
 )
 from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
@@ -1962,11 +1963,23 @@ async def run_render(
     # main-viewport-sized canvas with filler around its real window. That is
     # corrected in post (``compose_popup_video(popup_crop=...)``), never here:
     # shrinking the recording would also shrink the main window's frame.
+    #
+    # Pre-recording setup: when the target declares ``config.setup`` its login
+    # steps were removed, so the recording context must start already logged in.
+    # ``ensure_session`` establishes/reuses the prepared session on separate,
+    # non-recording contexts *before* this line, so the login can never reach the
+    # film (spec: "Target render").
+    setup_state = (
+        await ensure_session(browser, Path(path), Path(".guidebot/sessions"), env, timeout=timeout)
+        if cfg.setup is not None
+        else None
+    )
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
         locale=cfg.locale,
         record_video_dir=str(work),
         record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
+        **({"storage_state": setup_state} if setup_state is not None else {}),
         **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
     # Independent of the role-gating order below (it only wraps ``window.open``),
