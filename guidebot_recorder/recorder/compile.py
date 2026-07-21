@@ -731,11 +731,13 @@ async def _compile_step(
         try:
             await recorder.click(target, before_click=before_click)
         except PlaywrightError:
-            # A "close" button whose onclick calls ``window.close()`` can race the
-            # click and raise TargetClosedError once the page tears down. If the
-            # click closed the page, its intent succeeded — swallow it and let the
-            # caller observe the now-closed page (mirrors the apply_readiness
-            # tolerance below). Any other click failure (page still open) raises.
+            # The click *itself* tolerates the window it closed — see
+            # ``Recorder.click``, which both compile and render go through. What
+            # is left for this layer is the run-up: resolving and pointing at a
+            # target on a page that a previous step's drift already tore down.
+            # That is still this window's death rather than a distinct failure,
+            # so hand it to the caller's lifecycle checks the same way. Any
+            # failure with the page still open raises.
             if not page.is_closed():
                 raise
     elif action == "hover":
