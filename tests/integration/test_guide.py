@@ -229,7 +229,7 @@ async def test_guide_handles_select_and_scroll(tmp_path):
             # --- compile (offline reasoner, no LLM) ---
             page = await browser.new_page()
             reasoner = SelectScrollMockReasoner()
-            await run_compile(path, page, reasoner)
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             # --- guide ---
@@ -277,7 +277,7 @@ async def test_guide_select_actually_executes_and_unlocks_next_step(tmp_path):
             # --- compile (offline reasoner, no LLM) ---
             page = await browser.new_page()
             reasoner = SelectRevealMockReasoner()
-            await run_compile(path, page, reasoner)
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             # --- guide ---
@@ -330,7 +330,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
             # --- compile (offline reasoner, no LLM) ---
             compile_page = await browser.new_page()
             reasoner = SelectScrollMockReasoner()
-            await run_compile(path, compile_page, reasoner)
+            await run_compile(path, compile_page, reasoner, selects=None)
             await compile_page.context.close()
 
             # --- guide's own context/overlay/Recorder recipe, driven directly ---
