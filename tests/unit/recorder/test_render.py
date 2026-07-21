@@ -123,10 +123,6 @@ class FakeTts:
         return self.duration
 
 
-class SlowTts(FakeTts):
-    duration = 0.8
-
-
 class MultilingualFakeTts(FakeTts):
     durations = {
         ("Pierwszy krok.", "pl-PL"): 0.7,
@@ -1038,7 +1034,9 @@ async def test_render_fails_on_unexpected_popup(tmp_path):
         await browser.close()
 
 
-async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_path):
+async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
     correct = tmp_path / "correct.html"
     correct.write_text("<h1>Correct popup</h1>", encoding="utf-8")
     early = tmp_path / "early.html"
@@ -1070,18 +1068,35 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
         await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
-        # The timer fires after narration but while Recorder is moving/settling
-        # the synthetic cursor, before Locator.click is actually dispatched.
-        html.write_text(
-            button + "<script>setTimeout(() => window.open('early.html'), 550)</script>",
-            encoding="utf-8",
-        )
+        # The site opens a window of its own inside the click step, but strictly
+        # before Locator.click is dispatched — the render must not credit that
+        # window to the click. Hanging it on the recorder's click pins the order;
+        # the timer this replaces merely aimed at the gap between the narration
+        # and the dispatch, and missing that gap loses the test either way (too
+        # early raises a different error, too late and the render is right to
+        # attribute the window to the click).
+        early_uri = early.resolve().as_uri()
+
+        class EarlyWindowRecorder(R.Recorder):
+            async def click(self, target, *, before_click=None):
+                # Awaiting the context's own page event is what makes this
+                # deterministic: the render has *observed* the window by the time
+                # the click runs, rather than merely having been told to expect one.
+                async with self.page.context.expect_page() as early_window:
+                    await self.page.evaluate("url => window.open(url)", early_uri)
+                await early_window.value
+                await super().click(target, before_click=before_click)
+
+        monkeypatch.setattr(R, "Recorder", EarlyWindowRecorder)
+
         with pytest.raises(RenderError, match="przed akcją click"):
             await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
 
-async def test_render_fails_when_popup_closes_during_narration(tmp_path):
+async def test_render_fails_when_popup_closes_during_narration(tmp_path, monkeypatch):
+    import guidebot_recorder.recorder.render as R
+
     popup_html = tmp_path / "popup.html"
     popup_html.write_text("<h1>Popup</h1>", encoding="utf-8")
     main_html = tmp_path / "main.html"
@@ -1111,13 +1126,26 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path):
         await page.context.close()
 
         # Keep the compiled target/lifecycle metadata, then simulate runtime drift
-        # that closes the popup independently of a scenario action.
-        popup_html.write_text(
-            "<h1>Popup</h1><script>setTimeout(() => close(), 300)</script>",
-            encoding="utf-8",
-        )
-        with pytest.raises(RenderError, match="asynchronicznie"):
-            await run_render(path, tmp_path / "out.mp4", SlowTts(), tmp_path / "cache", browser)
+        # that closes the popup independently of a scenario action. The drift is
+        # fired *from the narration* rather than from a timer in the page: a
+        # wall-clock delay only bets on which phase the popup dies in, and the
+        # render answers that death differently — and just as correctly — in
+        # every phase it can land in (during the open, during the visual mount,
+        # during the narration). The bet is what made this test flaky on CI; the
+        # phase this test is about is the one it now pins.
+        real_pace_narration = R._pace_narration
+
+        async def close_popup_during_narration(*args, **kwargs):
+            for context in browser.contexts:
+                for open_page in list(context.pages):
+                    if open_page.url.endswith("popup.html"):
+                        await open_page.close()
+            return await real_pace_narration(*args, **kwargs)
+
+        monkeypatch.setattr(R, "_pace_narration", close_popup_during_narration)
+
+        with pytest.raises(RenderError, match="asynchronicznie podczas narracji"):
+            await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
 

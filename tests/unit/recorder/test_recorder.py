@@ -1,6 +1,6 @@
 import pytest
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import async_playwright
+from playwright.async_api import Locator, async_playwright
 
 from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
@@ -83,6 +83,55 @@ async def test_hover_emits_no_click_sound(page):
     rec = Recorder(page, None, on_sfx=events.append)
     await rec.hover(RoleTarget(role="button", name="ok"))
     assert "click" not in events
+
+
+def _click_raising_after_close(monkeypatch, *, close: bool) -> None:
+    """Make ``Locator.click`` fail the way a self-closing target fails.
+
+    Playwright dispatches the click and only afterwards finds the target gone —
+    the call log of the real CI failure ends at ``performing click action`` — so
+    the raise says nothing about whether the click landed. ``close=False`` is the
+    control case: the same exception with the window still alive.
+    """
+
+    async def raising_click(self, *args, **kwargs):
+        if close:
+            await self.page.close()
+        # TargetClosedError, which is what Playwright actually raises here, is a
+        # PlaywrightError subclass; the recorder classifies by window state, not
+        # by the exception's type or wording, so the base class is enough.
+        raise PlaywrightError("Locator.click: Target page, context or browser has been closed")
+
+    monkeypatch.setattr(Locator, "click", raising_click)
+
+
+async def test_click_accepts_a_target_the_click_itself_closed(page, monkeypatch):
+    """Clicking a button that closes its own window is a completed click.
+
+    A "close this popup" button is a supported scenario action — render owns the
+    aftermath at its own lifecycle checkpoints. Letting Playwright's post-dispatch
+    error escape would turn that supported ending into an opaque crash that only
+    shows up when the machine loses the race.
+    """
+
+    await page.set_content('<button onclick="window.close()">Zamknij</button>')
+    rec = Recorder(page, overlay=None)
+    _click_raising_after_close(monkeypatch, close=True)
+
+    await rec.click(RoleTarget(role="button", name="Zamknij"))
+
+    assert page.is_closed()
+
+
+async def test_click_still_raises_when_the_window_survives(page, monkeypatch):
+    """A live window means the click genuinely failed — do not swallow that."""
+
+    await page.set_content("<button>ok</button>")
+    rec = Recorder(page, overlay=None)
+    _click_raising_after_close(monkeypatch, close=False)
+
+    with pytest.raises(PlaywrightError):
+        await rec.click(RoleTarget(role="button", name="ok"))
 
 
 async def test_enter_text_instant_when_no_delay(page):

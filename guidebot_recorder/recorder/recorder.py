@@ -339,7 +339,23 @@ class Recorder:
         locator = await self._point_and_prepare(target, click_sound=True)
         if before_click is not None:
             before_click()
-        await locator.click()
+        try:
+            await locator.click()
+        except PlaywrightError:
+            # A click whose handler closes the window (a popup's own "Zamknij",
+            # a logout that shuts the tab) races Playwright's post-dispatch
+            # bookkeeping: the click *lands* — the call log ends at "performing
+            # click action" — and only then the target disappears. Whether the
+            # error surfaces at all depends on which side wins, so re-raising it
+            # would make a supported ending fail at random.
+            #
+            # Liveness is read back from the window rather than sniffed out of
+            # the message: the caller's lifecycle checkpoints act on that same
+            # state, and they say far more precisely than Playwright can whether
+            # this close was the scenario's doing. A window still alive means the
+            # click genuinely failed, so that error keeps travelling.
+            if not self.page.is_closed():
+                raise
 
     async def hover(self, target: Target) -> None:
         locator = await self._point_and_prepare(target)
