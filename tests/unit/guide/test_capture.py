@@ -199,8 +199,9 @@ class _RecordingPause:
     def __init__(self):
         self.calls: list[tuple] = []
 
-    async def __call__(self, page, phase, index, kind, exc, sensitive_values=()):
+    async def __call__(self, page, phase, index, kind, exc, sensitive_values=(), **location):
         self.calls.append((page, phase, index, kind, exc, sensitive_values))
+        self.location = location
 
 
 def _click_scenario_and_action():

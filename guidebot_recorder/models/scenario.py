@@ -348,24 +348,32 @@ class Scenario(BaseModel):
         for index, entry in enumerate(self.steps):
             if isinstance(entry, WhenBlock):
                 for child_index, child in enumerate(entry.steps):
-                    _validate_translations(child, f"{index}.{child_index}", expected)
+                    _validate_translations(child, (index, child_index), expected)
             else:
-                _validate_translations(entry, str(index), expected)
+                _validate_translations(entry, (index,), expected)
         return self
 
 
-def _validate_translations(step: Step, label: str, expected: set[str]) -> None:
+def _validate_translations(step: Step, path: tuple[int, ...], expected: set[str]) -> None:
+    """Sprawdź tłumaczenia kroku spod ścieżki pozycyjnej ``path`` w ``steps:``.
+
+    Treść nie zawiera numeru kroku — ``path`` niesie go w :class:`StepPathError`,
+    a diagnostyka zamienia go na `plik:linia` w nagłówku bannera. Walidator żyje
+    na poziomie ``Scenario`` (``loc == ()``), więc bez ``path`` komunikatu nie
+    dałoby się przypiąć do żadnej linii pliku.
+    """
+
     actual = set(step.translations)
     if step.narration() is None:
         if actual:
             languages = ", ".join(sorted(actual))
-            raise ValueError(f"krok {label}: tłumaczenia bez narracji `say`/`teach`: {languages}")
+            raise StepPathError(f"tłumaczenia bez narracji `say`/`teach`: {languages}", path)
         return
     missing = expected - actual
     if missing:
         languages = ", ".join(sorted(missing))
-        raise ValueError(f"krok {label}: brak tłumaczeń dla ścieżek: {languages}")
+        raise StepPathError(f"brak tłumaczeń dla ścieżek: {languages}", path)
     unknown = actual - expected
     if unknown:
         languages = ", ".join(sorted(unknown))
-        raise ValueError(f"krok {label}: niezdefiniowane tłumaczenia: {languages}")
+        raise StepPathError(f"niezdefiniowane tłumaczenia: {languages}", path)

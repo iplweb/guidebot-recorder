@@ -14,7 +14,7 @@ the frozen element positions do not line up ("element outside of the viewport").
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -31,6 +31,7 @@ from playwright.async_api import (
 )
 from tqdm import tqdm
 
+from guidebot_recorder.diagnostics import step_banner
 from guidebot_recorder.models.action import (
     COMPILER_VERSION,
     CachedAction,
@@ -69,6 +70,7 @@ from guidebot_recorder.resolver.resolution import (
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.scenario.source import ScenarioSource, StepLocation
 
 __all__ = ["compile_up_to_date", "heuristic_expect", "run_compile", "run_compile_in_browser"]
 
@@ -301,6 +303,18 @@ async def run_compile(
         write_compiled(cpath, CompiledScenario(source=path.name, actions=actions))
         artifact_dirty = False
 
+    def banner(entry: FlatStep, entry_index: int, message: str) -> str:
+        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
+
+        return step_banner(
+            index=entry_index,
+            total=len(flat),
+            location=entry.location,
+            source=scenario.source,
+            message=message,
+            sensitive=sensitive_values,
+        )
+
     bar = tqdm(total=len(flat), desc="compile", unit="krok", disable=not verbose)
     try:
         for index, entry in enumerate(flat):
@@ -321,13 +335,13 @@ async def run_compile(
             if active_page.is_closed():
                 raise RuntimeError("popup zamknął się poza obsługiwaną akcją scenariusza")
             if _unexpected_pages(observed_pages, main_page, popup_page):
-                raise RuntimeError(f"krok {index}: nieoczekiwany popup poza akcją click")
+                raise RuntimeError(banner(entry, index, "nieoczekiwany popup poza akcją click"))
             active_page.set_default_timeout(timeout * 1000)
             await active_page.bring_to_front()
             recorder = Recorder(active_page, overlay=None)
             kind = step.command_kind()
             if kind == "closeWindow" and active_page is main_page:
-                raise RuntimeError(f"krok {index}: closeWindow bez otwartego okna")
+                raise RuntimeError(banner(entry, index, "closeWindow bez otwartego okna"))
             if kind == "teach":
                 try:
                     validate_teach_instruction(_instruction(step))
@@ -432,10 +446,18 @@ async def run_compile(
                     await Recorder(active_page, overlay=None).apply_readiness("none")
                     await active_page.wait_for_load_state()
                 if _unexpected_pages(observed_pages, main_page, popup_page):
-                    raise RuntimeError(f"krok {index}: nieoczekiwany dodatkowy popup")
+                    raise RuntimeError(banner(entry, index, "nieoczekiwany dodatkowy popup"))
                 actions[index] = compiled_action
                 if isinstance(compiled_action, PendingAction):
-                    _warn_absent(index, step, gate=entry.is_gate)
+                    _warn_absent(
+                        index,
+                        step,
+                        gate=entry.is_gate,
+                        total=len(flat),
+                        location=entry.location,
+                        source=scenario.source,
+                        sensitive=sensitive_values,
+                    )
                     if entry.is_gate:
                         skipped_branch = entry.branch
             except Exception as exc:
@@ -451,6 +473,9 @@ async def run_compile(
                         kind,
                         exc,
                         sensitive_values,
+                        total=len(flat),
+                        location=entry.location,
+                        source=scenario.source,
                     )
                 raise RuntimeError(f"{type(exc).__name__}: {safe_message}") from None
             if actions[index] != action_before:
@@ -488,11 +513,37 @@ def _pending_for(step: Step, chash: str) -> PendingAction:
     )
 
 
-def _warn_absent(index: int, step: Step, *, gate: bool) -> None:
+def _warn_absent(
+    index: int,
+    step: Step,
+    *,
+    gate: bool,
+    total: int,
+    location: StepLocation | None = None,
+    source: ScenarioSource | None = None,
+    sensitive: Iterable[str] = (),
+) -> None:
+    """Ostrzeż o nieobecnym elemencie opcjonalnym — banner z `plik:linia`.
+
+    Instrukcja kroku bywa dosłowną kopią wartości wstrzykniętej przez `${ENV}`,
+    więc `sensitive` nie jest ozdobnikiem: bez niego sekret wyciekłby wierszem
+    pod „bezpiecznym" fragmentem YAML-a.
+    """
+
     what = "element bramkujący" if gate else "element opcjonalny"
     tqdm.write(
-        f"⚠ krok {index}: {what} {_instruction(step)!r} nie pojawił się — "
-        "zapisano wpis oczekujący (pending); render rozwiąże go na miejscu"
+        step_banner(
+            index=index,
+            total=total,
+            location=location,
+            source=source,
+            message=(
+                f"{what} {_instruction(step)!r} nie pojawił się — "
+                "zapisano wpis oczekujący (pending); render rozwiąże go na miejscu"
+            ),
+            warning=True,
+            sensitive=sensitive,
+        )
     )
 
 

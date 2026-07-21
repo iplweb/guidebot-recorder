@@ -9,11 +9,12 @@ from urllib.parse import urljoin
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 
+from guidebot_recorder.diagnostics import step_banner
 from guidebot_recorder.guide.annotate import annotations_for
 from guidebot_recorder.guide.model import GuidePage, page_text
 from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
-from guidebot_recorder.models.scenario import WaitUntil
+from guidebot_recorder.models.scenario import FlatStep, WaitUntil
 
 # Imported as a bare name (not `from ... import _debug`) so it becomes an attribute
 # of this module and tests can monkeypatch it, like `reuse_is_valid` below.
@@ -64,6 +65,18 @@ async def capture_pages(
     pages: list[GuidePage] = []
     prev_cursor: tuple[float, float] | None = None
     skipped_branch: int | None = None
+
+    def banner(entry: FlatStep, entry_index: int, message: str) -> str:
+        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
+
+        return step_banner(
+            index=entry_index,
+            total=len(flat),
+            location=entry.location,
+            source=scenario.source,
+            message=message,
+            sensitive=sensitive_values,
+        )
 
     for index, (fs, action) in enumerate(zip(flat, actions, strict=True)):
         step = fs.step
@@ -144,34 +157,38 @@ async def capture_pages(
                     timeout_wait = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
                     await recorder.wait_for(action.target, action.state or "visible", timeout_wait)
                 elif verbose and not step.optional:
-                    print(f"pomijam krok {index}: oczekiwanie nierozwiązane — uruchom `compile`")
+                    print(
+                        banner(fs, index, "pomijam: oczekiwanie nierozwiązane — uruchom `compile`")
+                    )
                 continue
 
             # kind == "action": click / hover / type (dispatch on cached.action)
             if not isinstance(action, CachedAction):
                 if step.optional:
                     if verbose:
-                        print(f"pomijam krok {index}: cel nieobecny")
+                        print(banner(fs, index, "pomijam: cel nieobecny"))
                     continue  # optional branch never compiled -> skip page
-                raise RuntimeError(f"krok {index}: nierozwiązana akcja obowiązkowa")
+                raise RuntimeError(banner(fs, index, "nierozwiązana akcja obowiązkowa"))
             act = action.action
             if not step.optional and act != "waitFor":
                 if not await reuse_is_valid(recorder.frame, action):
                     raise GuideError(
-                        f"krok {index}: niezgodna tożsamość — uruchom `compile --force`"
+                        banner(fs, index, "niezgodna tożsamość — uruchom `compile --force`")
                     )
             try:
                 res = await recorder.point(action.target, ripple=False)
             except PlaywrightError:
                 if step.optional:
                     if verbose:
-                        print(f"pomijam krok {index}: cel nieobecny")
+                        print(banner(fs, index, "pomijam: cel nieobecny"))
                     continue
                 raise
             if act == "type":
                 text = (step.enter_text.text if step.enter_text else None) or action.input_text
                 if text is None:
-                    raise GuideError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
+                    raise GuideError(
+                        banner(fs, index, "brak zamrożonego tekstu — uruchom `compile`")
+                    )
                 await res.locator.fill(text)
                 shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
             else:
@@ -196,7 +213,17 @@ async def capture_pages(
             prev_cursor = res.center
         except Exception as exc:
             if pause_on_error:
-                await pause_for_inspection(page, "guide", index, kind, exc, sensitive_values)
+                await pause_for_inspection(
+                    page,
+                    "guide",
+                    index,
+                    kind,
+                    exc,
+                    sensitive_values,
+                    total=len(flat),
+                    location=fs.location,
+                    source=scenario.source,
+                )
             raise
 
     return pages

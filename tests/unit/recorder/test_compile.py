@@ -9,6 +9,7 @@ from guidebot_recorder.models.action import COMPILER_VERSION
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.scenario import Step
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
+from guidebot_recorder.recorder._debug import scenario_sensitive_values
 from guidebot_recorder.recorder.compile import (
     _short,
     _wait_for_new_pages,
@@ -18,6 +19,7 @@ from guidebot_recorder.recorder.compile import (
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
 SCENARIO = textwrap.dedent(
     """\
@@ -947,3 +949,70 @@ def test_compile_short_description_for_close_window():
     step = Step.model_validate({"closeWindow": True})
 
     assert _short(step) == "closeWindow"
+
+
+SECRET_SCENARIO = textwrap.dedent(
+    """\
+    config:
+      title: Sekret
+      viewport: {width: 800, height: 600}
+      tts: {provider: edge, voice: v, lang: pl-PL}
+    steps:
+      - navigate: "data:text/html,<p>pusto</p>"
+      - enterText:
+          into: "pole logowania"
+          text: "${SECRET}"
+      - teach: "kliknij menu uzytkownika hunter2"
+        optional: true
+    """
+)
+
+
+def test_warn_absent_redacts_env_secrets(tmp_path, capsys):
+    """Ostrzeżenie runtime nie może wypisać wartości wstrzykniętej przez `${ENV}`.
+
+    Snippet YAML jest bezpieczny z definicji (pochodzi sprzed podstawienia), ale
+    treść komunikatu — `_instruction(step)` — powtarza tu tę samą wartość, którą
+    scenariusz wpisuje z `${SECRET}`. Bez redakcji całego bannera sekret
+    wyciekłby wierszem pod fragmentem pokazującym niewinne `${SECRET}`.
+    """
+
+    path = tmp_path / "sekret.scenario.yaml"
+    path.write_text(SECRET_SCENARIO, encoding="utf-8")
+    env = {"SECRET": "hunter2"}
+    scenario = load_scenario(path, env)
+    sensitive = scenario_sensitive_values(scenario, scenario_env_references(path, env))
+    assert "hunter2" in sensitive
+    flat = scenario.flat_steps()
+
+    compile_module._warn_absent(
+        2,
+        flat[2].step,
+        gate=False,
+        total=len(flat),
+        location=flat[2].location,
+        source=scenario.source,
+        sensitive=sensitive,
+    )
+
+    captured = capsys.readouterr()
+    assert "hunter2" not in captured.out
+    assert "<redacted>" in captured.out
+    assert "⚠ krok 3/3 — " in captured.out
+    assert "sekret.scenario.yaml:10" in captured.out
+
+    # Ten sam banner na kroku wpisującym sekret: fragment YAML-a pokazuje surowe
+    # `${SECRET}`, bo pochodzi sprzed podstawienia.
+    compile_module._warn_absent(
+        1,
+        flat[1].step,
+        gate=False,
+        total=len(flat),
+        location=flat[1].location,
+        source=scenario.source,
+        sensitive=sensitive,
+    )
+
+    typed = capsys.readouterr().out
+    assert 'text: "${SECRET}"' in typed
+    assert "hunter2" not in typed

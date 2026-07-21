@@ -28,6 +28,7 @@ from guidebot_recorder.recorder.session import (
 from guidebot_recorder.resolver.reasoner import CodexReasoner
 from guidebot_recorder.scenario.loader import (
     CompiledSidecarError,
+    ScenarioValidationError,
     guard_source_scenario,
     load_scenario,
 )
@@ -62,6 +63,11 @@ def validate_cmd(path: Path) -> None:
     """Wczytaj i zwaliduj schemat scenariusza (bez przeglądarki)."""
     try:
         load_scenario(path)
+    except ScenarioValidationError as exc:
+        # Banner niesie własny nagłówek `BŁĄD walidacji — plik:linia`; doklejenie
+        # tu drugiego dałoby `BŁĄD walidacji: BŁĄD walidacji — …`.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from None
     except Exception as exc:  # noqa: BLE001 — CLI: raportujemy każdy błąd walidacji
         typer.echo(f"BŁĄD walidacji: {exc}", err=True)
         raise typer.Exit(code=1) from None

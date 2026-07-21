@@ -334,7 +334,10 @@ async def test_error_inside_an_entered_branch_still_fails_the_render(tmp_path, b
     path.write_text(_branch_scenario("data:text/html,<div>Ciasteczka</div>"), encoding="utf-8")
     _branch_sidecar(path, gate_pending=False, child_pending=False)
 
-    with pytest.raises(RenderError, match="krok 3"):
+    # Banner 1-based, z lokalizacją dziecka bloku `when:` i cytatem z YAML-a.
+    with pytest.raises(
+        RenderError, match=r"krok 4/5 — .*gate\.scenario\.yaml:11 \(w bramce z linii 7\)"
+    ):
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
 
 
@@ -398,7 +401,9 @@ async def test_step_numbering_uses_flat_indices(tmp_path, browser):
         ],
     )
 
-    with pytest.raises(RenderError, match="krok 3"):
+    with pytest.raises(
+        RenderError, match=r"krok 4/5 — .*gate\.scenario\.yaml:11 \(w bramce z linii 7\)"
+    ):
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
 
 
@@ -415,7 +420,7 @@ async def test_pending_entry_on_a_required_step_demands_a_recompile(tmp_path, br
         ],
     )
 
-    with pytest.raises(RenderError, match="krok 1"):
+    with pytest.raises(RenderError, match=r"krok 2/3 — .*req\.scenario\.yaml:7"):
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
 
 
