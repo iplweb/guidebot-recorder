@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Wyszukiwanie precyzyjne</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
+      .row { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+      .row > span, .row > label { width: 120px; }
+      input[type="text"] { width: 150px; }
+      button.del { padding: 0 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Wyszukiwanie precyzyjne</h1>
+
+    <!--
+      Formularz kryteriów w stylu django-multiseek — dokładnie ten kształt
+      strony, na którym zgłoszenie #51 udokumentowało pięć błędnych zamrożeń.
+
+      Dwie pułapki są celowe i obie pochodzą ze zgłoszenia:
+
+      1. Przycisk usuwania NIE MOŻE być `<button>×</button>`: taki przycisk ma
+         nazwę dostępną „×" i przestaje być niejednoznaczny. Ikona siedzi więc
+         w `aria-hidden`, przez co `accessibleName` wychodzi pusty — tak jak
+         w prawdziwym formularzu.
+      2. Wiersz „Zakres lat" ma DWA nienazwane pola tekstowe
+         (`role=textbox name=''`). To one dostały w zgłoszeniu identyczny target
+         `nth=1`, więc obie wartości (2022 i 2024) wylądowały w jednym polu.
+
+      Pole „Szukana fraza" jest nazwane etykietą i to ono tworzy rozjazd
+      jednostek opisany w specu: snapshot kandydatów widzi PIĘĆ pól tekstowych,
+      a lokator `get_by_role("textbox", name="")` trafia tylko w CZTERY
+      nienazwane. Indeks policzony na tablicy z promptu jest więc o jeden za
+      duży — to jest cała przyczyna źródłowa, odtworzona w markupie.
+    -->
+    <form id="kryteria">
+      <div class="row">
+        <label for="fraza">Szukana fraza</label>
+        <input type="text" id="fraza" /><!--GNIAZDO-DRYFU-->
+      </div>
+      <div class="row">
+        <span>Zakres lat</span>
+        <input type="text" id="rok-od" /><input type="text" id="rok-do" />
+      </div>
+      <div class="row">
+        <span>Tytuł zawiera</span>
+        <input type="text" id="tytul-wartosc" />
+        <button type="button" class="del"><span aria-hidden="true">&times;</span></button>
+      </div>
+      <div class="row">
+        <span>Autor zawiera</span>
+        <input type="text" id="autor-wartosc" />
+        <button type="button" class="del"><span aria-hidden="true">&times;</span></button>
+      </div>
+      <button type="button" id="szukaj">Szukaj</button>
+    </form>
+
+    <script>
+      // Krzyżyk usuwa swój wiersz — bez tego kliknięcie w „ten" albo „tamten"
+      // przycisk wyglądałoby na filmie identycznie i test nie miałby czego
+      // sprawdzić po akcji.
+      for (const button of document.querySelectorAll("button.del")) {
+        button.addEventListener("click", () => button.closest(".row").remove());
+      }
+    </script>
+  </body>
+</html>
