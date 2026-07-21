@@ -1,5 +1,8 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
+from ruamel.yaml import YAML
 
 from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import (
@@ -11,9 +14,11 @@ from guidebot_recorder.models.scenario import (
     Select,
     Slide,
     Step,
+    StepPathError,
     WaitUntil,
     WhenBlock,
 )
+from guidebot_recorder.scenario.source import build_source
 
 
 def test_scroll_command_kind_no_target():
@@ -240,6 +245,14 @@ def _select_step(mode: str | None = None) -> Step:
     return Step(select=Select(**payload))
 
 
+def _step_path_error(excinfo) -> StepPathError:
+    """The original validator exception pydantic carried through in ``ctx``."""
+
+    origin = excinfo.value.errors()[0]["ctx"]["error"]
+    assert isinstance(origin, StepPathError)
+    return origin
+
+
 def test_a_step_asking_for_shim_under_a_global_native_is_rejected_at_load():
     """`config.selects.mode: native` installs no widget, so no step can opt back in.
 
@@ -248,6 +261,12 @@ def test_a_step_asking_for_shim_under_a_global_native_is_rejected_at_load():
     `mode: shim` underneath it used to load fine and then fail mid-render, after
     the cursor had already clicked an unrelated element on camera. The author
     learns at load time instead.
+
+    The step is named by the positional path on :class:`StepPathError`, not by a
+    ``krok N:`` prefix baked into the text: this validator sits on ``Scenario``
+    (``loc == ()``), so the path is the only thing the loader can turn into
+    `plik:linia` plus the offending YAML fragment. Anything else would leave a
+    `select:` step worse diagnosed than a `click:` step in the same file.
     """
 
     with pytest.raises(ValidationError) as excinfo:
@@ -256,9 +275,11 @@ def test_a_step_asking_for_shim_under_a_global_native_is_rejected_at_load():
             steps=[_select_step("shim")],
         )
 
+    assert _step_path_error(excinfo).path == (0,)  # says which step
     message = str(excinfo.value)
-    assert "krok 0" in message  # says which step
     assert "config.selects.mode: native" in message  # ...and which setting fights it
+    # the step number belongs to the banner headline, never to the text
+    assert "krok 0:" not in message
 
 
 def test_the_step_index_of_a_rejected_shim_mode_points_into_its_branch():
@@ -271,7 +292,8 @@ def test_the_step_index_of_a_rejected_shim_mode_points_into_its_branch():
             ],
         )
 
-    assert "krok 1.1" in str(excinfo.value)
+    assert _step_path_error(excinfo).path == (1, 1)
+    assert "krok 1.1" not in str(excinfo.value)
 
 
 def test_the_other_direction_and_every_inherited_mode_still_load():
@@ -486,7 +508,77 @@ def test_flat_steps_branch_index_is_the_top_level_block_index():
 
 def test_flat_step_is_a_named_tuple():
     flat = FlatStep(step=Step(say="x"), branch=None, is_gate=False)
-    assert tuple(flat) == (flat.step, None, False)
+    assert tuple(flat) == (flat.step, None, False, None)
+
+
+def test_flat_step_location_defaults_to_none():
+    assert FlatStep(step=Step(say="x"), branch=None, is_gate=False).location is None
+
+
+# --- lokalizacja kroków w źródle (ScenarioSource) -----
+
+
+SOURCE_TEXT = """\
+config:
+  title: "t"
+  viewport: { width: 8, height: 6 }
+  tts: { provider: edge, voice: v, lang: pl-PL }
+steps:
+  - say: "pierwszy"
+  - when: "baner"
+    state: visible
+    steps:
+      - click: "ok"
+  - say: "ostatni"
+"""
+
+
+def _scenario_with_source() -> tuple[Scenario, object]:
+    source = build_source(Path("test.scenario.yaml"), SOURCE_TEXT)
+    scenario = Scenario.model_validate(YAML(typ="safe").load(SOURCE_TEXT))
+    scenario.attach_source(source)
+    return scenario, source
+
+
+def test_scenario_has_no_source_until_one_is_attached():
+    scenario = Scenario(config=_config(), steps=[Step(say="x")])
+
+    assert scenario.source is None
+    assert scenario.flat_steps()[0].location is None
+
+
+def test_attach_source_exposes_it_through_the_source_property():
+    scenario, source = _scenario_with_source()
+
+    assert scenario.source is source
+
+
+def test_flat_steps_are_stamped_with_locations_from_the_source():
+    scenario, source = _scenario_with_source()
+
+    flat = scenario.flat_steps()
+
+    assert len(flat) == 4
+    assert [entry.location for entry in flat] == list(source.steps)
+    assert flat[1].location.is_gate is True
+    assert flat[2].location.gate_line == flat[1].location.line
+
+
+def test_source_survives_model_copy():
+    scenario, source = _scenario_with_source()
+
+    assert scenario.model_copy().source is source
+
+
+# --- StepPathError -----
+
+
+def test_step_path_error_is_a_value_error_carrying_a_positional_path():
+    error = StepPathError("brak tłumaczeń dla ścieżek: en-US", path=(3, 1))
+
+    assert isinstance(error, ValueError)
+    assert error.path == (3, 1)
+    assert str(error) == "brak tłumaczeń dla ścieżek: en-US"
 
 
 # --- caption (PDF guide) -----

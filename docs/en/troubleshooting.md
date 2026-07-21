@@ -7,6 +7,39 @@ uv run guidebot compile path/to/flow.scenario.yaml \
   --headed --pause-on-error --verbose
 ```
 
+## Reading a step message
+
+Every message — warning, error and validation error — carries the file, the line
+number and the verbatim YAML fragment, so you never have to count steps by hand.
+Messages are in Polish, as is the rest of the CLI output:
+
+```
+⚠ krok 3/8 — examples/onet-login.scenario.yaml:37 (bramka `when:`)
+     37 |   - when: "the cookie consent banner"
+     38 |     state: visible
+     39 |     timeout: 20
+   element bramkujący nie pojawił się — zapisano wpis oczekujący (pending)
+```
+
+The number in the headline is the position in **execution order**, not the
+position in the `steps:` list. The two drift apart because every `when:` block
+contributes an extra gate step — shown as `(bramka `when:`)` — that has no entry
+of its own in the file. Steps inside a block are marked `(w bramce z linii N)`.
+Trust the line number, not the step number.
+
+Validation errors add a caret under the offending line:
+
+```
+BŁĄD walidacji — scenarios/flow.scenario.yaml:23 (krok 5/12)
+     23 |   - click: "Zapisz"
+          ^ tutaj
+     24 |     navigate: "https://example.test"
+   krok ma 2 komend (['navigate', 'click']); dozwolona dokładnie jedna
+```
+
+The fragment comes from the file **before** `${VARIABLE}` substitution, so it
+shows the variable name and never its value.
+
 ## Codex CLI is missing
 
 Symptom: compilation reports that Codex CLI is required or cannot find `codex`.
@@ -92,12 +125,17 @@ page also changes routes or target labels, use a
 
 ## `select` resolves to the wrong dropdown
 
-The symptom is `option_missing` in the compile error:
+The symptom is `option_missing` in the compile error, which — like every other step
+message — points at the line to edit:
 
 ```
-nie udało się zwalidować namiaru dla: 'the formal character dropdown'
-(ostatnie odrzucenie: The <select> has no option labelled 'Journal article';
- it offers: 'Unit report', 'Author report'.)
+krok 6/12 — scenarios/flow.scenario.yaml:23
+     23 |   - select:
+     24 |       from: "the formal character dropdown"
+     25 |       option: "Journal article"
+   nie udało się zwalidować namiaru dla: 'the formal character dropdown'
+   (ostatnie odrzucenie: The <select> has no option labelled 'Journal article';
+    it offers: 'Unit report', 'Author report'.)
 ```
 
 The resolver picked a `<select>` that does not carry the requested option. This is

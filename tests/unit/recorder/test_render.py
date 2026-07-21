@@ -48,7 +48,7 @@ from guidebot_recorder.recorder.render import (
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import ScenarioValidationError, load_scenario
 from guidebot_recorder.selects import Selects
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
@@ -2183,7 +2183,9 @@ def test_zero_settle_is_rejected_at_scenario_load(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValidationError):
+    # `load_scenario` tłumaczy błędy pydantica na banner `plik:linia`, więc na
+    # zewnątrz wychodzi `ScenarioValidationError` (dalej `ValueError`)
+    with pytest.raises(ScenarioValidationError, match="holdFrameSettle"):
         load_scenario(path)
 
 

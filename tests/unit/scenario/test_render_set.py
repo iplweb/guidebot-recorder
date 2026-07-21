@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from guidebot_recorder.scenario.loader import ScenarioValidationError
 from guidebot_recorder.scenario.render_set import RenderSetValidationError, load_render_set
 
 
@@ -82,6 +83,18 @@ def test_load_render_set_preserves_order_and_resolves_non_secret_paths(tmp_path:
 def test_load_render_set_does_not_expose_substituted_secret_in_validation_error(
     tmp_path: Path,
 ) -> None:
+    """Błąd wariantu pokazuje banner scenariusza, ale nigdy podstawionej wartości.
+
+    Zestaw zawijał dawniej *każdy* błąd wczytania wariantu w
+    ``RenderSetValidationError`` z samą nazwą typu, bo wypadał tędy surowy
+    ``pydantic.ValidationError`` z ``input_value=…`` — czyli z wartościami już
+    po podstawieniu ``${ENV}``. Dziś ``load_scenario`` zamienia go u źródła na
+    banner, którego snippet pochodzi *sprzed* substytucji, więc banner może iść
+    do użytkownika w całości: mówi, w którym pliku i w której linii jest błąd.
+    Asercja na ``${PASSWORD}`` jest tu istotą dowodu — gdyby snippet powstawał
+    po substytucji, stałaby w tym miejscu wartość sekretu.
+    """
+
     secret = "sentinel-password-that-must-not-leak"
     (tmp_path / "en.scenario.yaml").write_text(
         _scenario("en-US").replace(
@@ -95,11 +108,13 @@ def test_load_render_set_does_not_expose_substituted_secret_in_validation_error(
         "      en-US: {scenario: en.scenario.yaml, output: en.mp4}",
     )
 
-    with pytest.raises(RenderSetValidationError) as captured:
+    with pytest.raises(ScenarioValidationError) as captured:
         load_render_set(manifest, {"PASSWORD": secret})
 
     assert secret not in str(captured.value)
     assert secret not in repr(captured.value)
+    assert "${PASSWORD}" in str(captured.value)
+    assert "en.scenario.yaml:" in str(captured.value)
 
 
 @pytest.mark.parametrize(

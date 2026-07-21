@@ -14,6 +14,7 @@ covered in ``test_render.py``, where a full render is already paid for.
 from __future__ import annotations
 
 import inspect
+import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -24,7 +25,13 @@ from pydantic import ValidationError
 import guidebot_recorder.recorder.compile as compile_module
 from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Viewport
-from guidebot_recorder.models.scenario import Scenario, Select, Step, select_mode
+from guidebot_recorder.models.scenario import (
+    Scenario,
+    Select,
+    Step,
+    StepPathError,
+    select_mode,
+)
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
 from guidebot_recorder.recorder.compile import (
     run_compile,
@@ -36,6 +43,7 @@ from guidebot_recorder.recorder.render import (
     _compiled_action_is_current,
     _compiled_from,
     _render_step,
+    run_render,
 )
 from guidebot_recorder.recorder.session import (
     SetupNeedsCompile,
@@ -46,10 +54,12 @@ from guidebot_recorder.recorder.session import (
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
+    TargetResolutionError,
     compiled_from,
     step_instruction,
 )
-from guidebot_recorder.selects import Selects, install_selects
+from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.selects import Selects, SelectsNotReadyError, install_selects
 
 # charset is explicit: without it Chromium decodes a data: URL as latin-1 and the
 # Polish label no longer matches.
@@ -222,13 +232,17 @@ def test_a_step_can_opt_out_of_the_shim_but_never_opt_back_into_it() -> None:
     assert select_mode(shim_step, _config()) == "shim"
 
     # Opting one control *into* a shim that was never installed: rejected while
-    # the scenario loads, naming the step and the setting that fights it.
+    # the scenario loads, naming the step and the setting that fights it. The
+    # step is named by `StepPathError.path`, which the loader turns into
+    # `plik:linia` + the YAML fragment — see `tests/unit/scenario/
+    # test_loader_validation.py` for the banner this produces end to end.
     with pytest.raises(ValidationError) as excinfo:
         Scenario(config=_config(selects=SelectsConfig(mode="native")), steps=[shim_step])
 
-    message = str(excinfo.value)
-    assert "krok 0" in message
-    assert "config.selects.mode: native" in message
+    origin = excinfo.value.errors()[0]["ctx"]["error"]
+    assert isinstance(origin, StepPathError)
+    assert origin.path == (0,)
+    assert "config.selects.mode: native" in str(excinfo.value)
 
 
 def test_a_steps_select_mode_is_part_of_its_own_fingerprint() -> None:
@@ -377,10 +391,16 @@ class _FakeRecorder:
     def __init__(self, page: _FakePage, *, fail: bool = False) -> None:
         self.page = page
         self.fail = fail
+        #: raise the readiness barrier's failure instead of the drive failure
+        self.not_ready = False
         self.calls: list[tuple[str, bool]] = []
 
     async def select(self, target, option: str, *, native: bool = False) -> None:
         self.calls.append((option, native))
+        if self.not_ready:
+            raise SelectsNotReadyError(
+                "widget select nie zgłosił gotowości w ciągu 15.0 s dla ramki about:blank"
+            )
         if self.fail:
             raise SelectDriveError("nie udało się wysterować widgetu 'Województwo'")
 
@@ -454,8 +474,319 @@ async def test_render_select_honours_the_per_step_override() -> None:
 
 
 async def test_render_select_drive_failure_becomes_a_render_error_with_the_step_index() -> None:
-    with pytest.raises(RenderError, match=r"krok 7:.*Województwo"):
+    with pytest.raises(RenderError) as excinfo:
         await _run_render_select(_select_step(), _config(), fail=True)
+
+    # A scenario built in code has no source map, so the banner degrades to the
+    # bare step number — the located variant is the test below.
+    assert "krok 8/0" in str(excinfo.value)
+    assert "Województwo" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# The shim's own failures reach the author through the step diagnostics
+# --------------------------------------------------------------------------- #
+
+#: A loadable scenario whose second step is a `select:`. Line 7 opens that step.
+SELECT_SCENARIO = (
+    "config:\n"
+    "  title: Wybór\n"
+    "  viewport: {width: 640, height: 480}\n"
+    "  tts: {provider: fake, voice: v, lang: pl-PL}\n"
+    "steps:\n"
+    f'  - navigate: "{SELECT_PAGE}"\n'
+    "  - select:\n"
+    '      from: "Województwo"\n'
+    '      option: "Mazowieckie"\n'
+)
+
+
+def _located_select(tmp_path: Path):
+    """``(scenario, entry, index, total, path)`` for the `select:` step of SELECT_SCENARIO.
+
+    Loaded through ``load_scenario`` on purpose: only that attaches the source
+    map, and the source map is the whole point of these tests.
+    """
+
+    path = tmp_path / "wybor.scenario.yaml"
+    path.write_text(SELECT_SCENARIO, encoding="utf-8")
+    scenario = load_scenario(path, env={})
+    flat = scenario.flat_steps()
+    return scenario, flat[1], 1, len(flat), path
+
+
+async def test_render_select_drive_failure_points_at_the_line_to_edit(tmp_path: Path) -> None:
+    """`SelectDriveError` must arrive *through* the diagnostics, not beside them.
+
+    Naming the widget is not enough: the author's next move is to edit this
+    step — add `mode: native`, fix the option — and the message has to say which
+    line that is. A `click:` step in the same file already gets this, and the
+    two must not diverge.
+    """
+
+    scenario, entry, index, total, path = _located_select(tmp_path)
+    page = _FakePage()
+
+    with pytest.raises(RenderError) as excinfo:
+        await _render_step(
+            page,
+            _FakeRecorder(page, fail=True),
+            _FakeOverlay(),
+            None,
+            scenario,
+            entry.step,
+            "select",
+            index,
+            None,
+            0.0,
+            {},
+            _noop_ensure_card,
+            entry=entry,
+            total=total,
+            resolved=_resolved_select(),
+        )
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert '      from: "Województwo"' in message  # dosłowny fragment YAML
+    assert "nie udało się wysterować widgetu 'Województwo'" in message
+
+
+async def test_render_select_readiness_failure_points_at_the_line_to_edit(
+    tmp_path: Path,
+) -> None:
+    """`SelectsNotReadyError` is a step failure too, and gets the same banner.
+
+    ``Recorder.select`` raises it for a frame whose widget never settled. Both
+    fixes it names — `selects.settleMs`, `selects.mode: native` — are edits to
+    the very file the banner now quotes.
+    """
+
+    scenario, entry, index, total, path = _located_select(tmp_path)
+    page = _FakePage()
+    recorder = _FakeRecorder(page)
+    recorder.not_ready = True
+
+    with pytest.raises(RenderError) as excinfo:
+        await _render_step(
+            page,
+            recorder,
+            _FakeOverlay(),
+            None,
+            scenario,
+            entry.step,
+            "select",
+            index,
+            None,
+            0.0,
+            {},
+            _noop_ensure_card,
+            entry=entry,
+            total=total,
+            resolved=_resolved_select(),
+        )
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert "nie zgłosił gotowości" in message
+
+
+async def test_compile_select_drive_failure_points_at_the_line_to_edit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Compile's half of the same contract — the phase that fails first."""
+
+    scenario, entry, index, total, path = _located_select(tmp_path)
+    page = _FakePage()
+
+    async def fake_resolve(root, step_in, kind, reasoner):
+        return _resolved_select()
+
+    monkeypatch.setattr(compile_module, "resolve_step_target", fake_resolve)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await compile_module._compile_step(
+            page,
+            _FakeRecorder(page, fail=True),
+            scenario,
+            "hash",
+            index,
+            entry.step,
+            "select",
+            object(),
+            None,
+            before_click=lambda: None,
+            force=False,
+            verbose=False,
+            entry=entry,
+            total=total,
+        )
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert '      from: "Województwo"' in message
+    assert "nie udało się wysterować widgetu 'Województwo'" in message
+
+
+async def test_compile_resolver_verdicts_point_at_the_line_to_edit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An option the `<select>` does not offer is diagnosed like every other verdict.
+
+    The rejection is produced deep in ``resolver/``, which knows nothing about
+    source maps and must not; the banner is applied at the compile dispatch
+    site, uniformly for every verdict — so a `select:` step and a `click:` step
+    in the same file are diagnosed alike.
+    """
+
+    scenario, entry, index, total, path = _located_select(tmp_path)
+    page = _FakePage()
+
+    async def refusing_resolve(root, step_in, kind, reasoner):
+        raise TargetResolutionError(
+            "nie udało się zwalidować namiaru dla: 'Województwo' (ostatnie odrzucenie: "
+            "The <select> has no option labelled 'Mazowieckie'; it offers: 'Śląskie'.)"
+        )
+
+    monkeypatch.setattr(compile_module, "resolve_step_target", refusing_resolve)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await compile_module._compile_step(
+            page,
+            _FakeRecorder(page),
+            scenario,
+            "hash",
+            index,
+            entry.step,
+            "select",
+            object(),
+            None,
+            before_click=lambda: None,
+            force=False,
+            verbose=False,
+            entry=entry,
+            total=total,
+        )
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert "has no option labelled 'Mazowieckie'" in message
+
+
+async def test_a_reasoner_exception_is_not_mistaken_for_a_resolver_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`SetupNeedsCompile` is control flow, and it is a ``RuntimeError`` too.
+
+    Catching bare ``RuntimeError`` around the resolver to attach a banner would
+    swallow its type and turn ``replay_setup``'s "run compile first" signal into
+    an ordinary step failure. Only :class:`TargetResolutionError` is a verdict.
+    """
+
+    scenario, entry, index, total, _path = _located_select(tmp_path)
+    page = _FakePage()
+
+    async def signalling_resolve(root, step_in, kind, reasoner):
+        raise SetupNeedsCompile("uruchom najpierw `guidebot compile`")
+
+    monkeypatch.setattr(compile_module, "resolve_step_target", signalling_resolve)
+
+    with pytest.raises(SetupNeedsCompile):
+        await compile_module._compile_step(
+            page,
+            _FakeRecorder(page),
+            scenario,
+            "hash",
+            index,
+            entry.step,
+            "select",
+            object(),
+            None,
+            before_click=lambda: None,
+            force=False,
+            verbose=False,
+            entry=entry,
+            total=total,
+        )
+
+
+async def test_the_compile_readiness_barrier_points_at_the_line_to_edit(
+    tmp_path: Path, browser, monkeypatch
+) -> None:
+    """A wedged widget stops the run — with the file, the line and the fragment.
+
+    The barrier runs before the step's own work, so nothing downstream can
+    supply the location for it; without this wiring it is the one shim failure
+    that would reach the author as a bare sentence.
+    """
+
+    async def wedged(self, frame, timeout=None):
+        raise SelectsNotReadyError("widget select nie zgłosił gotowości w ciągu 15.0 s")
+
+    monkeypatch.setattr(Selects, "wait_ready", wedged)
+
+    path = tmp_path / "wybor.scenario.yaml"
+    path.write_text(_scenario_yaml(), encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await run_compile_in_browser(path, browser, _MockReasoner())
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert '  - teach: "kliknij Województwo"' in message
+    assert "nie zgłosił gotowości" in message
+
+
+class _SilentTts:
+    """Narration this render never plays: the barrier fails before the first step."""
+
+    adapter_version = 1
+
+    async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=mono",
+                "-t",
+                "0.1",
+                str(out),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return 0.1
+
+
+async def test_the_render_readiness_barrier_points_at_the_line_to_edit(
+    tmp_path: Path, browser, monkeypatch
+) -> None:
+    """Render's barrier is the one that sits outside every per-step ``except``.
+
+    Compile's runs inside the step's own try block, so it would at least be
+    re-raised with the step's context; render's would otherwise escape the loop
+    naked, and the phase that takes minutes is the worse one to lose it in.
+    """
+
+    path = tmp_path / "wybor.scenario.yaml"
+    path.write_text(_scenario_yaml(), encoding="utf-8")
+    await run_compile_in_browser(path, browser, _MockReasoner())
+
+    async def wedged(self, frame, timeout=None):
+        raise SelectsNotReadyError("widget select nie zgłosił gotowości w ciągu 15.0 s")
+
+    monkeypatch.setattr(Selects, "wait_ready", wedged)
+
+    with pytest.raises(RenderError) as excinfo:
+        await run_render(path, tmp_path / "out.mp4", _SilentTts(), tmp_path / "cache", browser)
+
+    message = str(excinfo.value)
+    assert f"krok 2/2 — {path}:7" in message
+    assert '  - teach: "kliknij Województwo"' in message
+    assert "nie zgłosił gotowości" in message
 
 
 async def _run_compile_select(
@@ -501,8 +832,13 @@ async def test_compile_select_honours_the_per_step_override(monkeypatch) -> None
 
 
 async def test_compile_select_drive_failure_names_the_step_index(monkeypatch) -> None:
-    with pytest.raises(RuntimeError, match=r"krok 7:.*Województwo"):
+    with pytest.raises(RuntimeError) as excinfo:
         await _run_compile_select(_select_step(), _config(), monkeypatch, fail=True)
+
+    # No source map on a scenario built in code — the banner degrades to the
+    # bare step number; ``..._points_at_the_line_to_edit`` covers the located one.
+    assert "krok 8/0" in str(excinfo.value)
+    assert "Województwo" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #

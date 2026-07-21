@@ -50,6 +50,21 @@ MAX_REPROMPT = 2
 ABSENT_REASONS: frozenset[ErrorReason] = frozenset({"no_action", "no_handle"})
 
 
+class TargetResolutionError(RuntimeError):
+    """A verdict of :func:`resolve_step_target` itself: the step cannot be resolved.
+
+    Named rather than a bare ``RuntimeError`` so a caller can tell this apart
+    from whatever an injected ``Reasoner`` raises through the same frame —
+    :class:`~guidebot_recorder.recorder.session.SetupNeedsCompile` is a
+    ``RuntimeError`` too, and it is control flow, not a verdict. Compile wraps
+    only verdicts in a `plik:linia` banner; anything else must pass through with
+    its own type intact.
+
+    Subclasses ``RuntimeError``, so every existing ``except RuntimeError`` and
+    ``pytest.raises(RuntimeError)`` keeps working.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
     """A validated target, ready to act on and to freeze into a ``CachedAction``."""
@@ -180,9 +195,11 @@ async def resolve_step_target(
 
     Returns :class:`TargetAbsent` only for the narrow verdicts in
     :data:`ABSENT_REASONS`; every other failure — an ambiguous description, an
-    invented ``inputText``, a sensitive field, a target that never validates —
-    raises ``RuntimeError``, because those are authoring or resolver bugs rather
-    than a missing element.
+    invented ``inputText``, a sensitive field, a target that never validates,
+    a ``<select>`` without the wanted option — raises
+    :class:`TargetResolutionError`, because those are authoring or resolver bugs
+    rather than a missing element. Whatever the injected ``Reasoner`` itself
+    raises passes through unchanged and keeps its own type.
     """
 
     instruction = step_instruction(step)
@@ -196,7 +213,7 @@ async def resolve_step_target(
         if isinstance(result, ReasonerError):
             if result.reason in ABSENT_REASONS:
                 return TargetAbsent(reason=result.reason, message=result.message)
-            raise RuntimeError(f"reasoner: {result.reason}: {result.message}")
+            raise TargetResolutionError(f"reasoner: {result.reason}: {result.message}")
         assert isinstance(result, ReasonerResult)
 
         action = action_for(kind, result.action)
@@ -267,11 +284,11 @@ async def resolve_step_target(
         )
 
     if resolution_error is not None:
-        raise RuntimeError(f"{resolution_error} po {MAX_REPROMPT} próbach")
+        raise TargetResolutionError(f"{resolution_error} po {MAX_REPROMPT} próbach")
     message = f"nie udało się zwalidować namiaru dla: {instruction!r}"
     if last_rejection is not None:
         # Without this the author only learns *that* every candidate was refused.
         # The reason — an absent option, a non-select, an ambiguous name — is the
         # one piece of information that says what to fix in the scenario.
         message += f" (ostatnie odrzucenie: {last_rejection.message})"
-    raise RuntimeError(message)
+    raise TargetResolutionError(message)

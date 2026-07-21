@@ -7,6 +7,38 @@ uv run guidebot compile scenarios/flow.scenario.yaml \
   --force --headed --pause-on-error --verbose
 ```
 
+## Jak czytać komunikat o kroku
+
+Każdy komunikat — ostrzeżenie, błąd i błąd walidacji — pokazuje plik, numer linii
+i dosłowny fragment YAML, więc kroków nie trzeba odliczać ręcznie:
+
+```
+⚠ krok 3/8 — examples/onet-login.scenario.yaml:37 (bramka `when:`)
+     37 |   - when: "the cookie consent banner"
+     38 |     state: visible
+     39 |     timeout: 20
+   element bramkujący nie pojawił się — zapisano wpis oczekujący (pending)
+```
+
+Numer w nagłówku to pozycja w **kolejności wykonania**, a nie pozycja na liście
+`steps:`. Te dwie liczby rozjeżdżają się, bo każdy blok `when:` wnosi dodatkowy
+krok bramkujący (widoczny w nagłówku jako `(bramka `when:`)`), którego w pliku
+nie ma jako osobnego wpisu. Kroki wewnątrz bloku są oznaczone
+`(w bramce z linii N)`. Wiążąca jest linia, nie numer.
+
+Błędy walidacji dokładają karetkę pod linią, której dotyczy problem:
+
+```
+BŁĄD walidacji — scenarios/flow.scenario.yaml:23 (krok 5/12)
+     23 |   - click: "Zapisz"
+          ^ tutaj
+     24 |     navigate: "https://example.test"
+   krok ma 2 komend (['navigate', 'click']); dozwolona dokładnie jedna
+```
+
+Fragment pochodzi z pliku **sprzed** podstawienia `${ZMIENNA}`, więc widać
+w nim nazwę zmiennej, nigdy jej wartość.
+
 ## Codex nie działa
 
 ```bash
@@ -53,12 +85,17 @@ ma źródłowej komendy `scroll`.
 
 ## `select` trafia w złą listę rozwijaną
 
-Objaw to `option_missing` w komunikacie kompilacji:
+Objaw to `option_missing` w komunikacie kompilacji, który — jak każdy komunikat
+kroku — wskazuje linię do poprawienia:
 
 ```
-nie udało się zwalidować namiaru dla: 'lista wyboru charakteru formalnego'
-(ostatnie odrzucenie: The <select> has no option labelled 'Artykuł w czasopismie';
- it offers: 'Raport jednostki', 'Raport autora'.)
+krok 6/12 — scenarios/flow.scenario.yaml:23
+     23 |   - select:
+     24 |       from: "lista wyboru charakteru formalnego"
+     25 |       option: "Artykuł w czasopismie"
+   nie udało się zwalidować namiaru dla: 'lista wyboru charakteru formalnego'
+   (ostatnie odrzucenie: The <select> has no option labelled 'Artykuł w czasopismie';
+    it offers: 'Raport jednostki', 'Raport autora'.)
 ```
 
 Resolver wskazał `<select>`, który nie ma żądanej opcji. Najczęściej dzieje się to

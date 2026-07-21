@@ -39,6 +39,7 @@ from tqdm import tqdm
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.desktop import DesktopOverlay, resolve_icon
+from guidebot_recorder.diagnostics import step_banner
 from guidebot_recorder.models.action import (
     COMPILER_VERSION,
     CachedAction,
@@ -53,7 +54,7 @@ from guidebot_recorder.models.config import (
     Viewport,
     config_hash,
 )
-from guidebot_recorder.models.scenario import Scenario, Step, WaitUntil, select_mode
+from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil, select_mode
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import (
     pause_for_inspection,
@@ -74,7 +75,7 @@ from guidebot_recorder.resolver.resolution import (
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
-from guidebot_recorder.selects import install_selects
+from guidebot_recorder.selects import SelectsNotReadyError, install_selects
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import (
     CACHE_SCHEMA_VERSION,
@@ -1910,14 +1911,34 @@ async def run_render(
     ):
         raise RenderError("compiled ma starszą wersję — uruchom `compile`")
     scenario_hash = config_hash(cfg)
+
+    def step_message(
+        entry: FlatStep, entry_index: int, message: str, *, warning: bool = False
+    ) -> str:
+        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
+
+        return step_banner(
+            index=entry_index,
+            total=len(flat),
+            location=entry.location,
+            source=scenario.source,
+            message=message,
+            warning=warning,
+            sensitive=sensitive_values,
+        )
+
     for index, (entry, action) in enumerate(zip(flat, compiled.actions, strict=True)):
         if not _compiled_action_is_current(entry.step, action, scenario_hash):
-            raise RenderError(f"krok {index}: compiled jest nieaktualny — uruchom `compile`")
+            raise RenderError(
+                step_message(entry, index, "compiled jest nieaktualny — uruchom `compile`")
+            )
         if isinstance(action, PendingAction) and entry.branch is None and not entry.step.optional:
             # A pending entry is only ever written for a branch (gate + children)
             # or an `optional: true` step; anywhere else the sidecar is corrupt.
             raise RenderError(
-                f"krok {index}: wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
+                step_message(
+                    entry, index, "wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
+                )
             )
 
     # Desktop icons are resolved here, before recording: an unknown built-in or a
@@ -2153,9 +2174,11 @@ async def run_render(
     #: branch whose gate turned out to be absent — every step of it is skipped
     skipped_branch: int | None = None
 
-    def note_skip(entry_index: int, entry_step: Step, reason: str, *, gate: bool) -> None:
+    def note_skip(entry: FlatStep, entry_index: int, reason: str, *, gate: bool) -> None:
+        """Odnotuj pominięty krok opcjonalny — banner z `plik:linia`."""
+
         what = "bramka" if gate else "krok opcjonalny"
-        tqdm.write(f"⚠ krok {entry_index}: {what} pominięty — {reason}")
+        tqdm.write(step_message(entry, entry_index, f"{what} pominięty — {reason}", warning=True))
 
     def persist_resolved(entry_index: int, resolved_action: CachedAction) -> None:
         """Fold a render-time resolution back into the sidecar (full atomic rewrite)."""
@@ -2178,7 +2201,9 @@ async def run_render(
             if popup is not None and popup.page.is_closed() and not popup.close_handled:
                 raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
             if _unexpected_pages(observed_pages, page, popup):
-                raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
+                raise RenderError(
+                    step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
+                )
             kind = step.command_kind()
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
@@ -2285,7 +2310,14 @@ async def run_render(
                 # ``_render_step`` must see the shimmed DOM, or render would drive
                 # a page compile never resolved against. Any navigation that led
                 # here has settled — it was an earlier step.
-                await selects.wait_ready(probe_root)
+                try:
+                    await selects.wait_ready(probe_root)
+                except SelectsNotReadyError as exc:
+                    # The barrier sits outside every per-step ``except`` in this
+                    # loop, so without this the one failure that stops a render
+                    # before its step even begins would be the only one to reach
+                    # the author with no file, no line and no YAML fragment.
+                    raise RenderError(step_message(entry, index, str(exc))) from exc
             if step.requires_target() and (optional or isinstance(cached, PendingAction)):
                 try:
                     if isinstance(cached, PendingAction):
@@ -2300,8 +2332,8 @@ async def run_render(
                             raise _OptionalAbsent("zamrożony namiar nie pasuje do strony")
                 except _OptionalAbsent as absent:
                     if not optional:
-                        raise RenderError(f"krok {index}: {absent}") from None
-                    note_skip(index, step, str(absent), gate=entry.is_gate)
+                        raise RenderError(step_message(entry, index, str(absent))) from None
+                    note_skip(entry, index, str(absent), gate=entry.is_gate)
                     if entry.is_gate:
                         skipped_branch = entry.branch
                     bar.update(1)
@@ -2321,6 +2353,9 @@ async def run_render(
                             kind,
                             exc,
                             sensitive_values,
+                            total=len(flat),
+                            location=entry.location,
+                            source=scenario.source,
                         )
                     raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
 
@@ -2352,7 +2387,9 @@ async def run_render(
                 raise RenderError("popup zamknął się asynchronicznie podczas narracji")
             active_page = _active_page(page, popup)
             if _unexpected_pages(observed_pages, page, popup):
-                raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
+                raise RenderError(
+                    step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
+                )
             await active_page.bring_to_front()
             # Card-aware post-narration re-assert: a navigation that destroyed the
             # card DURING the narration wait (a say/slide over a live card) must
@@ -2376,7 +2413,7 @@ async def run_render(
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
             if kind == "closeWindow" and popup is None:
-                raise RenderError(f"krok {index}: closeWindow bez otwartego okna")
+                raise RenderError(step_message(entry, index, "closeWindow bez otwartego okna"))
             # Main window drives the site iframe (a Frame); popups drive the page.
             on_shell = active_page is page and site_frame is not None
             recorder = Recorder(
@@ -2408,6 +2445,9 @@ async def run_render(
                     anchor,
                     observed_pages,
                     _ensure_card,
+                    entry=entry,
+                    total=len(flat),
+                    sensitive=sensitive_values,
                     expect_chrome=(
                         popup.wants_bar
                         if popup is not None and active_page is popup.page
@@ -2455,12 +2495,14 @@ async def run_render(
                         )
                 if _unexpected_pages(observed_pages, page, popup):
                     raise RenderError(
-                        f"krok {index}: nieoczekiwany popup — uruchom `compile --force`"
+                        step_message(
+                            entry, index, "nieoczekiwany popup — uruchom `compile --force`"
+                        )
                     )
             except _OptionalAbsent as absent:
                 # Only a cached gate reaches here (its `waitFor` timed out); every
                 # other absence signal was already settled by the probe above.
-                note_skip(index, step, str(absent), gate=entry.is_gate)
+                note_skip(entry, index, str(absent), gate=entry.is_gate)
                 if entry.is_gate:
                     skipped_branch = entry.branch
             except Exception as exc:
@@ -2476,6 +2518,9 @@ async def run_render(
                         kind,
                         exc,
                         sensitive_values,
+                        total=len(flat),
+                        location=entry.location,
+                        source=scenario.source,
                     )
                 raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
             bar.update(1)
@@ -2651,6 +2696,9 @@ async def _render_step(
     observed_pages: dict[Page, _PageObservation],
     ensure_card: Callable[[Page], Awaitable[None]],
     *,
+    entry: FlatStep | None = None,
+    total: int = 0,
+    sensitive: Iterable[str] = (),
     expect_chrome: bool | None = None,
     resolved: ResolvedTarget | None = None,
     optional: bool = False,
@@ -2663,7 +2711,24 @@ async def _render_step(
     :class:`PendingAction`; this call performs it, derives its ``expect`` the way
     ``compile`` does (URL before vs after) and hands the frozen action back through
     ``on_resolved`` so the sidecar stops being pending.
+
+    ``entry`` (plus ``total`` i ``sensitive``) służy wyłącznie diagnostyce:
+    komunikaty błędów wskazują `plik:linia` i cytują fragment YAML-a. Wszystkie
+    trzy są keyword-only i mają wartości domyślne — pozycje argumentów pozostają
+    nietknięte, a bez nich banner degraduje się do samego numeru kroku.
     """
+
+    def step_message(message: str) -> str:
+        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
+
+        return step_banner(
+            index=index,
+            total=total,
+            location=entry.location if entry is not None else None,
+            source=scenario.source,
+            message=message,
+            sensitive=sensitive,
+        )
 
     if expect_chrome is None:
         expect_chrome = chrome is not None
@@ -2763,14 +2828,14 @@ async def _render_step(
         # construction, and `expect` is only knowable after the action has run.
         cached = _freeze_resolved(step, kind, resolved, "none", scenario_hash)
     elif cached is None:
-        raise RenderError(f"krok {index}: brak cachedAction — uruchom `compile`")
+        raise RenderError(step_message("brak cachedAction — uruchom `compile`"))
     elif isinstance(cached, PendingAction):  # pragma: no cover - prologue rejects these
-        raise RenderError(f"krok {index}: nierozwiązany wpis oczekujący — uruchom `compile`")
+        raise RenderError(step_message("nierozwiązany wpis oczekujący — uruchom `compile`"))
     elif cached.action != "waitFor" and not await reuse_is_valid(action_frame, cached):
-        raise RenderError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
+        raise RenderError(step_message("niezgodna tożsamość — uruchom `compile --force`"))
     assert isinstance(cached, CachedAction)
     if cached.opens_popup and cached.action != "click":
-        raise RenderError(f"krok {index}: tylko click może otworzyć popup")
+        raise RenderError(step_message("tylko click może otworzyć popup"))
 
     opened: _PopupSession | None = None
     if cached.action == "click":
@@ -2779,7 +2844,7 @@ async def _render_step(
         def mark_click_started() -> None:
             nonlocal click_started_at
             if any(candidate not in pages_before_prepare for candidate in observed_pages):
-                raise RenderError(f"krok {index}: popup otworzył się przed akcją click")
+                raise RenderError(step_message("popup otworzył się przed akcją click"))
             click_started_at = time.monotonic()
 
         await recorder.click(cached.target, before_click=mark_click_started)
@@ -2793,7 +2858,7 @@ async def _render_step(
             )
             if not popup_pages:
                 raise RenderError(
-                    f"krok {index}: oczekiwany popup nie otworzył się — uruchom `compile --force`"
+                    step_message("oczekiwany popup nie otworzył się — uruchom `compile --force`")
                 )
             if len(popup_pages) != 1:
                 raise RenderError("v1 obsługuje dokładnie jeden popup w sesji")
@@ -2852,21 +2917,23 @@ async def _render_step(
     elif cached.action == "type":
         input_text = step.enter_text.text if step.enter_text is not None else cached.input_text
         if input_text is None:
-            raise RenderError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
+            raise RenderError(step_message("brak zamrożonego tekstu — uruchom `compile`"))
         await recorder.enter_text(cached.target, input_text)
     elif cached.action == "select":
         if step.select is None:
-            raise RenderError(f"krok {index}: brak opcji dla akcji select — uruchom `compile`")
+            raise RenderError(step_message("brak opcji dla akcji select — uruchom `compile`"))
         try:
             await recorder.select(
                 cached.target,
                 step.select.option,
                 native=select_mode(step, scenario.config) == "native",
             )
-        except SelectDriveError as exc:
+        except (SelectDriveError, SelectsNotReadyError) as exc:
             # No silent fallback to ``select_option``: that would restore exactly
-            # the invisible magic this feature removes, and unobservably.
-            raise RenderError(f"krok {index}: {exc}") from exc
+            # the invisible magic this feature removes, and unobservably. The
+            # banner is what makes the loud failure legible — it names the line
+            # of the scenario the author has to edit, not just the widget.
+            raise RenderError(step_message(str(exc))) from exc
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

@@ -611,8 +611,11 @@ Nadpisanie działa **w jedną stronę**. `config.selects.mode: native` nie jest
 wartością domyślną, którą krok mógłby nadpisać w drugą stronę: decyduje o tym, czy
 skrypt nakładki w ogóle trafia do przeglądarki, więc pod nim nie ma nakładki, do
 której krok mógłby wrócić. Krok proszący o `mode: shim` przy globalnym `native`
-zostaje odrzucony już przy wczytywaniu scenariusza, z podaniem numeru kroku — zamiast
-sypać się kilka minut w render, gdy kursor kliknął już na filmie coś niezwiązanego.
+zostaje odrzucony już przy wczytywaniu scenariusza, z podaniem pliku, numeru linii
+i dosłownego fragmentu YAML (patrz
+[Jak czytać komunikat o kroku](troubleshooting.md#jak-czytac-komunikat-o-kroku)) —
+zamiast sypać się kilka minut w render, gdy kursor kliknął już na filmie coś
+niezwiązanego.
 
 ### `scroll`
 

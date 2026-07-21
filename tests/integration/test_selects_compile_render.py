@@ -711,6 +711,8 @@ async def test_undriveable_widget_fails_loudly_instead_of_setting_the_value(
         message = str(compile_error.value)
         assert "nie znaleziono widocznej kontrolki" in message
         assert "lista województw" in message  # names the step's own instruction
+        # ...and, since the fix is an edit to the scenario, the line to edit.
+        assert f"{path}:" in message
         # Nothing was ever driven, so nothing could have been quietly set.
         assert spy.selects == []
 
@@ -729,7 +731,11 @@ async def test_undriveable_widget_fails_loudly_instead_of_setting_the_value(
             await run_render(path, tmp_path / "orphan.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert "krok 2" in str(render_error.value)
-    assert "compile" in str(render_error.value)  # points at the run that diagnoses it
+    # 1-based and located, like every other step message since the YAML step
+    # diagnostics landed: `say` + `navigate` + `select` → the select is 3rd.
+    message = str(render_error.value)
+    assert f"krok 3/3 — {path}:" in message
+    assert 'from: "lista województw"' in message  # the fragment to edit
+    assert "compile" in message  # points at the run that diagnoses it
     # Again: refused before anything was driven, so the value was never set.
     assert spy.selects == []

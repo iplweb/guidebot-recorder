@@ -736,9 +736,11 @@ The override is **one-way**. `config.selects.mode: native` is not a default a st
 can override in the other direction: it decides whether the shim script is
 injected into the browser at all, so underneath it there is no shim for a step to
 opt back into. A step that asks for `mode: shim` while the global mode is `native`
-is rejected when the scenario loads, naming the step — rather than failing several
-minutes into a render, after the cursor has already clicked something unrelated on
-camera.
+is rejected when the scenario loads, with the file, the line number and the
+offending YAML fragment (see
+[Reading a step message](troubleshooting.md#reading-a-step-message)) — rather than
+failing several minutes into a render, after the cursor has already clicked
+something unrelated on camera.
 
 Pair a `select` step with a `say` such as "from this list I choose …" to narrate
 the intent.

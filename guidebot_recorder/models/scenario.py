@@ -6,12 +6,31 @@ CompiledScenario (``*.compiled.yaml``), not inline on the step.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NamedTuple
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
+
+if TYPE_CHECKING:  # tylko dla typów — import w runtime zapętliłby się przez `scenario/__init__`
+    from guidebot_recorder.scenario.source import ScenarioSource, StepLocation
+
+
+class StepPathError(ValueError):
+    """Błąd walidacji, który sam wie, którego kroku dotyczy.
+
+    ``path`` to ścieżka **pozycyjna** w liście ``steps:`` — ``(3,)`` dla kroku
+    top-level, ``(3, 1)`` dla drugiego dziecka bloku ``when:`` z pozycji 3.
+    Walidatory poziomu ``Scenario`` mają ``loc == ()``, więc bez tego pola nie
+    dałoby się przypisać ich komunikatu do konkretnej linii pliku.
+    """
+
+    def __init__(self, message: str, path: tuple[int, ...]) -> None:
+        super().__init__(message)
+        self.path = path
+
 
 #: "primary" commands (an action/step); `say` may accompany one as narration
 PRIMARY_COMMANDS = (
@@ -253,20 +272,6 @@ class WhenBlock(BaseModel):
     #: plain steps only — branches do not nest
     steps: list[Step]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _reject_nested_blocks(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        children = data.get("steps")
-        if not isinstance(children, list):
-            return data
-        for index, child in enumerate(children):
-            nested = child.get("when") if isinstance(child, dict) else getattr(child, "when", None)
-            if nested is not None:
-                raise ValueError(f"krok {index}: zagnieżdżony blok `when` nie jest wspierany")
-        return data
-
     def gate_step(self) -> Step:
         """Return the synthetic step the gate compiles and renders as."""
 
@@ -281,6 +286,9 @@ class FlatStep(NamedTuple):
     branch: int | None
     #: True for the synthetic gate step that opens a branch
     is_gate: bool
+    #: where the step sits in the source YAML; None when the scenario was built
+    #: in code (no source to point at) — diagnostics degrade to a bare number
+    location: StepLocation | None = None
 
 
 class Scenario(BaseModel):
@@ -288,11 +296,27 @@ class Scenario(BaseModel):
     config: Config
     steps: list[Step | WhenBlock]
 
+    #: mapa źródłowego YAML-a, doczepiana przez ``load_scenario``; ``PrivateAttr``,
+    #: więc schemat, ``extra="forbid"`` i serializacja zostają bez zmian
+    _source: ScenarioSource | None = PrivateAttr(default=None)
+
+    @property
+    def source(self) -> ScenarioSource | None:
+        """Mapa źródła, jeśli scenariusz powstał z pliku."""
+
+        return self._source
+
+    def attach_source(self, source: ScenarioSource | None) -> None:
+        """Doczep mapę źródła — po walidacji, bo ``model_validate`` jej nie przyjmie."""
+
+        self._source = source
+
     def flat_steps(self) -> list[FlatStep]:
         """Flatten blocks into a linear list positionally aligned with compiled actions.
 
         Each ``WhenBlock`` contributes its gate step followed by its children, so
-        the whole list can be indexed 1:1 by ``CompiledScenario.actions``.
+        the whole list can be indexed 1:1 by ``CompiledScenario.actions`` — and,
+        when a source is attached, by ``ScenarioSource.steps``.
         """
 
         flat: list[FlatStep] = []
@@ -304,7 +328,46 @@ class Scenario(BaseModel):
                 )
             else:
                 flat.append(FlatStep(step=entry, branch=None, is_gate=False))
-        return flat
+        if self._source is None:
+            return flat
+        return [
+            entry._replace(location=self._source.location(index))
+            for index, entry in enumerate(flat)
+        ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_blocks(cls, data: Any) -> Any:
+        """Odrzuć zagnieżdżony blok ``when:`` — wskazując dziecko, nie rodzica.
+
+        Sprawdzenie żyje tu, a nie na :class:`WhenBlock`, bo dopiero stąd widać
+        pozycję bloku-rodzica: :class:`StepPathError` z parą ``(i, j)`` daje
+        diagnostyce linię *zagnieżdżonego* ``when:`` i jeden, spójny numer kroku
+        w nagłówku. Wariant na ``WhenBlock`` musiał doklejać do treści własne,
+        lokalne ``krok {j}:`` — sprzeczne z 1-based numeracją nagłówka.
+
+        Musi być ``mode="before"``: ``WhenBlock.steps`` to ``list[Step]``
+        z ``extra="forbid"``, więc bez tej bramki autor dostałby zamiast
+        komunikatu ścianę „Extra inputs are not permitted: steps.0.when".
+        """
+
+        if not isinstance(data, Mapping):
+            return data
+        entries = data.get("steps")
+        if not isinstance(entries, list):
+            return data
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping) or "when" not in entry:
+                continue
+            children = entry.get("steps")
+            if not isinstance(children, list):
+                continue
+            for child_index, child in enumerate(children):
+                if isinstance(child, Mapping) and child.get("when") is not None:
+                    raise StepPathError(
+                        "zagnieżdżony blok `when` nie jest wspierany", (index, child_index)
+                    )
+        return data
 
     @model_validator(mode="after")
     def _complete_audio_translations(self) -> Scenario:
@@ -312,9 +375,9 @@ class Scenario(BaseModel):
         for index, entry in enumerate(self.steps):
             if isinstance(entry, WhenBlock):
                 for child_index, child in enumerate(entry.steps):
-                    _validate_translations(child, f"{index}.{child_index}", expected)
+                    _validate_translations(child, (index, child_index), expected)
             else:
-                _validate_translations(entry, str(index), expected)
+                _validate_translations(entry, (index,), expected)
         return self
 
     @model_validator(mode="after")
@@ -331,6 +394,14 @@ class Scenario(BaseModel):
 
         Rejecting the combination here means the author learns while the
         scenario loads, rather than several minutes into an unattended render.
+
+        Raises :class:`StepPathError`, not a bare ``ValueError``, and carries no
+        ``krok {label}:`` prefix of its own: this validator lives on
+        ``Scenario`` (``loc == ()``), so the positional path is the only thing
+        that lets diagnostics turn the rejection into `plik:linia` plus the
+        offending YAML fragment. A `select:` step that names the option but not
+        the line to edit would be a worse message than the one a `click:` step
+        in the same file already gets.
         """
 
         if self.config.selects.mode != "native":
@@ -340,31 +411,40 @@ class Scenario(BaseModel):
             for child_index, child in enumerate(children):
                 if child.select is None or child.select.mode != "shim":
                     continue
-                label = f"{index}.{child_index}" if isinstance(entry, WhenBlock) else str(index)
-                raise ValueError(
-                    f"krok {label}: `select.mode: shim` przy `config.selects.mode: native` "
+                path = (index, child_index) if isinstance(entry, WhenBlock) else (index,)
+                raise StepPathError(
+                    "`select.mode: shim` przy `config.selects.mode: native` "
                     "— nakładka nie jest wtedy w ogóle wstrzykiwana, więc nie ma czego "
                     "rozwinąć. Usuń `mode: shim` z kroku albo włącz nakładkę globalnie "
-                    "(`config.selects.mode: shim`) i wyłącz ją per krok przez `mode: native`"
+                    "(`config.selects.mode: shim`) i wyłącz ją per krok przez `mode: native`",
+                    path,
                 )
         return self
 
 
-def _validate_translations(step: Step, label: str, expected: set[str]) -> None:
+def _validate_translations(step: Step, path: tuple[int, ...], expected: set[str]) -> None:
+    """Sprawdź tłumaczenia kroku spod ścieżki pozycyjnej ``path`` w ``steps:``.
+
+    Treść nie zawiera numeru kroku — ``path`` niesie go w :class:`StepPathError`,
+    a diagnostyka zamienia go na `plik:linia` w nagłówku bannera. Walidator żyje
+    na poziomie ``Scenario`` (``loc == ()``), więc bez ``path`` komunikatu nie
+    dałoby się przypiąć do żadnej linii pliku.
+    """
+
     actual = set(step.translations)
     if step.narration() is None:
         if actual:
             languages = ", ".join(sorted(actual))
-            raise ValueError(f"krok {label}: tłumaczenia bez narracji `say`/`teach`: {languages}")
+            raise StepPathError(f"tłumaczenia bez narracji `say`/`teach`: {languages}", path)
         return
     missing = expected - actual
     if missing:
         languages = ", ".join(sorted(missing))
-        raise ValueError(f"krok {label}: brak tłumaczeń dla ścieżek: {languages}")
+        raise StepPathError(f"brak tłumaczeń dla ścieżek: {languages}", path)
     unknown = actual - expected
     if unknown:
         languages = ", ".join(sorted(unknown))
-        raise ValueError(f"krok {label}: niezdefiniowane tłumaczenia: {languages}")
+        raise StepPathError(f"niezdefiniowane tłumaczenia: {languages}", path)
 
 
 def select_mode(step: Step, cfg: Config) -> str:
