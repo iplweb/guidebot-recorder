@@ -6,12 +6,13 @@ Run the CLI from the project environment:
 uv run guidebot --help
 ```
 
-The five public commands are:
+The six public commands are:
 
 | Command | Input | Result |
 |---|---|---|
 | `validate` | One source scenario | Schema validation only. |
 | `compile` | One source scenario | One compiler-v2 sidecar. |
+| `setup` | One setup scenario | A cached login session under `.guidebot/sessions/`. |
 | `render` | One source scenario | One MP4 with one or more audio streams. |
 | `compile-set` | Localized set manifest | One sidecar per stale variant. |
 | `render-set` | Localized set manifest | One single-audio MP4 per variant. |
@@ -90,6 +91,40 @@ uv run guidebot compile scenarios/login.scenario.yaml --timeout 45
 
 Compilation uses a fresh context with the scenario's viewport and locale. The
 synthetic browser bar remains render-only.
+
+## `guidebot setup`
+
+```bash
+uv run guidebot setup SETUP_SCENARIO [OPTIONS]
+```
+
+Builds or refreshes the cached login session for a **setup** scenario, by
+replaying it on a **non-recording** context. This is the manual entry point for
+[pre-recording setup](scenario-reference.md#setup-verifyuserloggedin-and-maxagehours);
+in the common case you never run it directly, because `guidebot compile` and
+`guidebot render` of a target with `config.setup` auto-establish or reuse the
+session on their own.
+
+The setup scenario must already be compiled (`guidebot compile SETUP_SCENARIO`);
+otherwise this command fails loudly and tells you to compile it. The replay makes
+**zero LLM calls** — it only replays the setup's frozen targets.
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--headed` | off | Show the browser. If the automatic replay's health-check fails, it pauses so you can finish logging in by hand (MFA/captcha), then snapshots. |
+| `--force` | off | Always rebuild the session, ignoring any cache. |
+| `--timeout SECONDS` | `15` | Playwright action timeout. |
+| `--verbose`, `-v` | off | Show progress. |
+
+A plain run behaves as check-and-reuse: with a live cache it prints
+`session reused (already live)` and does not replay; otherwise it replays the
+setup and prints `session refreshed and cached`. The session decision depends on
+the setup's `verifyUserLoggedIn` and `maxAgeHours` — see the
+[scenario reference](scenario-reference.md#setup-verifyuserloggedin-and-maxagehours).
+
+The cached session is a bearer credential written `0600` (directory `0700`) under
+`.guidebot/sessions/`, and the command auto-writes `.guidebot/sessions/.gitignore`
+(`*`) so it is never committed.
 
 ## `guidebot compile-set`
 

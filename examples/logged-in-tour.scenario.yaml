@@ -1,0 +1,32 @@
+# Target scenario for pre-recording setup.
+#
+# It references a setup scenario via `config.setup`, so compile and render both
+# establish (or reuse) the cached login session FIRST, on a separate,
+# non-recording context. This scenario therefore starts ALREADY logged in and
+# carries NO login steps — the login never appears in the film.
+#
+# Ordering matters — compile the SETUP scenario before touching this one:
+#   uv run guidebot compile examples/teach-login.scenario.yaml     # setup first!
+#   uv run guidebot validate examples/logged-in-tour.scenario.yaml
+#   uv run guidebot compile  examples/logged-in-tour.scenario.yaml # auto-establishes the session
+#   uv run guidebot render   examples/logged-in-tour.scenario.yaml --out out/logged-in-tour.mp4
+#
+# The setup and target must share the same origin (host); cross-origin reuse is
+# a hard error.
+config:
+  title: "A tour of the dashboard"
+  baseUrl: https://example.com
+  viewport: { width: 1280, height: 720 }
+  locale: en-US
+  tts: { provider: edge, voice: en-US-GuyNeural, lang: en-US }
+
+  # Path to the setup scenario, RELATIVE to this file. Its health-check
+  # (verifyUserLoggedIn) and TTL (maxAgeHours) live on the setup file, not here.
+  setup: teach-login.scenario.yaml
+
+steps:
+  - say: "We start already signed in, straight on the dashboard."
+  - navigate: /dashboard
+  - teach: "Open the Reports section from the left-hand menu"
+  - say: "From here you can review every report at a glance."
+  - wait: { until: "the reports table", state: visible, timeout: 10 }
