@@ -361,6 +361,55 @@ async def test_a_disabled_option_on_a_shimmed_select_fails_instead_of_doing_noth
     assert await page.locator("select").input_value() == "lista"  # never changed
 
 
+async def test_a_disabled_option_at_compile_time_fails_fast_instead_of_a_raw_timeout(page):
+    """The direct path (no overlay) used to hang out a full step timeout.
+
+    `Locator.select_option` retries "waiting for element to be visible and
+    enabled" — Chromium never considers a `disabled` `<option>` selectable, so
+    the retry loop never ends on its own and `select_option` raises nothing
+    until the caller's own timeout elapses, as a raw English
+    `playwright.TimeoutError` naming no control and no option. Measured on this
+    branch before the fix: with `page.set_default_timeout(...)` at 8s, this
+    test took the full 8s and raised `playwright.async_api.TimeoutError`
+    instead of `SelectDriveError`.
+    """
+
+    page.set_default_timeout(3000)
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await _install_selects(page)
+    rec = Recorder(page, overlay=None)  # compile path
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
+
+    assert "tabela" in str(excinfo.value)
+    assert "wyłączona" in str(excinfo.value)
+    assert await page.locator("select").input_value() == "lista"  # never changed
+
+
+async def test_a_disabled_option_under_native_mode_fails_fast_instead_of_a_raw_timeout(page):
+    """The `mode: native` escape hatch shares the same direct `select_option` call.
+
+    Same hazard as the compile path, reached instead through the per-step
+    `native: true` override with an overlay installed (the render-time shape of
+    the hatch).
+    """
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(_DISABLED_OPTION_SELECT)
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela", native=True)
+
+    assert "tabela" in str(excinfo.value)
+    assert "wyłączona" in str(excinfo.value)
+    assert await page.locator("select").input_value() == "lista"  # never changed
+
+
 def _enhanced_with_decoy(labels: list[str], rows: list[str], decoy: str) -> str:
     """The page-widget pattern plus a live region that echoes the option label.
 
@@ -758,6 +807,40 @@ async def test_native_mode_still_works_on_a_listbox(page):
     await rec.select(TestidTarget(testid="s"), "pilne", native=True)
 
     assert await page.evaluate(_SELECTED_JS) == ["pilne"]
+
+
+async def test_a_hidden_listbox_fails_fast_instead_of_a_raw_timeout(page):
+    """A `display: none` listbox — e.g. reached via a stale compiled target —
+    used to hang out a full step timeout instead of failing legibly.
+
+    The `listbox` shape (`multiple` / `size > 1`) needs no shim stand-in when
+    visible, so `_select_in_listbox` drove straight at the `<option>` — and
+    when the select itself has no box at all, neither `_approach`'s bounding
+    box read nor `Locator.click()`'s own actionability wait ever resolves.
+    Measured on this branch before the fix: with a short default timeout, this
+    raised a raw `playwright.async_api.TimeoutError` ("element is not
+    visible") instead of `SelectDriveError`.
+    """
+
+    page.set_default_timeout(3000)
+    overlay = Overlay()
+    await page.set_content(
+        "<body style='margin:0'><select id='s' data-testid='s' aria-label='Tagi' "
+        "multiple size='3' style='display:none'>"
+        "<option>zwykłe</option><option>pilne</option><option>archiwalne</option>"
+        "</select></body>"
+    )
+    await overlay.install(page)
+    await _install_selects(page)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    with pytest.raises(SelectDriveError) as excinfo:
+        await rec.select(TestidTarget(testid="s"), "pilne")
+
+    message = str(excinfo.value)
+    assert "pilne" in message
+    assert "compile --force" in message
+    assert await page.evaluate(_SELECTED_JS) == []  # never touched
 
 
 # --- which situation the failure is in --------------------------------------

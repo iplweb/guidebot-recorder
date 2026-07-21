@@ -578,6 +578,14 @@ wprost do `<option>` i klika go, wcześniej przewijając listę do tego wiersza,
 jeśli jest poniżej widocznego obszaru. Kontrolka zachowuje przy tym swój natywny
 wygląd.
 
+Właśnie dlatego, że nie potrzebuje nakładki, ten kształt nie ma też niczego w
+zapasie, gdy okaże się, że w ogóle nie ma rozmiaru na stronie — ukryty przez
+wcześniejszy krok tego samego przebiegu, albo przez stronę, której układ zmienił
+się od czasu ostatniej kompilacji scenariusza. Taki krok kończy się od razu
+błędem nazywającym kontrolkę, zamiast czekać na wyczerpanie własnych prób
+Playwrighta; `mode: native` nie jest tu proponowany jako wyjście, bo natywny
+`<select>` byłby dokładnie tak samo niewidoczny.
+
 Jak zawsze przy `select`, wybierana jest **jedna** opcja: kliknięcie odznacza
 wszystkie pozostałe, dokładnie tak samo jak bezpośrednie ustawienie wartości. Nie
 da się wybrać wielu opcji w jednym kroku.
@@ -618,6 +626,13 @@ w których wiersz *jest* i kliknięcie go nic nie daje: opcja `disabled` albo wi
 któremu towarzyszy „toast" lub obszar live powtarzający tę samą etykietę. Bez tego
 odczytu taki przebieg kończyłby się na zielono i dawał film, na którym lista
 widocznie się nie zmienia.
+
+Opcja `disabled`, na którą trafi krok bez żadnego kliknięcia do odczytania później
+— bezpośrednie ustawienie wartości w `compile` albo furtka `mode: native` niżej —
+jest sprawdzana z góry, z tego samego powodu: Chromium nigdy nie uznaje wyłączonej
+`<option>` za możliwą do wybrania, więc bez tej kontroli Playwright powtarzałby
+własne próby aż do wyczerpania pełnego limitu czasu kroku, a potem zgłosił własny,
+niewiele mówiący błąd.
 
 Dla widżetu, którego nakładka naprawdę nie potrafi obsłużyć — np. listy
 doszukującej opcje przez sieć w miarę pisania — użyj furtki na poziomie kroku,
