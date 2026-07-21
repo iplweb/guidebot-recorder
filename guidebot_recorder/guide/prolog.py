@@ -12,7 +12,7 @@ class GuideError(Exception):
     """A scenario the guide cannot render (popup, unresolved mandatory step)."""
 
 
-PageKind = Literal["gate", "navigate", "slide", "action", "text", "wait"]
+PageKind = Literal["gate", "navigate", "slide", "action", "scroll", "text", "wait"]
 
 
 def classify(flat_step: FlatStep) -> PageKind:
@@ -24,7 +24,9 @@ def classify(flat_step: FlatStep) -> PageKind:
         return "navigate"
     if kind == "slide":
         return "slide"
-    if kind in ("click", "hover", "enterText", "teach"):
+    if kind == "scroll":
+        return "scroll"
+    if kind in ("click", "hover", "enterText", "teach", "select"):
         return "action"
     if kind == "wait":
         return "text" if step.say else "wait"

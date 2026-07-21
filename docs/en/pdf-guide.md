@@ -91,6 +91,14 @@ The current guide feature has the following scope:
 - **No numbered multi-step grouping** — Steps are rendered individually. Future versions may allow
   multi-step sequences to be visually grouped or numbered (e.g. "Step 1 of 5").
 - **No PDF layout customization** — Margins, fonts, colors, and page dimensions are fixed.
+- **`select` shows no expanded dropdown** — A `select` step actually chooses the option, and the
+  PDF page shows the screenshot taken **after** the choice. The native `<select>` option list is
+  drawn by the operating system, so no browser-automation tool can capture it — the guide shows
+  the collapsed control with its new value, never the open list.
+- **`scroll` only produces its own page with text** — A `scroll` step always actually scrolls the
+  page (screenshots are taken from the visible viewport, so scrolling is required for later steps
+  to show the right part of the page), but it only creates its own PDF page when it also carries
+  `say` or `caption`. A bare `scroll` just prepares the view for the following step.
 
 If your scenario falls outside these limits, use `render` to produce an MP4 instead.
 
