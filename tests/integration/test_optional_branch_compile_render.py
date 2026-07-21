@@ -50,6 +50,10 @@ BANNER_BUTTON = ("button", "Akceptuję ciasteczka")
 # flat step indices: 0 navigate, 1 gate, 2 teach (child), 3 say (child), 4 teach
 GATE_INDEX = 1
 CHILD_INDEX = 2
+#: nagłówek bannera bramki — numer 1-based z mianownikiem, plus `plik:linia`
+#: (`when:` stoi w 7. linii SCENARIO_TEMPLATE) i człon o rodzaju kroku
+GATE_BANNER = f"⚠ krok {GATE_INDEX + 1}/5 — "
+GATE_LOCATION = "shop.scenario.yaml:7 (bramka `when:`)"
 
 SCENARIO_TEMPLATE = """\
 config:
@@ -227,7 +231,9 @@ async def test_same_compiled_renders_with_and_without_banner(tmp_path, capsys) -
     _assert_playable(without_banner)
 
     captured = capsys.readouterr()
-    assert f"krok {GATE_INDEX}: bramka pominięty" in captured.out
+    assert GATE_BANNER in captured.out
+    assert GATE_LOCATION in captured.out
+    assert "bramka pominięty" in captured.out
     # The gate timed out; that is not an error, and the sidecar is untouched.
     assert compiled_path(path).read_text(encoding="utf-8") == frozen_before
 
@@ -267,8 +273,12 @@ async def test_absent_banner_compiles_to_pending_and_renders_skipped(tmp_path, c
     captured = capsys.readouterr()
     # Compile warns once, for the gate; the children follow it silently into
     # pending because the branch as a whole never happened.
-    assert f"⚠ krok {GATE_INDEX}: element bramkujący" in captured.out
-    assert f"krok {GATE_INDEX}: bramka pominięty" in captured.out
+    assert GATE_BANNER in captured.out
+    assert GATE_LOCATION in captured.out
+    assert "element bramkujący" in captured.out
+    assert "bramka pominięty" in captured.out
+    # Fragment YAML-a cytowany dosłownie ze źródła bramki.
+    assert f'  - when: "{GATE}"' in captured.out
     # Nothing was resolved, so the sidecar stays pending.
     still = load_compiled(compiled_path(path))
     assert isinstance(still.actions[GATE_INDEX], PendingAction)
