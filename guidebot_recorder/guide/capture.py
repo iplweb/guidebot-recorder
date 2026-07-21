@@ -14,7 +14,29 @@ from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
 from guidebot_recorder.models.scenario import WaitUntil
 from guidebot_recorder.recorder.recorder import Recorder
-from guidebot_recorder.resolver.validate import reuse_is_valid
+from guidebot_recorder.resolver.validate import reuse_failure
+
+#: User-facing (Polish) sentence for each reason a cached action can no longer
+#: be reused. The `compile --force` hint is baked into the two identity
+#: sentences only — those are the reasons that a re-freeze actually fixes;
+#: every other reason needs a plain `compile` (a target change) or is a
+#: transient DOM/timing condition that a re-run may simply not repeat.
+_REUSE_REASON_PL = {
+    "not_found": "celu nie ma na stronie",
+    "not_unique": "cel pasuje do wielu elementów",
+    "not_visible": "cel jest niewidoczny",
+    "not_enabled": "cel jest nieaktywny",
+    "not_editable": "cel nie przyjmuje tekstu",
+    "incompatible_type": "typ elementu nie pasuje do akcji",
+    "not_select": "cel nie jest natywnym <select>",
+    "unsupported_action": "akcja nieobsługiwana przez walidację",
+    "dom_changed": "strona zmieniła się w trakcie sprawdzania",
+    "identity_mismatch": "niezgodna tożsamość — uruchom `compile --force`",
+    "identity_missing": "wpis bez zamrożonej tożsamości — uruchom `compile --force`",
+    "no_wait_state": "wpis oczekiwania bez stanu — uruchom `compile`",
+    "wait_ambiguous": "oczekiwanie pasuje do wielu elementów",
+    "sensitive_target": "cel wygląda na pole wrażliwe — `teach` go nie wypełni",
+}
 
 
 def scenario_resolve_url(scenario, url: str | None) -> str:
@@ -123,6 +145,25 @@ async def capture_pages(
             )
             continue
 
+        if kind == "scroll":
+            await recorder.scroll(step.scroll_config())
+            prev_cursor = None
+            text = page_text(step)
+            if not text:
+                continue
+            shot, size = await _screenshot(page, shots_dir, index)
+            pages.append(
+                GuidePage(
+                    kind="step",
+                    screenshot=shot,
+                    text=text,
+                    heading=None,
+                    annotations=[],
+                    screenshot_size=size,
+                )
+            )
+            continue
+
         if kind == "wait":
             if isinstance(step.wait, int | float):
                 await recorder.wait_seconds(float(step.wait))
@@ -143,8 +184,9 @@ async def capture_pages(
             raise RuntimeError(f"krok {index}: nierozwiązana akcja obowiązkowa")
         act = action.action
         if not step.optional and act != "waitFor":
-            if not await reuse_is_valid(recorder.frame, action):
-                raise GuideError(f"krok {index}: niezgodna tożsamość — uruchom `compile --force`")
+            reason = await reuse_failure(recorder.frame, action)
+            if reason is not None:
+                raise GuideError(f"krok {index}: {_REUSE_REASON_PL.get(reason, reason)}")
         try:
             res = await recorder.point(action.target, ripple=False)
         except PlaywrightError:
@@ -159,6 +201,14 @@ async def capture_pages(
                 raise GuideError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
             await res.locator.fill(text)
             shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
+        elif act == "select":
+            if step.select is None:
+                raise GuideError(
+                    f"krok {index}: sidecar mówi `select`, a krok scenariusza nim nie jest "
+                    "— uruchom `compile --force`"
+                )
+            await res.locator.select_option(label=step.select.option)
+            shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
         else:
             shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
             if act == "hover":

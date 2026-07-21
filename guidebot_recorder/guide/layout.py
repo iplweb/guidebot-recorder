@@ -44,7 +44,7 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
             parts.append(f'<line class="arrow" x1="{a.x1}" y1="{a.y1}" x2="{a.x2}" y2="{a.y2}"/>')
         elif a.kind == "click":
             parts.append(f'<circle class="circle" cx="{a.cx}" cy="{a.cy}" r="{a.r}"/>')
-        elif a.kind in ("typed", "hover"):
+        elif a.kind in ("typed", "hover", "selected"):
             parts.append(
                 f'<rect class="rect" x="{a.x}" y="{a.y}" width="{a.w}" height="{a.h}" rx="4"/>'
             )
