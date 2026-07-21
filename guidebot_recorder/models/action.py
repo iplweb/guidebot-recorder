@@ -13,7 +13,14 @@ from guidebot_recorder.models.target import Target
 #: reference schema version — a bump forces a re-resolve
 COMPILER_VERSION = 2
 
-ActionKind = Literal["click", "hover", "type", "waitFor", "select"]
+ActionKind = Literal["click", "hover", "type", "waitFor", "select", "highlight"]
+
+#: The actions the Reasoner may *infer*. Deliberately NOT ``get_args(ActionKind)``:
+#: that tuple answers "what can render perform", which is a different question from
+#: "what may a model choose". ``highlight`` is picked by the scenario author and
+#: carries knobs no reasoner could invent, so letting it into the model's
+#: vocabulary could only ever freeze a nonsensical action onto a `teach` step.
+REASONER_ACTIONS: tuple[ActionKind, ...] = ("click", "hover", "type", "waitFor", "select")
 Expect = Literal["navigation", "idle", "none"]
 WaitState = Literal["visible", "hidden", "enabled"]
 

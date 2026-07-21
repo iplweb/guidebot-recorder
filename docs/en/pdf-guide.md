@@ -40,6 +40,9 @@ Screenshots are overlaid with visual markers:
 - **Red circle** — Mouse click target.
 - **Red frame** — Text entered into a field (from `enterText` or literal `teach` typing).
 - **Glow** (soft halo) — Hover state on an element.
+- **Ellipse** — A `highlight` step's mark, in the colour the scenario chose. Instead of
+  the circling cursor the film shows, the guide draws the finished ellipse around the
+  control or area being pointed at.
 
 ## Narration text: `say`, `teach`, or `caption`
 

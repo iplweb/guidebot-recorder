@@ -17,8 +17,9 @@ from playwright.async_api import Error as PlaywrightError
 
 from guidebot_recorder.chrome.typing import DEFAULT_MAX_DELAY_FACTOR, typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState
-from guidebot_recorder.models.scenario import Scroll
+from guidebot_recorder.models.scenario import ResolvedHighlight, Scroll
 from guidebot_recorder.models.target import Target
+from guidebot_recorder.overlay.geometry import ellipse_around, fit_to_bounds
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
 from guidebot_recorder.resolver.widget import associated_control
@@ -861,6 +862,40 @@ class Recorder:
         # scrolls an internally-scrolling widget list to it.
         await self._approach(row, click_sound=True)
         await row.click()
+
+    async def highlight(self, target: Target, spec: ResolvedHighlight) -> None:
+        """Lap an ellipse around the target, leaving a marker trail — touching nothing.
+
+        The one command that points at the page without changing it: no click, no
+        hover, no DOM event. Only ``render`` calls this (``compile`` freezes the
+        target without acting, and the PDF guide draws its own still ellipse), so
+        the overlay is present in practice; without one, or without a bounding
+        box, the step degrades to the plain cursor move rather than failing.
+        """
+
+        result = await self.point(target, ripple=False)
+        if self.overlay is None or result.box is None:
+            return
+        viewport = self.page.viewport_size or {"width": 1280, "height": 720}
+        ellipse = fit_to_bounds(
+            ellipse_around(result.box, spec.padding),
+            width=float(viewport["width"]),
+            height=float(viewport["height"]),
+        )
+        # Glide to the lap's entry point first: `point` left the cursor in the
+        # middle of the target, and starting the lap from there would teleport it
+        # by `rx` — several hundred pixels for anything table-sized.
+        await self.overlay.move_to(self.page, ellipse.cx + ellipse.rx, ellipse.cy)
+        await self.overlay.encircle(
+            self.page,
+            cx=ellipse.cx,
+            cy=ellipse.cy,
+            rx=ellipse.rx,
+            ry=ellipse.ry,
+            loops=spec.loops,
+            hold=spec.hold,
+            color=spec.color,
+        )
 
     async def scroll(self, spec: Scroll) -> None:
         """Scroll the site — a render-only visual with no agent target.

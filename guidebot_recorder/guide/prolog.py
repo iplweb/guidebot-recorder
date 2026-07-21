@@ -14,8 +14,10 @@ class GuideError(Exception):
 
 PageKind = Literal["gate", "navigate", "slide", "action", "scroll", "text", "wait"]
 
-#: Commands the guide replays in the browser off a frozen target.
-ACTION_KINDS = frozenset({"click", "hover", "enterText", "teach", "select"})
+#: Commands the guide replays in the browser off a frozen target. `highlight` is
+#: one of them even though it performs nothing: the guide still has to resolve the
+#: target to know where to draw its ellipse.
+ACTION_KINDS = frozenset({"click", "hover", "enterText", "teach", "select", "highlight"})
 #: Commands with no browser work in a still-image pass: a film-only flourish
 #: (`desktop`), popup bookkeeping the guide already rejects (`closeWindow`),
 #: and a bare `say`. All that survives into the PDF is their narration.

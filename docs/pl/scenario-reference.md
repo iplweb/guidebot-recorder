@@ -54,6 +54,7 @@ steps:
 | `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
 | `desktop` | Nie | Kolor tła kroku `desktop`; wyłącznie podczas renderu, poza config hashem. |
 | `fade` | Nie | Opcjonalny fade z/do koloru na obu końcach filmu; wyłącznie podczas renderu. |
+| `highlight` | Nie | Domyślny wygląd zakreśleń z kroku `highlight`; wyłącznie podczas renderu, poza config hashem. |
 | `holdFrameForNarration` | Nie | Zamraża obraz na czas narracji zamiast nagrywać w czasie rzeczywistym; wyłącznie podczas renderu. |
 | `holdFrameSettle` | Nie | Sekundy realnego czasu nagrane przed zamrożeniem klatki; wyłącznie podczas renderu. |
 | `selects` | Nie | Nakładka DOM zamieniająca natywny `<select>` na widżet, którego lista jest widoczna na filmie; do config hasha wchodzi tylko `mode`. |
@@ -370,6 +371,28 @@ config:
     out: 1.0
 ```
 
+### `highlight`
+
+Domyślne wartości dla wszystkich kroków `highlight` w filmie; każdy krok może je
+nadpisać własnymi polami.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `color` | `rgba(250,204,21,.85)` | Kolor śladu w filmie i elipsy w PDF-ie. |
+| `padding` | `8` | Margines (px) między elementem a elipsą. |
+| `loops` | `2` | Liczba okrążeń kursora (1–5). |
+| `hold` | `0.6` | Sekundy, przez które ślad zostaje po ostatnim okrążeniu. |
+
+```yaml
+config:
+  highlight:
+    color: "#22c55e"
+    padding: 12
+```
+
+Nie wchodzi do `config_hash` — zaznaczenia rysowane są nad już rozwiązanym celem, więc
+zmiana ich wyglądu nigdy nie unieważnia skompilowanych referencji.
+
 ### `holdFrameForNarration` i `holdFrameSettle`
 
 Sterowanie tempem renderu, wyłącznie podczas renderu, **domyślnie włączone**, i —
@@ -419,8 +442,9 @@ zmiana nigdy nie wymaga rekompilacji.
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `select`, `scroll`, `wait`, `slide`, `desktop` i `closeWindow`. `say` może być jedyną treścią kroku albo
-towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
+`enterText`, `select`, `highlight`, `scroll`, `wait`, `slide`, `desktop` i `closeWindow`.
+`say` może być jedyną treścią kroku albo towarzyszyć jednej akcji. Pusty krok i dwie
+akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
 blokiem `when` zamiast kroku — patrz [Gałęzie opcjonalne](#galezie-opcjonalne).
@@ -618,6 +642,44 @@ i dosłownego fragmentu YAML (patrz
 [Jak czytać komunikat o kroku](troubleshooting.md#jak-czytac-komunikat-o-kroku)) —
 zamiast sypać się kilka minut w render, gdy kursor kliknął już na filmie coś
 niezwiązanego.
+
+### `highlight`
+
+```yaml
+- highlight: "przycisk Zapisz"        # skrót: sam cel
+
+- highlight:
+    what: "tabela z wynikami"
+    padding: 12        # px wokół elementu     (domyślnie config.highlight.padding)
+    loops: 3           # liczba okrążeń        (domyślnie 2)
+    hold: 1.5          # s trzymania śladu     (domyślnie 0.6)
+    color: "#22c55e"   # kolor zakreślacza     (domyślnie config.highlight.color)
+  say: "Tutaj pojawiają się wyniki wyszukiwania."
+```
+
+Zakreślenie kontrolki lub obszaru — jedyna komenda, która wskazuje element, **nie
+dotykając strony**: bez kliknięcia, bez najechania, bez zdarzeń DOM. `what` to
+semantyczny opis celu wysyłany do reasonera; obszar (tabela, sekcja, formularz) jest z
+jego punktu widzenia zwykłym elementem-kontenerem, więc opisuje się go tak samo jak
+przycisk.
+
+Podczas `render` kursor dojeżdża do celu, przechodzi na prawy skraj elipsy opisanej na
+elemencie i okrąża ją `loops` razy, zostawiając za sobą narastający ślad zakreślacza;
+po ostatnim okrążeniu ślad stoi `hold` sekund i gaśnie. W przewodniku PDF ten sam
+element dostaje na zrzucie ekranu elipsę w tym samym kolorze. Tempo okrążania wynika z
+obwodu elipsy przy stałej prędkości kursora, więc duży obszar nie okrąża się szybciej
+ani wolniej niż mały.
+
+Elipsa jest **opisana** na prostokącie elementu powiększonym o `padding`, więc wychodzi
+zauważalnie większa od samego elementu — cały element mieści się w środku, zamiast być
+przycięty w rogach. Jeśli wyszłaby poza kadr, jest do niego dopasowywana: najpierw
+skracane są promienie, potem przesuwany środek. Dzięki temu kursor nie wyjeżdża poza
+ekran, a elipsa nie jest ucinana na krawędzi strony PDF.
+
+Krok ma cel, więc przyjmuje `optional: true` i działa w bloku `when`. Pokrętła wizualne
+(`padding`, `loops`, `hold`, `color`) nie wchodzą do odcisku palca kroku — zmiana koloru
+czy marginesu **nie** wymaga ponownego `compile`. Wartości domyślne dla całego filmu
+ustawia blok `config.highlight`.
 
 ### `scroll`
 
@@ -880,11 +942,12 @@ render jak zwykle.
 | Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
 | Sama wartość `enterText.text` | Nie — render-only |
 | Sama wartość `select.option` | Nie — render-only |
+| Pokrętła wizualne `highlight` (`padding`, `loops`, `hold`, `color`) i cały blok `config.highlight` | Nie — render-only |
 | `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | Nie — render-only |
 | `config.setup` (na celu) dodane, usunięte lub przepięte | Tak — ścieżka `setup` wchodzi do config hasha celu |
 | `config.selects.mode` przełączone między `shim` i `native` | Tak — wchodzi do config hasha, jak `config.setup`, tylko gdy różni się od domyślnej wartości |
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` albo `desktop` | Tak |
-| Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) lub własne `select.mode` kroku | Tak |
+| Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `select.from`, `highlight.what`, `wait.until`/`state`) lub własne `select.mode` kroku | Tak |
 | Zmiana rodzaju komendy kroku | Tak |
 | Zamrożony cel `text=` pasujący do napisu z `<option label="…">` albo `<optgroup label="…">` | Rzadko — patrz niżej |
 

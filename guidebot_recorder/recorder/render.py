@@ -1768,6 +1768,7 @@ def _compiled_action_is_current(
         "hover": "hover",
         "enterText": "type",
         "select": "select",
+        "highlight": "highlight",
         "wait": "waitFor",
     }.get(kind)
     if expected_action is not None and action.action != expected_action:
@@ -2934,6 +2935,15 @@ async def _render_step(
             # banner is what makes the loud failure legible — it names the line
             # of the scenario the author has to edit, not just the widget.
             raise RenderError(step_message(str(exc))) from exc
+    elif cached.action == "highlight":
+        if step.highlight is None:
+            raise RenderError(
+                step_message(
+                    "sidecar mówi `highlight`, a krok scenariusza nim nie jest "
+                    "— uruchom `compile --force`"
+                )
+            )
+        await recorder.highlight(cached.target, step.highlight.resolved(scenario.config.highlight))
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

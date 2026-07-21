@@ -1018,3 +1018,9 @@ def test_warn_absent_redacts_env_secrets(tmp_path, capsys):
     typed = capsys.readouterr().out
     assert 'text: "${SECRET}"' in typed
     assert "hunter2" not in typed
+
+
+def test_compile_short_description_for_highlight():
+    step = Step.model_validate({"highlight": "tabela z wynikami"})
+
+    assert _short(step) == "◯ tabela z wynikami"

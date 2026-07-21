@@ -218,7 +218,8 @@ async def capture_pages(
                     )
                 continue
 
-            # kind == "action": click / hover / type / select (dispatch on cached.action)
+            # kind == "action": click / hover / type / select / highlight
+            # (dispatch on cached.action)
             if not isinstance(action, CachedAction):
                 if step.optional:
                     if verbose:
@@ -243,6 +244,7 @@ async def capture_pages(
                         tqdm.write(banner(fs, index, "pomijam: cel nieobecny"))
                     continue
                 raise
+            mark = None
             if act == "type":
                 text = (step.enter_text.text if step.enter_text else None) or action.input_text
                 if text is None:
@@ -277,6 +279,21 @@ async def capture_pages(
                         continue
                     raise
                 shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
+            elif act == "highlight":
+                if step.highlight is None:
+                    raise GuideError(
+                        banner(
+                            fs,
+                            index,
+                            "sidecar mówi `highlight`, a krok scenariusza nim nie jest "
+                            "— uruchom `compile --force`",
+                        )
+                    )
+                # Deliberately no action on the element: `highlight` never touches
+                # the page, and the `else` below would click it. The mark itself is
+                # drawn onto the page by the annotation, not by the browser.
+                mark = step.highlight.resolved(scenario.config.highlight)
+                shot, size = await _screenshot(page, shots_dir, index)
             else:
                 shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
                 if act == "hover":
@@ -291,7 +308,12 @@ async def capture_pages(
                     text=page_text(step),
                     heading=None,
                     annotations=annotations_for(
-                        act, prev_cursor=prev_cursor, center=res.center, box=res.box
+                        act,
+                        prev_cursor=prev_cursor,
+                        center=res.center,
+                        box=res.box,
+                        mark=mark,
+                        bounds=(float(size[0]), float(size[1])),
                     ),
                     screenshot_size=size,
                 )
