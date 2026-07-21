@@ -16,6 +16,7 @@ from playwright.async_api import Frame, Locator, Page
 
 from guidebot_recorder.chrome.typing import DEFAULT_MAX_DELAY_FACTOR, typing_schedule
 from guidebot_recorder.models.action import Expect, WaitState
+from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import Target
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.resolver.validate import build_locator
@@ -189,6 +190,38 @@ class Recorder:
         # Guarantee the final value even if a browser skipped a disabled option.
         if await locator.evaluate("el => el.selectedIndex") != target_index:
             await locator.select_option(index=target_index)
+
+    async def scroll(self, spec: Scroll) -> None:
+        """Scroll the site — a render-only visual with no agent target.
+
+        Content the resolver cannot target (native-select option lists, iframe
+        previews) still appears in the recording; scrolling brings below-the-fold
+        content into view. With an overlay (render) the scroll is animated as a
+        stepped glide; without one (compile) it jumps directly.
+        """
+
+        metrics = await self.frame.evaluate(
+            "() => ({ y: window.scrollY, vh: window.innerHeight,"
+            " max: Math.max(0, document.documentElement.scrollHeight - window.innerHeight) })"
+        )
+        cur, vh, maxy = float(metrics["y"]), float(metrics["vh"]), float(metrics["max"])
+        if spec.to == "top":
+            target = 0.0
+        elif spec.to == "bottom":
+            target = maxy
+        else:
+            step_px = spec.amount if spec.amount is not None else vh * 0.85
+            target = cur + step_px if spec.to == "down" else cur - step_px
+        target = max(0.0, min(target, maxy))
+        if self.overlay is None or abs(target - cur) < 1.0:
+            await self.frame.evaluate("(y) => window.scrollTo(0, y)", target)
+            return
+        steps = 16
+        for i in range(1, steps + 1):
+            y = cur + (target - cur) * (i / steps)
+            await self.frame.evaluate("(y) => window.scrollTo(0, y)", y)
+            await self.page.wait_for_timeout(18)
+        await self.page.wait_for_timeout(150)
 
     async def wait_seconds(self, seconds: float) -> None:
         # A wall-clock pause must survive a popup closing while the pause is in

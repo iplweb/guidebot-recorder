@@ -619,6 +619,9 @@ async def _compile_step(
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
         return None
+    if kind == "scroll":
+        await recorder.scroll(step.scroll_config())
+        return None
 
     # step that needs a target
     if isinstance(cached_in, PendingAction):

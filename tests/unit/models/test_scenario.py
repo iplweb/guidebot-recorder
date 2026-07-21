@@ -7,12 +7,32 @@ from guidebot_recorder.models.scenario import (
     FlatStep,
     NavigateConfig,
     Scenario,
+    Scroll,
     Select,
     Slide,
     Step,
     WaitUntil,
     WhenBlock,
 )
+
+
+def test_scroll_command_kind_no_target():
+    s = Step.model_validate({"scroll": "down", "say": "przewijam"})
+    assert s.command_kind() == "scroll"
+    assert not s.requires_target()
+    assert s.scroll_config() == Scroll(to="down")
+
+
+def test_scroll_object_form_with_amount():
+    s = Step.model_validate({"scroll": {"to": "bottom"}})
+    assert s.scroll_config().to == "bottom"
+    s2 = Step.model_validate({"scroll": {"to": "down", "amount": 250}})
+    assert s2.scroll_config().amount == 250
+
+
+def test_scroll_rejects_bad_direction():
+    with pytest.raises(ValidationError):
+        Step.model_validate({"scroll": "sideways"})
 
 
 def test_select_command_kind_and_target():
