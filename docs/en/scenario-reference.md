@@ -541,7 +541,8 @@ them never requires a recompile.
 `steps` is an ordered list. A step may contain:
 
 - exactly zero or one **main command** from `teach`, `navigate`, `click`, `hover`,
-  `enterText`, `select`, `scroll`, `wait`, `slide`, `desktop`, and `closeWindow`;
+  `enterText`, `select`, `highlight`, `scroll`, `wait`, `slide`, `desktop`, and
+  `closeWindow`;
 - an optional `say` narration;
 - an optional `translations` mapping for configured alternate audio tracks;
 - an optional `optional: true` marker (see [Optional branches](#optional-branches));
@@ -1062,9 +1063,10 @@ For a single conditional step, add `optional: true` instead of wrapping it in a 
 ```
 
 It is allowed on steps that resolve a target — `teach`, `click`, `hover`,
-`enterText`, and conditional `wait` — and on a numeric `wait`. It is a **validation
-error** on `say`-only, `navigate`, and `slide` steps: those resolve nothing, so
-"optional" would promise a tolerance Guidebot cannot provide.
+`enterText`, `select`, `highlight`, and conditional `wait` — and on a numeric
+`wait`. It is a **validation error** on `say`-only, `navigate`, and `slide` steps:
+those resolve nothing, so "optional" would promise a tolerance Guidebot cannot
+provide.
 
 ### Compile and render
 
