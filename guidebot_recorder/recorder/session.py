@@ -87,7 +87,10 @@ class RaisingReasoner:
     """
 
     async def resolve(
-        self, instruction: str, candidates: list[Candidate]
+        self,
+        instruction: str,
+        candidates: list[Candidate],
+        feedback: str | None = None,
     ) -> ReasonerResult | ReasonerError:
         raise SetupNeedsCompile(
             "the setup scenario is not fully compiled — run "

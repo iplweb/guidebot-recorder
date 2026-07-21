@@ -14,6 +14,7 @@ from guidebot_recorder.resolver.reasoner import (
     ReasonerResult,
     _build_prompt,
     _parse_framed,
+    _response_schema_json,
 )
 
 
@@ -222,14 +223,17 @@ def test_parse_framed_rejects_duplicate_keys_and_non_finite_numbers(payload: str
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("nth", "1"),
+        # ``nth`` used to stand here, but it is now rejected unconditionally (the
+        # model must not return an index at all), so it would pass this test for a
+        # reason that has nothing to do with strict schema validation.
+        ("exact", 1),
         ("exact", "true"),
     ],
 )
 async def test_resolve_rejects_coercible_but_schema_invalid_target_fields_twice(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
-    value: str,
+    value: object,
 ):
     calls = 0
     target: dict[str, object] = {
@@ -348,6 +352,289 @@ async def test_prompt_whitelists_candidate_snapshot_without_field_values(
     assert len(prompts) == 1
     assert "Hasło" in prompts[0]
     assert secret not in prompts[0]
+
+
+def _success_branches(schema: dict[str, object]) -> list[dict[str, object]]:
+    branches = schema["oneOf"]
+    assert isinstance(branches, list)
+    return [branch for branch in branches if "action" in branch["properties"]]
+
+
+def test_model_schema_drops_nth_and_offers_candidate_id():
+    schema = json.loads(_response_schema_json())
+
+    role_target = schema["$defs"]["RoleTarget"]["properties"]
+    assert "nth" not in role_target
+    # ``scope`` is the narrowing mechanism that replaces the index.
+    assert "scope" in role_target
+
+    success = _success_branches(schema)
+    assert len(success) == 2
+    for branch in success:
+        assert branch["properties"]["candidateId"] == {"type": "string", "minLength": 1}
+        # An answer may still omit it; the caller decides what to do then.
+        assert "candidateId" not in branch["required"]
+
+    (error_branch,) = [b for b in schema["oneOf"] if "error" in b["properties"]]
+    assert "candidateId" not in error_branch["properties"]
+
+
+def test_model_schema_post_processing_does_not_mutate_the_shared_target_schema():
+    first = json.loads(_response_schema_json())
+    second = json.loads(_response_schema_json())
+
+    assert first == second
+    assert "nth" not in second["$defs"]["RoleTarget"]["properties"]
+
+
+def test_prompt_never_shows_nth_and_documents_targeting_rules():
+    prompt = _build_prompt("Kliknij ×", [_candidate()])
+
+    assert '"nth"' not in prompt
+    assert "Targeting rules:" in prompt
+    assert "Never return an index" in prompt
+    assert '"scope"' in prompt
+    assert '"candidateId"' in prompt
+
+
+async def test_resolve_accepts_and_returns_candidate_id(monkeypatch: pytest.MonkeyPatch):
+    calls = 0
+
+    def fake_run_codex(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return _framed(
+            {
+                "action": "click",
+                "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+                "candidateId": "candidate-7a02c96572535b5f",
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve("Kliknij Zaloguj", [_candidate()])
+
+    assert isinstance(result, ReasonerResult)
+    assert result.candidate_id == "candidate-7a02c96572535b5f"
+    # No retry: a well-formed answer must be accepted on the first attempt.
+    assert calls == 1
+
+
+async def test_resolve_accepts_candidate_id_alongside_input_text(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_run_codex(_prompt: str) -> str:
+        return _framed(
+            {
+                "action": "type",
+                "target": {"strategy": "role", "role": "textbox", "name": "E-mail"},
+                "inputText": "user@example.com",
+                "candidateId": "candidate-abc123",
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve("Wpisz e-mail", [_candidate(role="textbox")])
+
+    assert result == ReasonerResult(
+        action="type",
+        target=RoleTarget(role="textbox", name="E-mail"),
+        input_text="user@example.com",
+        candidate_id="candidate-abc123",
+    )
+
+
+async def test_resolve_defaults_candidate_id_to_none(monkeypatch: pytest.MonkeyPatch):
+    def fake_run_codex(_prompt: str) -> str:
+        return _framed(
+            {
+                "action": "click",
+                "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve("Kliknij Zaloguj", [_candidate()])
+
+    assert isinstance(result, ReasonerResult)
+    assert result.candidate_id is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "click",
+            "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+            "candidateId": "",
+        },
+        {
+            "action": "click",
+            "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+            "candidateId": "   ",
+        },
+        {
+            "action": "click",
+            "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+            "candidateId": 7,
+        },
+        # The error branch stays exactly as narrow as it was.
+        {"error": "no_action", "message": "Brak akcji.", "candidateId": "candidate-abc"},
+    ],
+)
+async def test_resolve_rejects_invalid_candidate_id_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+):
+    calls = 0
+
+    def fake_run_codex(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return _framed(payload)
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    with pytest.raises(ValueError):
+        await CodexReasoner().resolve("Wykonaj akcję", [_candidate()])
+
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"strategy": "role", "role": "button", "name": "×", "nth": 2},
+        {
+            "strategy": "role",
+            "role": "button",
+            "name": "×",
+            "scope": {"strategy": "role", "role": "group", "name": "Kryteria", "nth": 1},
+        },
+        {
+            "strategy": "role",
+            "role": "button",
+            "name": "×",
+            "scope": {
+                "strategy": "text",
+                "text": "Charakter formalny",
+                "scope": {"strategy": "role", "role": "group", "name": "Kryteria", "nth": 0},
+            },
+        },
+    ],
+)
+async def test_resolve_rejects_nth_at_any_target_level_twice(
+    monkeypatch: pytest.MonkeyPatch,
+    target: dict[str, object],
+):
+    calls = 0
+
+    def fake_run_codex(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        return _framed(
+            {"action": "click", "target": target, "candidateId": "candidate-abc123"}
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    with pytest.raises(ValueError, match="nth"):
+        await CodexReasoner().resolve("Kliknij ×", [_candidate()])
+
+    assert calls == 2
+
+
+async def test_resolve_scope_without_nth_is_accepted(monkeypatch: pytest.MonkeyPatch):
+    def fake_run_codex(_prompt: str) -> str:
+        return _framed(
+            {
+                "action": "click",
+                "target": {
+                    "strategy": "role",
+                    "role": "button",
+                    "name": "×",
+                    "scope": {"strategy": "text", "text": "Charakter formalny"},
+                },
+                "candidateId": "candidate-abc123",
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    result = await CodexReasoner().resolve("Kliknij ×", [_candidate()])
+
+    assert isinstance(result, ReasonerResult)
+    assert isinstance(result.target, RoleTarget)
+    assert result.target.scope is not None
+
+
+def test_prompt_omits_the_caller_metadata_section_without_feedback():
+    prompt = _build_prompt("Kliknij ×", [_candidate()])
+
+    assert "CALLER_METADATA_NOT_INSTRUCTIONS" not in prompt
+
+
+def test_feedback_reaches_the_prompt_unlabelled_as_trusted_or_as_instruction():
+    feedback = "candidate-7a02c96572535b5f matched 0 of 11 elements"
+
+    prompt = _build_prompt("Kliknij ×", [_candidate()], feedback=feedback)
+
+    assert "BEGIN_CALLER_METADATA_NOT_INSTRUCTIONS" in prompt
+    assert feedback in prompt
+
+    section = prompt[prompt.index("BEGIN_CALLER_METADATA_NOT_INSTRUCTIONS") :]
+    assert feedback in section
+    # The whole trust model rests on the labels; this channel must claim neither.
+    assert "TRUSTED" not in section
+    assert "AUTHOR_INSTRUCTION" not in section
+    # And it must not be smuggled into a section that does claim one.
+    trusted = prompt[
+        prompt.index("TRUSTED_AUTHOR_INSTRUCTION_JSON") : prompt.index(
+            "BEGIN_CALLER_METADATA_NOT_INSTRUCTIONS"
+        )
+    ]
+    assert feedback not in trusted
+
+
+async def test_resolve_forwards_feedback_to_the_prompt(monkeypatch: pytest.MonkeyPatch):
+    prompts: list[str] = []
+
+    def fake_run_codex(prompt: str) -> str:
+        prompts.append(prompt)
+        return _framed(
+            {
+                "action": "click",
+                "target": {"strategy": "role", "role": "button", "name": "Zaloguj"},
+                "candidateId": "candidate-abc123",
+            }
+        )
+
+    monkeypatch.setattr(reasoner_module, "_run_codex", fake_run_codex)
+
+    await CodexReasoner().resolve(
+        "Kliknij Zaloguj", [_candidate()], feedback="candidate-abc123 matched 2 of 5"
+    )
+
+    assert "candidate-abc123 matched 2 of 5" in prompts[0]
+
+
+async def test_legacy_reasoner_stub_without_feedback_parameter_still_works():
+    """~40 test doubles use ``resolve(self, instruction, candidates)`` and no kwargs."""
+
+    class LegacyStub:
+        async def resolve(
+            self, instruction: str, candidates: list[Candidate]
+        ) -> ReasonerResult | ReasonerError:
+            return ReasonerError(reason="no_action", message=instruction)
+
+    stub: Reasoner = LegacyStub()  # type: ignore[assignment]
+
+    assert await stub.resolve("Kliknij", [_candidate()]) == ReasonerError(
+        reason="no_action", message="Kliknij"
+    )
 
 
 async def test_missing_codex_cli_has_actionable_install_hint(

@@ -10,6 +10,7 @@ from playwright.async_api import Page, async_playwright
 
 from guidebot_recorder.models.identity import Identity
 from guidebot_recorder.resolver.identity_capture import capture_identity
+from guidebot_recorder.resolver.page_context import candidate_ids_of, collect_candidates
 
 
 @pytest.fixture
@@ -42,6 +43,24 @@ async def test_capture_identity_normalizes_element_fields(page: Page) -> None:
     assert identity.testid == "lnk"
     assert identity.href == "https://example.test/x"
     assert identity.identity_version == 1
+    assert identity.dom_path_digest is not None
+
+
+async def test_dom_path_digest_is_the_candidate_id_of_the_same_element(page: Page) -> None:
+    """Cross-comparisons between the two only work if both count the same hash."""
+
+    await page.set_content(
+        """
+        <button>Pierwszy</button>
+        <button>Drugi</button>
+        """
+    )
+
+    identity = await capture_identity(page.get_by_role("button").nth(1))
+    candidates = {candidate.name: candidate for candidate in await collect_candidates(page)}
+
+    assert identity.dom_path_digest == candidates["Drugi"].id
+    assert identity.dom_path_digest == (await candidate_ids_of(page.get_by_role("button")))[1]
 
 
 async def test_ancestry_digest_is_stable_sha256_of_tag_role_pairs(

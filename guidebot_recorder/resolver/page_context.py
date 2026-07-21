@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
-from playwright.async_api import Error, Page
+from playwright.async_api import Error, Locator, Page
 
 
 @dataclass
@@ -84,6 +84,112 @@ def candidate_roles_for(kind: str) -> tuple[str, ...]:
     return _ROLES_BY_KIND.get(kind, CANDIDATE_ROLES)
 
 
+#: The token every script that needs DOM paths carries; :func:`with_dom_path`
+#: swaps it for :data:`_DOM_PATH_JS`.
+DOM_PATH_PLACEHOLDER = "__DOM_PATH__"
+
+#: The single source of the DOM path: a function *expression* injected into the
+#: three scripts that need it. A divergence between collecting candidates and
+#: verifying them would mean `compile` compares digests computed by two rules —
+#: and never matches.
+#:
+#: The index is appended to *every* segment, including one whose element has no
+#: ``parentElement``. An element sitting directly under a shadow root is exactly
+#: that case, and without the index its whole sibling set shares one path — and
+#: therefore one ``Candidate.id``, which is what carries the intent.
+#:
+#: ``nthOfTypeCache`` is created *inside* the expression, so it lives for one
+#: ``evaluate`` call only. Hoisted onto ``window`` it would survive between
+#: calls: it is filled lazily and never invalidated, so once elements moved in
+#: the DOM it would keep handing out stale indices.
+_DOM_PATH_JS = r"""(() => {
+  const nthOfTypeCache = new WeakMap();
+  const nthOfType = (element) => {
+    const cached = nthOfTypeCache.get(element);
+    if (cached !== undefined) return cached;
+
+    let index = 1;
+    for (let sibling = element.previousElementSibling; sibling;
+         sibling = sibling.previousElementSibling) {
+      if (sibling.localName !== element.localName) continue;
+      const siblingIndex = nthOfTypeCache.get(sibling);
+      if (siblingIndex !== undefined) {
+        index += siblingIndex;
+        break;
+      }
+      index += 1;
+    }
+    nthOfTypeCache.set(element, index);
+    return index;
+  };
+
+  return (element) => {
+    const parts = [];
+    let current = element;
+    while (current) {
+      const tag = current.localName.toLowerCase();
+      parts.push(`${tag}:nth-of-type(${nthOfType(current)})`);
+      const parent = current.parentElement;
+      if (parent) {
+        current = parent;
+        continue;
+      }
+      const root = current.getRootNode();
+      if (root && root.host instanceof Element) {
+        parts.push("::shadow");
+        current = root.host;
+      } else {
+        current = null;
+      }
+    }
+    return parts.reverse().join(">");
+  };
+})()"""
+
+
+def with_dom_path(script: str) -> str:
+    """Inject the shared DOM-path helper into ``script``.
+
+    Consumers differ in shape — two receive an array of elements
+    (``evaluate_all``), one a single element (``locator.evaluate``) — so the
+    constant is an expression they bind to a local name, not a whole script.
+    """
+
+    return script.replace(DOM_PATH_PLACEHOLDER, _DOM_PATH_JS)
+
+
+def candidate_id_for_path(path: str) -> str:
+    """Digest of a DOM path — the only definition of a candidate identifier."""
+
+    return "candidate-" + sha256(path.encode("utf-8")).hexdigest()[:16]
+
+
+_CANDIDATE_PATHS_SCRIPT = with_dom_path(
+    r"""
+(elements) => {
+  const domPath = __DOM_PATH__;
+  return elements.map((element) => domPath(element));
+}
+"""
+)
+
+
+async def candidate_ids_of(locator: Locator) -> list[str]:
+    """Identifiers of every element ``locator`` matches, in ``.nth(i)`` order.
+
+    One ``evaluate_all`` round trip, so the browser reports one set observed at
+    one moment — the same set, in the same order, whatever that order is, that
+    ``Locator.nth(i)`` indexes. For a chained selector (a target with a
+    ``scope``) Playwright assembles the parts per scope root without sorting by
+    document position, so the order is "in turn for each scope root" rather than
+    document order. Both sides read the same list, which makes that harmless —
+    but the list must never be re-sorted.
+    """
+
+    paths: list[str] = await locator.evaluate_all(_CANDIDATE_PATHS_SCRIPT)
+    return [candidate_id_for_path(path) for path in paths]
+
+
 _MARK_CANDIDATE_ROLE_SCRIPT = r"""
 (elements, options) => {
   let roleMap = window[options.roleMapKey];
@@ -104,7 +210,8 @@ _CLEAR_ROLE_MAP_SCRIPT = "roleMapKey => { delete window[roleMapKey]; }"
 # This runs once over Playwright's CSS locator result. Unlike querySelectorAll,
 # Playwright locators also pierce open shadow roots, which keeps web-component
 # controls in the candidate set.
-_COLLECT_CANDIDATES_SCRIPT = r"""
+_COLLECT_CANDIDATES_SCRIPT = with_dom_path(
+    r"""
 (elements, options) => {
   const roleMap = window[options.roleMapKey];
   if (!(roleMap instanceof WeakMap)) return [];
@@ -346,51 +453,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
     return result.reverse();
   };
 
-  const nthOfTypeCache = new WeakMap();
-  const nthOfType = (element) => {
-    const cached = nthOfTypeCache.get(element);
-    if (cached !== undefined) return cached;
-
-    let index = 1;
-    for (let sibling = element.previousElementSibling; sibling;
-         sibling = sibling.previousElementSibling) {
-      if (sibling.localName !== element.localName) continue;
-      const siblingIndex = nthOfTypeCache.get(sibling);
-      if (siblingIndex !== undefined) {
-        index += siblingIndex;
-        break;
-      }
-      index += 1;
-    }
-    nthOfTypeCache.set(element, index);
-    return index;
-  };
-
-  const domPath = (element) => {
-    const parts = [];
-    let current = element;
-    while (current) {
-      const tag = current.localName.toLowerCase();
-      const parent = current.parentElement;
-      let segment = tag;
-      if (parent) {
-        segment += `:nth-of-type(${nthOfType(current)})`;
-      }
-      parts.push(segment);
-      if (parent) {
-        current = parent;
-        continue;
-      }
-      const root = current.getRootNode();
-      if (root && root.host instanceof Element) {
-        parts.push("::shadow");
-        current = root.host;
-      } else {
-        current = null;
-      }
-    }
-    return parts.reverse().join(">");
-  };
+  const domPath = __DOM_PATH__;
 
   const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
   const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
@@ -428,6 +491,7 @@ _COLLECT_CANDIDATES_SCRIPT = r"""
   return result;
 }
 """
+)
 
 
 async def collect_candidates(
@@ -480,10 +544,9 @@ async def collect_candidates(
     for raw in raw_candidates:
         bbox = raw["bbox"]
         ancestry = raw["ancestry"]
-        stable_id = "candidate-" + sha256(raw["path"].encode("utf-8")).hexdigest()[:16]
         candidates.append(
             Candidate(
-                id=stable_id,
+                id=candidate_id_for_path(raw["path"]),
                 role=str(raw["role"]),
                 name=str(raw["name"]),
                 tag=str(raw["tag"]),
