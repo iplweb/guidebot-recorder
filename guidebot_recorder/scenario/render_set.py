@@ -10,7 +10,7 @@ from ruamel.yaml import YAML
 
 from guidebot_recorder.models.render_set import LocalizedRenderSet
 from guidebot_recorder.scenario.compiled import compiled_path
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import ScenarioValidationError, load_scenario
 
 _SCENARIO_SUFFIXES = (".scenario.yaml", ".scenario.yml")
 
@@ -121,6 +121,13 @@ def load_render_set(
 
         try:
             scenario = load_scenario(scenario_path, env)
+        except ScenarioValidationError:
+            # Banner jest bezpieczny do pokazania w całości: snippet pochodzi
+            # sprzed podstawienia ${ENV}, a treść składa się wyłącznie z nazw
+            # kluczy — inaczej niż surowe `pydantic.ValidationError`, które
+            # niesie `input_value=…`, czyli wartości już podstawione. Ścieżka
+            # w nagłówku sama wskazuje wariant, więc nic nie trzeba doklejać.
+            raise
         except Exception as exc:
             raise RenderSetValidationError(
                 f"wariant {language}: nie można wczytać {declared.scenario} "

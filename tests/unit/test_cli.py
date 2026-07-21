@@ -2,6 +2,7 @@ import shutil
 import textwrap
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import guidebot_recorder.cli as cli_module
@@ -9,6 +10,7 @@ from guidebot_recorder.cli import app
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.recorder.render_set import CompileSetResult
 from guidebot_recorder.scenario.compiled import compiled_path, write_compiled
+from guidebot_recorder.scenario.loader import load_scenario
 
 runner = CliRunner()
 
@@ -34,6 +36,25 @@ BAD_TWO_COMMANDS = textwrap.dedent(
         navigate: "http://x"
     """
 )
+
+
+#: linia `- click: "X"` w :data:`BAD_TWO_COMMANDS`
+BAD_LINE = 6
+
+
+def _assert_validation_banner(result, path, *, exit_code):
+    """Banner walidacji dotarł na wyjście w jednym kawałku i bez tracebacku."""
+
+    assert result.exit_code == exit_code
+    output = result.output
+    assert "Traceback" not in output
+    # nagłówek bannera z myślnikiem — CLI nie dokleja własnego prefiksu
+    assert "BŁĄD walidacji —" in output
+    assert "BŁĄD walidacji: BŁĄD" not in output
+    # `plik:linia` w jednym kawałku: Rich łamał tę ścieżkę w połowie
+    assert f"{path}:{BAD_LINE}" in output
+    assert "^ tutaj" in output
+    assert "dozwolona dokładnie jedna" in output
 
 
 def _install_fake_playwright(monkeypatch):
@@ -78,6 +99,89 @@ def test_validate_rejects_two_commands(tmp_path):
     path.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
     result = runner.invoke(app, ["validate", str(path)])
     assert result.exit_code != 0
+
+
+def test_compile_reports_the_banner_instead_of_a_rich_traceback(tmp_path):
+    """Diagnostyka była podpięta wyłącznie do `validate`.
+
+    `compile` — polecenie, w którym autor scenariusza ogląda swoje błędy
+    najczęściej — puszczał `ScenarioValidationError` niezłapany, więc Typer
+    renderował go jako panel tracebacku Richa: ścieżka pliku łamana w połowie,
+    treść komunikatu przycięta do 80 kolumn.
+    """
+
+    path = tmp_path / "flow.scenario.yaml"
+    path.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
+
+    result = runner.invoke(app, ["compile", str(path)])
+
+    _assert_validation_banner(result, path, exit_code=2)
+
+
+def test_guide_reports_the_banner_instead_of_a_rich_traceback(tmp_path, monkeypatch):
+    """`guide` wczytuje scenariusz dopiero po starcie przeglądarki — banner i tak ma dojść."""
+
+    path = tmp_path / "flow.scenario.yaml"
+    path.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
+    browser, _launches = _install_fake_playwright(monkeypatch)
+
+    result = runner.invoke(app, ["guide", str(path), "--out", str(tmp_path / "o.pdf")])
+
+    _assert_validation_banner(result, path, exit_code=2)
+    assert browser.closed is True
+
+
+def test_render_reports_the_banner_instead_of_a_rich_traceback(tmp_path):
+    path = tmp_path / "flow.scenario.yaml"
+    path.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
+
+    result = runner.invoke(app, ["render", str(path), "--out", str(tmp_path / "o.mp4")])
+
+    _assert_validation_banner(result, path, exit_code=2)
+
+
+def test_setup_reports_the_banner_instead_of_a_rich_traceback(tmp_path, monkeypatch):
+    """`setup` nie był na liście recenzji, ale ma dokładnie tę samą wadę."""
+
+    path = tmp_path / "setup.scenario.yaml"
+    path.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
+    _install_fake_playwright(monkeypatch)
+
+    result = runner.invoke(app, ["setup", str(path)])
+
+    _assert_validation_banner(result, path, exit_code=1)
+
+
+@pytest.mark.parametrize(
+    ("command", "extra"),
+    [("render-set", ["--output-dir", "out"]), ("compile-set", [])],
+)
+def test_set_commands_pass_a_validation_banner_through_untouched(
+    tmp_path, monkeypatch, command, extra
+):
+    """`_load_set_or_exit` nie może opakować bannera w `BŁĄD zestawu: …`.
+
+    Banner niesie własny nagłówek i wielolinijkowy fragment YAML — prefiks
+    z pierwszą linią zrósłby się w `BŁĄD zestawu: BŁĄD walidacji — …`, a reszta
+    zwisałaby bez kontekstu.
+
+    Dziś warstwa `scenario.render_set` sama zamienia każdy błąd wariantu na
+    `RenderSetValidationError`, więc ta ścieżka jest asekuracyjna — testujemy ją
+    wstrzykując błąd wprost, żeby obsługa w CLI nie została martwym kodem.
+    """
+
+    manifest, scenario = _write_render_set(tmp_path)
+    scenario.write_text(BAD_TWO_COMMANDS, encoding="utf-8")
+
+    def exploding_load_render_set(path):
+        return load_scenario(scenario)  # rzuca ScenarioValidationError
+
+    monkeypatch.setattr(cli_module, "load_render_set", exploding_load_render_set)
+
+    result = runner.invoke(app, [command, str(manifest), *extra])
+
+    _assert_validation_banner(result, scenario, exit_code=1)
+    assert "BŁĄD zestawu:" not in result.output
 
 
 def test_render_auto_heal_not_implemented(tmp_path):
