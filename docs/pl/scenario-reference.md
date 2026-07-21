@@ -52,6 +52,8 @@ steps:
 | `typing` | Nie | Animacja wpisywania znak po znaku; wyłącznie podczas renderu. |
 | `sound` | Nie | Opcjonalne wbudowane efekty dźwiękowe; wyłącznie podczas renderu. |
 | `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
+| `desktop` | Nie | Kolor tła kroku `desktop`; wyłącznie podczas renderu, poza config hashem. |
+| `fade` | Nie | Opcjonalny fade z/do koloru na obu końcach filmu; wyłącznie podczas renderu. |
 | `holdFrameForNarration` | Nie | Zamraża obraz na czas narracji zamiast nagrywać w czasie rzeczywistym; wyłącznie podczas renderu. |
 | `holdFrameSettle` | Nie | Sekundy realnego czasu nagrane przed zamrożeniem klatki; wyłącznie podczas renderu. |
 | `selects` | Nie | Nakładka DOM zamieniająca natywny `<select>` na widżet, którego lista jest widoczna na filmie; do config hasha wchodzi tylko `mode`. |
@@ -417,7 +419,7 @@ zmiana nigdy nie wymaga rekompilacji.
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `select`, `scroll`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
+`enterText`, `select`, `scroll`, `wait`, `slide`, `desktop` i `closeWindow`. `say` może być jedyną treścią kroku albo
 towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
@@ -872,6 +874,7 @@ render jak zwykle.
 |---|---:|
 | `cursor` (rozmiar, `click`, wyśrodkowany start) | Nie — render-only |
 | `typing`, `sound`, `intro`, `chrome` | Nie — render-only |
+| `desktop.color`, `fade` | Nie — render-only |
 | `holdFrameForNarration`, `holdFrameSettle` | Nie — render-only |
 | `verifyUserLoggedIn`, `maxAgeHours` (na setupie) | Nie — render-only, poza config hashem |
 | Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
@@ -880,7 +883,7 @@ render jak zwykle.
 | `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | Nie — render-only |
 | `config.setup` (na celu) dodane, usunięte lub przepięte | Tak — ścieżka `setup` wchodzi do config hasha celu |
 | `config.selects.mode` przełączone między `shim` i `native` | Tak — wchodzi do config hasha, jak `config.setup`, tylko gdy różni się od domyślnej wartości |
-| Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
+| Dodanie, usunięcie lub zmiana kolejności kroku `slide` albo `desktop` | Tak |
 | Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) lub własne `select.mode` kroku | Tak |
 | Zmiana rodzaju komendy kroku | Tak |
 | Zamrożony cel `text=` pasujący do napisu z `<option label="…">` albo `<optgroup label="…">` | Rzadko — patrz niżej |

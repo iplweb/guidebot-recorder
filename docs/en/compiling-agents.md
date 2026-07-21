@@ -194,3 +194,17 @@ leaking values, and leave all page actions to Guidebot. `run_compile_in_browser`
 creates the locale-matched context used by the stock CLI. This code does not make the
 backend selectable through `guidebot compile`; adding a CLI/config selection layer is
 separate work.
+
+The same instance works for a localized render set: pass it to `run_compile_set`
+instead, alongside a manifest loaded with `load_render_set`.
+
+```python
+from guidebot_recorder.recorder.render_set import run_compile_set
+from guidebot_recorder.scenario.render_set import load_render_set
+
+plan = load_render_set("scenarios/login.render-set.yaml")
+await run_compile_set(plan, browser, MyReasoner())
+```
+
+`run_compile_set` applies the resolver independently to each stale variant, in
+manifest order, exactly as `guidebot compile-set` does with `CodexReasoner`.
