@@ -39,7 +39,7 @@ from guidebot_recorder.models.action import (
     validate_teach_instruction,
 )
 from guidebot_recorder.models.compiled import CompiledAction, CompiledScenario
-from guidebot_recorder.models.config import config_hash, site_viewport
+from guidebot_recorder.models.config import Config, config_hash, site_viewport
 from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil
 from guidebot_recorder.models.target import (
     LabelTarget,
@@ -54,7 +54,7 @@ from guidebot_recorder.recorder._debug import (
     redact_text,
     scenario_sensitive_values,
 )
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
@@ -69,11 +69,58 @@ from guidebot_recorder.resolver.resolution import (
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.selects import Selects
 
-__all__ = ["compile_up_to_date", "heuristic_expect", "run_compile", "run_compile_in_browser"]
+__all__ = [
+    "compile_up_to_date",
+    "heuristic_expect",
+    "install_selects",
+    "run_compile",
+    "run_compile_in_browser",
+    "select_mode",
+]
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
+
+
+async def install_selects(context: BrowserContext, cfg: Config) -> Selects | None:
+    """Install the DOM select shim on a browser context that drives scenario steps.
+
+    The single funnel for every such context — compile
+    (:func:`run_compile_in_browser`), render (``render.run_render``) and setup
+    replay (``session.replay_setup``) — so the three cannot drift apart and
+    compile keeps freezing targets against the very DOM render later drives.
+    It lives here, the lowest layer of the three, because ``session`` and
+    ``render`` both already depend on this module.
+
+    Returns the controller, whose :meth:`Selects.wait_ready` is the readiness
+    barrier the caller must take before resolving a step — or ``None`` when
+    ``config.selects.mode`` is ``native``: that escape hatch keeps the page's own
+    control, so there is no widget to install and nothing to wait for.
+
+    Callers that also install ``chrome.js`` MUST call this first; see the
+    role-gating ordering contract documented in ``render.run_render``.
+    """
+
+    if cfg.selects.mode == "native":
+        return None
+    selects = Selects(cfg.selects)
+    await selects.install_context(context)
+    return selects
+
+
+def select_mode(step: Step, cfg: Config) -> str:
+    """The effective select mode for one step (spec §5).
+
+    A per-step ``mode`` is the escape hatch for one stubborn widget in an
+    otherwise fine scenario, so it wins over ``config.selects.mode``; unset
+    (``None``) inherits the global setting.
+    """
+
+    if step.select is not None and step.select.mode is not None:
+        return step.select.mode
+    return cfg.selects.mode
 
 
 def _resolve_url(scenario: Scenario, url: str) -> str:
@@ -233,6 +280,11 @@ async def run_compile_in_browser(
         **({"storage_state": setup_state} if setup_state is not None else {}),
     )
     try:
+        # Registered before the first page exists, so every document compile ever
+        # sees is already shimmed. Compile has no overlays of its own, but it must
+        # resolve against the same DOM render drives — otherwise a `<select>` is
+        # frozen as the native control and replayed as the widget.
+        selects = await install_selects(context, cfg)
         page = await context.new_page()
         await run_compile(
             path,
@@ -243,6 +295,7 @@ async def run_compile_in_browser(
             force=force,
             pause_on_error=pause_on_error,
             verbose=verbose,
+            selects=selects,
         )
     finally:
         await context.close()
@@ -258,7 +311,18 @@ async def run_compile(
     force: bool = False,
     pause_on_error: bool = False,
     verbose: bool = False,
+    selects: Selects | None = None,
 ) -> None:
+    """Compile the scenario on an already-prepared page.
+
+    ``selects`` is the controller returned by :func:`install_selects` for this
+    page's context, or ``None`` when no shim was installed (``mode: native``, or
+    a caller driving a bare context). It is passed in rather than rebuilt here
+    because only the caller that created the context knows whether the init
+    script was actually registered — waiting on a widget that was never injected
+    would fail every compile instead of catching a real problem.
+    """
+
     path = Path(path)
     scenario = load_scenario(path, env)
     sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
@@ -337,6 +401,13 @@ async def run_compile(
                 description = redact_text(_short(step), sensitive_values)
                 tqdm.write(f"[{index + 1}/{len(flat)}] {kind}: {description}")
             try:
+                if selects is not None and step.requires_target():
+                    # Readiness barrier: the resolver's page snapshot must be
+                    # taken against the shimmed DOM (the navigation that led here
+                    # has settled by now — it was an earlier step). Without it
+                    # compile can freeze a target the render, running with the
+                    # widget in place, no longer recognises.
+                    await selects.wait_ready(active_page)
                 pages_before = tuple(context.pages)
                 observed_start = len(observed_pages)
                 click_observed_start: int | None = None
@@ -697,7 +768,16 @@ async def _compile_step(
     elif action == "select":
         if step.select is None:
             raise RuntimeError("brak opcji dla akcji select")
-        await recorder.select(target, step.select.option)
+        try:
+            await recorder.select(
+                target,
+                step.select.option,
+                native=select_mode(step, scenario.config) == "native",
+            )
+        except SelectDriveError as exc:
+            # Compile probes drivability so an undriveable widget surfaces here,
+            # before a multi-minute render is paid for.
+            raise RuntimeError(f"krok {index}: {exc}") from exc
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

@@ -60,7 +60,8 @@ from guidebot_recorder.recorder._debug import (
     redact_exception,
     scenario_sensitive_values,
 )
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.compile import install_selects, select_mode
+from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
 from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
@@ -1986,13 +1987,15 @@ async def run_render(
     # but registered first so it wraps the *native* function on every document.
     await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
     overlay = Overlay(cfg.cursor, cfg.viewport)
-    # Role-gating contract: cursor.js and slide.js MUST be registered before
-    # chrome.js. Inside the site iframe, both rely on reading the real
-    # ``window.top`` to bail (cursor.js to skip mounting a duplicate cursor,
-    # slide.js's ``isTop`` guard to skip installing ``window.__guidebot_slide``);
-    # chrome.js is what shadows ``top`` (frame-bust neutralization). If any of
-    # these init scripts ran after chrome.js, it would read the shadowed
-    # ``top``, misidentify as the top window, and mount inside the frame.
+    # Role-gating contract: cursor.js, slide.js and selects.js MUST be registered
+    # before chrome.js. Inside the site iframe, all of them rely on reading the
+    # real ``window.top`` to decide their role (cursor.js to skip mounting a
+    # duplicate cursor, slide.js's ``isTop`` guard to skip installing
+    # ``window.__guidebot_slide``, selects.js's ``isTop`` test to keep the shim
+    # out of the shell document, which holds no page content); chrome.js is what
+    # shadows ``top`` (frame-bust neutralization). If any of these init scripts
+    # ran after chrome.js, it would read the shadowed ``top``, misidentify as the
+    # top window, and mount inside the frame.
     await overlay.install_context(context)
     slide = SlideOverlay()
     await slide.install_context(context)
@@ -2001,6 +2004,10 @@ async def run_render(
     # desktop inside the framed site.
     desktop = DesktopOverlay(config={"background": cfg.desktop.color})
     await desktop.install_context(context)
+    # The DOM select shim — one of the three contexts that drive pages (spec §1),
+    # and the reason the recording shows an option list at all. ``None`` under
+    # ``selects.mode: native``, which keeps the page's own control.
+    selects = await install_selects(context, cfg)
     # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
     # compositor frames them in post. This flips the chrome.js popup-site branch
     # off and gates the fail-loud "expect chrome" checks on popup pages below.
@@ -2260,10 +2267,20 @@ async def run_render(
             optional = entry.is_gate or step.optional
             resolved: ResolvedTarget | None = None
             cached = compiled.actions[index]
+            # The site iframe for the main window, the page itself for popups /
+            # chrome-disabled renders — never the shell document, which the shim
+            # deliberately skips.
+            probe_root: Page | Frame = (
+                site_frame if active_page is page and site_frame is not None else active_page
+            )
+            if selects is not None and step.requires_target():
+                # Readiness barrier, the mirror of compile's: both the in-place
+                # resolution below and the frozen-target check inside
+                # ``_render_step`` must see the shimmed DOM, or render would drive
+                # a page compile never resolved against. Any navigation that led
+                # here has settled — it was an earlier step.
+                await selects.wait_ready(probe_root)
             if step.requires_target() and (optional or isinstance(cached, PendingAction)):
-                probe_root: Page | Frame = (
-                    site_frame if active_page is page and site_frame is not None else active_page
-                )
                 try:
                     if isinstance(cached, PendingAction):
                         if reasoner is None:
@@ -2829,7 +2846,16 @@ async def _render_step(
     elif cached.action == "select":
         if step.select is None:
             raise RenderError(f"krok {index}: brak opcji dla akcji select — uruchom `compile`")
-        await recorder.select(cached.target, step.select.option)
+        try:
+            await recorder.select(
+                cached.target,
+                step.select.option,
+                native=select_mode(step, scenario.config) == "native",
+            )
+        except SelectDriveError as exc:
+            # No silent fallback to ``select_option``: that would restore exactly
+            # the invisible magic this feature removes, and unobservably.
+            raise RenderError(f"krok {index}: {exc}") from exc
     elif cached.action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

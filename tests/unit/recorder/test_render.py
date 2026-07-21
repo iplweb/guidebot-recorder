@@ -49,6 +49,7 @@ from guidebot_recorder.recorder.render import (
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.selects import Selects
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
@@ -400,15 +401,20 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
 ):
     """Locks in render.py's context init-script ordering contract.
 
-    cursor.js and slide.js both rely on reading the real ``window.top`` to
-    decide whether they are running in the top document or a framed site;
-    chrome.js is what shadows ``top`` for frame-bust neutralization. If either
-    ran after chrome.js, it would read the shadowed ``top`` and misidentify
-    its role. This spies on ``install_context`` (rather than asserting on
-    ``window.top`` behavior directly) because modern Chromium already makes
+    cursor.js, slide.js and selects.js all rely on reading the real
+    ``window.top`` to decide whether they are running in the top document or a
+    framed site; chrome.js is what shadows ``top`` for frame-bust
+    neutralization. If any of them ran after chrome.js, it would read the
+    shadowed ``top`` and misidentify its role. This spies on
+    ``install_context`` (rather than asserting on ``window.top`` behavior
+    directly) because modern Chromium already makes
     ``Object.defineProperty(window, "top", ...)`` a no-op for cross-origin
     frames, so a black-box DOM assertion can't distinguish a correct order
     from a swapped one — only the registration order itself can.
+
+    Doubling as the render half of the spec §1 installation table: the render
+    context is one of the three that drive pages, so the widget must be
+    installed on it at all.
     """
     path = tmp_path / "chrome.scenario.yaml"
     path.write_text(
@@ -429,6 +435,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     order: list[str] = []
     original_overlay_install = Overlay.install_context
     original_slide_install = SlideOverlay.install_context
+    original_selects_install = Selects.install_context
     original_chrome_install = Chrome.install_context
 
     async def spy_overlay_install(self, context):
@@ -439,12 +446,17 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
         order.append("slide")
         return await original_slide_install(self, context)
 
+    async def spy_selects_install(self, context):
+        order.append("selects")
+        return await original_selects_install(self, context)
+
     async def spy_chrome_install(self, context):
         order.append("chrome")
         return await original_chrome_install(self, context)
 
     monkeypatch.setattr(Overlay, "install_context", spy_overlay_install)
     monkeypatch.setattr(SlideOverlay, "install_context", spy_slide_install)
+    monkeypatch.setattr(Selects, "install_context", spy_selects_install)
     monkeypatch.setattr(Chrome, "install_context", spy_chrome_install)
 
     async with async_playwright() as pw:
@@ -457,7 +469,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
         await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert order == ["overlay", "slide", "chrome"]
+    assert order == ["overlay", "slide", "selects", "chrome"]
 
 
 async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path, monkeypatch):
@@ -984,12 +996,16 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
     html = tmp_path / "main.html"
     button = "<button onclick=\"window.open('correct.html')\">Zaloguj</button>"
     html.write_text(button, encoding="utf-8")
+    # ``settleMs`` is shrunk to keep the select shim's readiness barrier (taken
+    # before the step is resolved) from eating the 550 ms window this test aims
+    # the timer at; the barrier is orthogonal to popup attribution.
     scenario = textwrap.dedent(
         f"""\
         config:
           title: t
           viewport: {{width: 640, height: 480}}
           tts: {{provider: fake, voice: v, lang: pl-PL}}
+          selects: {{settleMs: 20}}
         steps:
           - navigate: "{html.resolve().as_uri()}"
           - teach: "kliknij Zaloguj"

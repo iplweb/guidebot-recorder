@@ -128,9 +128,7 @@ async def test_force_reattempts_a_pending_entry(tmp_path, page):
     assert "baner cookies" in second.instructions
 
 
-async def test_optional_step_records_pending_and_later_steps_still_compile(
-    tmp_path, page, capsys
-):
+async def test_optional_step_records_pending_and_later_steps_still_compile(tmp_path, page, capsys):
     path = tmp_path / "opt.scenario.yaml"
     path.write_text(OPTIONAL_STEP_SCENARIO, encoding="utf-8")
     reasoner = BranchReasoner()
