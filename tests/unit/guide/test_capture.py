@@ -238,6 +238,95 @@ async def test_select_step_picks_option_then_screenshots(tmp_path, monkeypatch):
     assert any(a.kind == "selected" for a in pages[0].annotations)
 
 
+class _Boom(RuntimeError):
+    """A step failure that is neither PlaywrightError nor GuideError."""
+
+
+class FailingRecorder(FakeRecorder):
+    async def point(self, target, ripple=False):
+        raise _Boom("krok padł na sekrecie hunter2")
+
+
+class _RecordingPause:
+    """Stand-in for `pause_for_inspection` that records its call arguments."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def __call__(self, page, phase, index, kind, exc, sensitive_values=()):
+        self.calls.append((page, phase, index, kind, exc, sensitive_values))
+
+
+def _click_scenario_and_action():
+    scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    return scenario, action
+
+
+async def test_pause_on_error_pauses_and_reraises_untouched(tmp_path, monkeypatch):
+    """A failing step pauses for inspection, then the original exception propagates."""
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _click_scenario_and_action()
+    page = FakePage()
+    with pytest.raises(_Boom):  # NOT wrapped in GuideError
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            page,
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+        )
+    assert len(pause.calls) == 1
+    called_page, phase, index, kind, exc, _sensitive = pause.calls[0]
+    assert called_page is page
+    assert phase == "guide"
+    assert index == 0
+    assert kind == "action"
+    assert isinstance(exc, _Boom)
+
+
+async def test_without_pause_on_error_the_helper_is_not_called(tmp_path, monkeypatch):
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _click_scenario_and_action()
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+    assert pause.calls == []
+
+
+async def test_pause_receives_the_sensitive_values(tmp_path, monkeypatch):
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario, action = _click_scenario_and_action()
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+            sensitive_values=("hunter2",),
+        )
+    assert [call[5] for call in pause.calls] == [("hunter2",)]
+
+
 async def test_select_action_without_select_step_raises(tmp_path, monkeypatch):
     """The sidecar recorded a `select` action, but the scenario step it maps to
     isn't a select step (e.g. the scenario was edited by hand after freezing).

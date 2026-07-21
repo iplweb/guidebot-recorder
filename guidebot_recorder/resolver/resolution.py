@@ -35,6 +35,7 @@ from guidebot_recorder.resolver.reasoner import (
     ReasonerResult,
 )
 from guidebot_recorder.resolver.validate import (
+    ValidationFail,
     ValidationOk,
     is_sensitive_type_target,
     validate_compile_time,
@@ -157,7 +158,9 @@ async def resolve_step_target(
 
     instruction = step_instruction(step)
     candidates = await collect_candidates(root)
+    option = step.select.option if step.select is not None else None
     resolution_error: str | None = None
+    last_rejection: ValidationFail | None = None
 
     for _ in range(MAX_REPROMPT):
         result = await reasoner.resolve(instruction, candidates)
@@ -184,7 +187,7 @@ async def resolve_step_target(
 
         resolution_error = None
         target = result.target
-        validation = await validate_compile_time(root, target, action)
+        validation = await validate_compile_time(root, target, action, option=option)
         if not isinstance(validation, ValidationOk):
             # An exact name the reasoner copied from a candidate can miss under
             # Playwright's matcher over insignificant whitespace. Retry once with
@@ -192,10 +195,13 @@ async def resolve_step_target(
             # uniquely; persist the relaxed target so render agrees with compile.
             relaxed = _relaxed_exact(target)
             if relaxed is not None:
-                relaxed_validation = await validate_compile_time(root, relaxed, action)
+                relaxed_validation = await validate_compile_time(
+                    root, relaxed, action, option=option
+                )
                 if isinstance(relaxed_validation, ValidationOk):
                     target, validation = relaxed, relaxed_validation
             if not isinstance(validation, ValidationOk):
+                last_rejection = validation
                 continue
         if infers_text and await is_sensitive_type_target(validation.locator):
             resolution_error = (
@@ -221,4 +227,10 @@ async def resolve_step_target(
 
     if resolution_error is not None:
         raise RuntimeError(f"{resolution_error} po {MAX_REPROMPT} próbach")
-    raise RuntimeError(f"nie udało się zwalidować namiaru dla: {instruction!r}")
+    message = f"nie udało się zwalidować namiaru dla: {instruction!r}"
+    if last_rejection is not None:
+        # Without this the author only learns *that* every candidate was refused.
+        # The reason — an absent option, a non-select, an ambiguous name — is the
+        # one piece of information that says what to fix in the scenario.
+        message += f" (ostatnie odrzucenie: {last_rejection.message})"
+    raise RuntimeError(message)

@@ -27,6 +27,7 @@ ValidationReason: TypeAlias = Literal[
     "not_editable",
     "incompatible_type",
     "not_select",
+    "option_missing",
     "unsupported_action",
     "dom_changed",
 ]
@@ -47,6 +48,9 @@ ReuseReason: TypeAlias = (
         "sensitive_target",
     ]
 )
+
+#: how many option labels an ``option_missing`` message spells out before eliding
+_MAX_REPORTED_OPTIONS = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +149,48 @@ async def _is_native_select(locator: Locator) -> bool:
     return await locator.evaluate("element => element.tagName.toLowerCase() === 'select'")
 
 
+async def _select_option_labels(locator: Locator) -> list[str]:
+    """The matched ``<select>``'s visible option labels, whitespace-normalised.
+
+    Deliberately the same projection ``Recorder._step_option_visibly`` builds
+    before it steps the control — ``option.label`` falling back to the text, with
+    runs of whitespace collapsed — so validation and execution read the same list.
+    """
+
+    return await locator.evaluate(
+        """
+        element => Array.from(
+          element.options,
+          option => (option.label || option.textContent || "").replace(/\\s+/g, " ").trim(),
+        )
+        """
+    )
+
+
+def _offers_option(labels: list[str], option: str) -> bool:
+    """Whether ``option`` names one of ``labels`` under execution's matching rules.
+
+    Execution tries the normalised label first and then falls back to a
+    case-insensitive comparison, so validation has to accept both. It must never
+    be the stricter of the two: rejecting a target the recorder would have
+    handled just fine would send the resolver chasing a different element.
+    """
+
+    wanted = " ".join(option.split())
+    return wanted in labels or wanted.lower() in {label.lower() for label in labels}
+
+
+def _option_missing_message(option: str, labels: list[str]) -> str:
+    """Name both halves of the mismatch — a bare "no such option" re-prompts blind."""
+
+    if not labels:
+        return f"The <select> has no options at all, so {option!r} cannot be chosen."
+    shown = ", ".join(repr(label) for label in labels[:_MAX_REPORTED_OPTIONS])
+    if len(labels) > _MAX_REPORTED_OPTIONS:
+        shown += f", … (+{len(labels) - _MAX_REPORTED_OPTIONS} more)"
+    return f"The <select> has no option labelled {option!r}; it offers: {shown}."
+
+
 async def is_sensitive_type_target(locator: Locator) -> bool:
     """Fail closed for fields where a frozen ``teach`` literal may expose a secret."""
 
@@ -177,9 +223,16 @@ async def is_sensitive_type_target(locator: Locator) -> bool:
 
 
 async def validate_compile_time(
-    page: Page | Frame, target: Target, action: ActionKind
+    page: Page | Frame, target: Target, action: ActionKind, option: str | None = None
 ) -> ValidationOk | ValidationFail:
-    """Apply the compile-time half of the resolver's trust-but-verify contract."""
+    """Apply the compile-time half of the resolver's trust-but-verify contract.
+
+    ``option`` is the visible label a ``select`` step wants to choose. Pass it and
+    a plausible-but-wrong dropdown is rejected here, cheaply, with a reason the
+    re-prompt can act on; omit it and only the element itself is checked. It has
+    to stay optional because ``reuse_is_valid`` validates a ``CachedAction``,
+    which carries no option label — the wanted option lives in the scenario step.
+    """
 
     if action not in ("click", "hover", "type", "waitFor", "select"):
         return ValidationFail("unsupported_action", f"Unsupported action kind: {action!r}.")
@@ -212,6 +265,15 @@ async def validate_compile_time(
 
         if action == "type" and not await locator.is_editable():
             return ValidationFail("not_editable", "The matched element is not editable.")
+
+        # Where a select has no accessible name the resolver can only freeze it
+        # positionally (combobox nth=N), and that index drifts with the DOM. The
+        # wanted option is the semantic check that catches the drift — without it
+        # a wrong-but-plausible dropdown only fails later, as a 15s timeout.
+        if action == "select" and option is not None:
+            labels = await _select_option_labels(locator)
+            if not _offers_option(labels, option):
+                return ValidationFail("option_missing", _option_missing_message(option, labels))
 
         # Close the largest count/check race window. The DOM can always mutate
         # after this function returns, so execution performs its own checks too.

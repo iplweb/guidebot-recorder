@@ -457,6 +457,15 @@ widżet `role="combobox"`, przycisk) to błąd walidacji `not_select`. `option` 
 widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie** podlega
 podstawianiu zmiennych środowiskowych.
 
+Walidacja sprawdza także, czy wskazany `<select>` **w ogóle ma** żądaną opcję — jeśli
+nie, zgłasza `option_missing` i wymienia etykiety, które ten element faktycznie
+oferuje. To zabezpieczenie semantyczne dla list bez nazwy dostępnej, które resolver
+może namierzyć wyłącznie pozycyjnie (`combobox nth=N`): numeracja przesuwa się wraz ze
+stanem DOM, więc bez tej kontroli zły-ale-prawdopodobny `<select>` przeszedłby
+walidację, a dopiero wykonanie przewróciłoby kompilację timeoutem. Porównanie
+normalizuje białe znaki, a w drugim podejściu ignoruje wielkość liter — dokładnie tak
+jak wykonanie — więc różnica w formatowaniu etykiety nie odrzuci poprawnego celu.
+
 Listę opcji natywnego `<select>` rysuje system operacyjny, więc żadne narzędzie do
 automatyzacji przeglądarki — w tym Playwright — nie rozwinie jej ani nie zrzuci na
 ekran. Dlatego podczas `render` kursor dojeżdża do kontrolki, pokazuje kliknięcie i

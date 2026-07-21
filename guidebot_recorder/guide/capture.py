@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -13,6 +14,10 @@ from guidebot_recorder.guide.model import GuidePage, page_text
 from guidebot_recorder.guide.prolog import GuideError, classify
 from guidebot_recorder.models.action import CachedAction
 from guidebot_recorder.models.scenario import WaitUntil
+
+# Imported as a bare name (not `from ... import _debug`) so it becomes an attribute
+# of this module and tests can monkeypatch it, like `reuse_failure` below.
+from guidebot_recorder.recorder._debug import pause_for_inspection
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.validate import reuse_failure
 
@@ -29,6 +34,7 @@ _REUSE_REASON_PL = {
     "not_editable": "cel nie przyjmuje tekstu",
     "incompatible_type": "typ elementu nie pasuje do akcji",
     "not_select": "cel nie jest natywnym <select>",
+    "option_missing": "wybrany `<select>` nie ma żądanej opcji",
     "unsupported_action": "akcja nieobsługiwana przez walidację",
     "dom_changed": "strona zmieniła się w trakcie sprawdzania",
     "identity_mismatch": "niezgodna tożsamość — uruchom `compile --force`",
@@ -73,6 +79,8 @@ async def capture_pages(
     *,
     timeout: float,
     verbose: bool = False,
+    pause_on_error: bool = False,
+    sensitive_values: Iterable[str] = (),
 ) -> list[GuidePage]:
     flat = scenario.flat_steps()
     actions = compiled.actions
@@ -87,147 +95,157 @@ async def capture_pages(
                 continue
             skipped_branch = None
         kind = classify(fs)
-
-        if kind == "gate":
-            try:
-                target = action.target if isinstance(action, CachedAction) else None
-                if target is None:
-                    skipped_branch = fs.branch
+        try:
+            if kind == "gate":
+                try:
+                    target = action.target if isinstance(action, CachedAction) else None
+                    if target is None:
+                        skipped_branch = fs.branch
+                        if verbose:
+                            print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
+                        continue
+                    # action is a CachedAction here (target came from it above); mirror the
+                    # non-gate wait branch's state fallback and use the gate's own timeout.
+                    state = action.state or "visible"
+                    gate_timeout = (
+                        step.wait.timeout if isinstance(step.wait, WaitUntil) else timeout
+                    )
+                    await recorder.wait_for(target, state, gate_timeout)
+                except PlaywrightError:
+                    skipped_branch = fs.branch  # branch element absent -> skip whole branch
                     if verbose:
                         print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
-                    continue
-                # action is a CachedAction here (target came from it above); mirror the
-                # non-gate wait branch's state fallback and use the gate's own timeout.
-                state = action.state or "visible"
-                gate_timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else timeout
-                await recorder.wait_for(target, state, gate_timeout)
-            except PlaywrightError:
-                skipped_branch = fs.branch  # branch element absent -> skip whole branch
-                if verbose:
-                    print(f"pomijam gałąź {fs.branch}: bramka nieobecna")
-            continue
-
-        if kind == "navigate":
-            url = scenario_resolve_url(scenario, step.navigate_url())
-            await recorder.navigate(url)
-            shot, size = await _screenshot(page, shots_dir, index)
-            pages.append(
-                GuidePage(
-                    kind="navigate",
-                    screenshot=shot,
-                    text=page_text(step),
-                    heading=f"Otwórz adres: {url}",
-                    annotations=[],
-                    screenshot_size=size,
-                )
-            )
-            prev_cursor = None
-            continue
-
-        if kind == "slide":
-            s = step.slide
-            pages.append(
-                GuidePage(
-                    kind="slide",
-                    screenshot=None,
-                    text=s.subtitle or s.notes or "",
-                    heading=s.title,
-                    annotations=[],
-                )
-            )
-            continue
-
-        if kind == "text":
-            pages.append(
-                GuidePage(
-                    kind="text", screenshot=None, text=page_text(step), heading=None, annotations=[]
-                )
-            )
-            continue
-
-        if kind == "scroll":
-            await recorder.scroll(step.scroll_config())
-            prev_cursor = None
-            text = page_text(step)
-            if not text:
                 continue
-            shot, size = await _screenshot(page, shots_dir, index)
+
+            if kind == "navigate":
+                url = scenario_resolve_url(scenario, step.navigate_url())
+                await recorder.navigate(url)
+                shot, size = await _screenshot(page, shots_dir, index)
+                pages.append(
+                    GuidePage(
+                        kind="navigate",
+                        screenshot=shot,
+                        text=page_text(step),
+                        heading=f"Otwórz adres: {url}",
+                        annotations=[],
+                        screenshot_size=size,
+                    )
+                )
+                prev_cursor = None
+                continue
+
+            if kind == "slide":
+                s = step.slide
+                pages.append(
+                    GuidePage(
+                        kind="slide",
+                        screenshot=None,
+                        text=s.subtitle or s.notes or "",
+                        heading=s.title,
+                        annotations=[],
+                    )
+                )
+                continue
+
+            if kind == "text":
+                pages.append(
+                    GuidePage(
+                        kind="text",
+                        screenshot=None,
+                        text=page_text(step),
+                        heading=None,
+                        annotations=[],
+                    )
+                )
+                continue
+
+            if kind == "scroll":
+                await recorder.scroll(step.scroll_config())
+                prev_cursor = None
+                text = page_text(step)
+                if not text:
+                    continue
+                shot, size = await _screenshot(page, shots_dir, index)
+                pages.append(
+                    GuidePage(
+                        kind="step",
+                        screenshot=shot,
+                        text=text,
+                        heading=None,
+                        annotations=[],
+                        screenshot_size=size,
+                    )
+                )
+                continue
+
+            if kind == "wait":
+                if isinstance(step.wait, int | float):
+                    await recorder.wait_seconds(float(step.wait))
+                    continue
+                if isinstance(action, CachedAction) and action.action == "waitFor":
+                    timeout_wait = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
+                    await recorder.wait_for(action.target, action.state or "visible", timeout_wait)
+                elif verbose and not step.optional:
+                    print(f"pomijam krok {index}: oczekiwanie nierozwiązane — uruchom `compile`")
+                continue
+
+            # kind == "action": click / hover / type / select (dispatch on cached.action)
+            if not isinstance(action, CachedAction):
+                if step.optional:
+                    if verbose:
+                        print(f"pomijam krok {index}: cel nieobecny")
+                    continue  # optional branch never compiled -> skip page
+                raise RuntimeError(f"krok {index}: nierozwiązana akcja obowiązkowa")
+            act = action.action
+            if not step.optional and act != "waitFor":
+                reason = await reuse_failure(recorder.frame, action)
+                if reason is not None:
+                    raise GuideError(f"krok {index}: {_REUSE_REASON_PL.get(reason, reason)}")
+            try:
+                res = await recorder.point(action.target, ripple=False)
+            except PlaywrightError:
+                if step.optional:
+                    if verbose:
+                        print(f"pomijam krok {index}: cel nieobecny")
+                    continue
+                raise
+            if act == "type":
+                text = (step.enter_text.text if step.enter_text else None) or action.input_text
+                if text is None:
+                    raise GuideError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
+                await res.locator.fill(text)
+                shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
+            elif act == "select":
+                if step.select is None:
+                    raise GuideError(
+                        f"krok {index}: sidecar mówi `select`, a krok scenariusza nim nie jest "
+                        "— uruchom `compile --force`"
+                    )
+                await res.locator.select_option(label=step.select.option)
+                shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
+            else:
+                shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
+                if act == "hover":
+                    await res.locator.hover()
+                else:
+                    await res.locator.click()
+            await recorder.apply_readiness(action.expect)
             pages.append(
                 GuidePage(
                     kind="step",
                     screenshot=shot,
-                    text=text,
+                    text=page_text(step),
                     heading=None,
-                    annotations=[],
+                    annotations=annotations_for(
+                        act, prev_cursor=prev_cursor, center=res.center, box=res.box
+                    ),
                     screenshot_size=size,
                 )
             )
-            continue
-
-        if kind == "wait":
-            if isinstance(step.wait, int | float):
-                await recorder.wait_seconds(float(step.wait))
-                continue
-            if isinstance(action, CachedAction) and action.action == "waitFor":
-                timeout_wait = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
-                await recorder.wait_for(action.target, action.state or "visible", timeout_wait)
-            elif verbose and not step.optional:
-                print(f"pomijam krok {index}: oczekiwanie nierozwiązane — uruchom `compile`")
-            continue
-
-        # kind == "action": click / hover / type (dispatch on cached.action)
-        if not isinstance(action, CachedAction):
-            if step.optional:
-                if verbose:
-                    print(f"pomijam krok {index}: cel nieobecny")
-                continue  # optional branch never compiled -> skip page
-            raise RuntimeError(f"krok {index}: nierozwiązana akcja obowiązkowa")
-        act = action.action
-        if not step.optional and act != "waitFor":
-            reason = await reuse_failure(recorder.frame, action)
-            if reason is not None:
-                raise GuideError(f"krok {index}: {_REUSE_REASON_PL.get(reason, reason)}")
-        try:
-            res = await recorder.point(action.target, ripple=False)
-        except PlaywrightError:
-            if step.optional:
-                if verbose:
-                    print(f"pomijam krok {index}: cel nieobecny")
-                continue
+            prev_cursor = res.center
+        except Exception as exc:
+            if pause_on_error:
+                await pause_for_inspection(page, "guide", index, kind, exc, sensitive_values)
             raise
-        if act == "type":
-            text = (step.enter_text.text if step.enter_text else None) or action.input_text
-            if text is None:
-                raise GuideError(f"krok {index}: brak zamrożonego tekstu — uruchom `compile`")
-            await res.locator.fill(text)
-            shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
-        elif act == "select":
-            if step.select is None:
-                raise GuideError(
-                    f"krok {index}: sidecar mówi `select`, a krok scenariusza nim nie jest "
-                    "— uruchom `compile --force`"
-                )
-            await res.locator.select_option(label=step.select.option)
-            shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
-        else:
-            shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover
-            if act == "hover":
-                await res.locator.hover()
-            else:
-                await res.locator.click()
-        await recorder.apply_readiness(action.expect)
-        pages.append(
-            GuidePage(
-                kind="step",
-                screenshot=shot,
-                text=page_text(step),
-                heading=None,
-                annotations=annotations_for(
-                    act, prev_cursor=prev_cursor, center=res.center, box=res.box
-                ),
-                screenshot_size=size,
-            )
-        )
-        prev_cursor = res.center
 
     return pages

@@ -67,11 +67,17 @@ uv run guidebot guide SCENARIO.yaml --out OUTPUT.pdf [OPTIONS]
 | Option | Default | Meaning |
 |---|---:|---|
 | `--out PATH`, `-o PATH` | required | Destination `.pdf` path. Parent directories are created. |
+| `--headed` | off | Show the Chromium window. |
+| `--pause-on-error` | off | On error, pause and keep a headed page available for inspection. |
 | `--timeout SECONDS` | `15` | Playwright action timeout. |
 | `--verbose`, `-v` | off | Show page-build progress and step details. |
 
 The `--timeout` value is used identically to the `compile` and `render` commands and applies
 to all browser actions during guide generation.
+
+`--headed` and `--pause-on-error` behave exactly as in `compile` and `render`: they are
+diagnostic tools for when capture does not do what you expect. By default a guide is built
+with no visible window, but that is not a requirement — PDF composition works in both modes.
 
 ## Current v1 limitations
 

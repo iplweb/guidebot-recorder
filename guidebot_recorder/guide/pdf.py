@@ -1,4 +1,4 @@
-"""Render composed HTML to a landscape PDF via headless Chromium page.pdf()."""
+"""Render composed HTML to a landscape PDF via Chromium page.pdf()."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ from playwright.async_api import Browser
 
 
 async def html_to_pdf(browser: Browser, html: str, out_pdf: Path) -> None:
-    """Write `html` to PDF. Browser MUST be headless (page.pdf throws otherwise)."""
+    """Write `html` to PDF: load it from a temp file in a fresh page and print it.
+
+    Works in both headless and headed Chromium.
+    """
 
     with tempfile.TemporaryDirectory() as tmp:
         index = Path(tmp) / "guide.html"
