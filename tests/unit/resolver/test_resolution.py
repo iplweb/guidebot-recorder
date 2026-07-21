@@ -3,7 +3,7 @@
 import pytest
 from playwright.async_api import async_playwright
 
-from guidebot_recorder.models.scenario import EnterText, Step, WaitUntil
+from guidebot_recorder.models.scenario import EnterText, Select, Step, WaitUntil
 from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
 from guidebot_recorder.resolver.resolution import (
@@ -130,6 +130,68 @@ async def test_unvalidatable_target_raises_after_reprompts(page):
     with pytest.raises(RuntimeError, match="nie udało się zwalidować"):
         await resolve_step_target(page, Step(click="kliknij Zaloguj"), "click", reasoner)
     assert reasoner.calls == 2
+
+
+#: two unnamed comboboxes, exactly as multiseek renders them: the resolver can
+#: only tell them apart positionally, and the *first* one is the wrong one.
+_TWO_SELECTS = """
+    <select><option>Raport jednostki</option><option>Raport autora</option></select>
+    <select><option>Artykuł w czasopismie</option><option>Rozdział</option></select>
+"""
+
+_SELECT_STEP = Step(
+    select=Select(
+        from_="lista wyboru wartości charakteru formalnego w ramce",
+        option="Artykuł w czasopismie",
+    )
+)
+
+
+async def test_select_step_rejects_a_dropdown_that_lacks_the_wanted_option(page):
+    """The wrong `<select>` must be refused during validation, never handed to the recorder."""
+
+    await page.set_content(_TWO_SELECTS)
+    reasoner = StubReasoner(
+        ReasonerResult(action="select", target=RoleTarget(role="combobox", name="", nth=0))
+    )
+
+    with pytest.raises(RuntimeError, match="Artykuł w czasopismie"):
+        await resolve_step_target(page, _SELECT_STEP, "select", reasoner)
+    assert reasoner.calls == 2
+
+
+async def test_select_step_reprompt_recovers_the_dropdown_that_has_the_option(page):
+    """A rejected candidate leaves the loop free to land on the right control."""
+
+    await page.set_content(_TWO_SELECTS)
+    reasoner = StubReasoner(
+        ReasonerResult(action="select", target=RoleTarget(role="combobox", name="", nth=0)),
+        ReasonerResult(action="select", target=RoleTarget(role="combobox", name="", nth=1)),
+    )
+
+    resolved = await resolve_step_target(page, _SELECT_STEP, "select", reasoner)
+
+    assert isinstance(resolved, ResolvedTarget)
+    assert reasoner.calls == 2
+    assert await resolved.locator.evaluate("el => el.options[0].textContent.trim()") == (
+        "Artykuł w czasopismie"
+    )
+
+
+async def test_exhausted_reprompts_report_why_the_last_candidate_was_rejected(page):
+    """The bare "nie udało się zwalidować" told the author nothing actionable."""
+
+    await page.goto(_PAGE)
+    reasoner = StubReasoner(
+        ReasonerResult(action="click", target=RoleTarget(role="button", name="Nie ma", exact=True))
+    )
+
+    with pytest.raises(RuntimeError, match="ostatnie odrzucenie") as excinfo:
+        await resolve_step_target(page, Step(click="kliknij Zaloguj"), "click", reasoner)
+
+    message = str(excinfo.value)
+    assert "nie udało się zwalidować" in message
+    assert "matched no elements" in message
 
 
 async def test_hidden_wait_captures_no_identity(page):

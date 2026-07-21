@@ -583,6 +583,16 @@ resolving to a non-select control (a custom `role="combobox"` widget, a button) 
 `not_select` validation error. `option` is the visible label of the option to pick;
 it is shown, never spoken, and is **not** environment-substituted.
 
+Validation also checks that the resolved `<select>` actually **offers** the requested
+option; if it does not, the target is rejected with `option_missing`, and the message
+lists the labels the element really has. This is the semantic safety net for dropdowns
+with no accessible name, which the resolver can only address positionally
+(`combobox nth=N`): that index shifts with the state of the DOM, so without the check a
+wrong-but-plausible `<select>` would pass validation and only execution would fail the
+compile, with a timeout. The comparison normalises whitespace and, on a second pass,
+ignores case — exactly as execution does — so a differently formatted label never
+rejects a correct target.
+
 A native select's option list is drawn by the operating system, so no
 browser-automation tool — Playwright included — can unfurl or screenshot it. During
 `render` the cursor therefore glides to the control, shows the click ripple, and
