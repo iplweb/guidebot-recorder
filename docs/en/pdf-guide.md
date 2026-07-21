@@ -1,8 +1,9 @@
 # Building step-by-step PDF guides
 
 Guidebot can render a compiled scenario as a landscape PDF guide — one annotated step per page,
-side-by-side with narration text. Each guide page freezes the frame at the moment an interactive
-step completes and overlays it with visual annotations: an arrow for the cursor movement, a frame
+side-by-side with narration text. Each guide page freezes the frame at the moment that best explains
+its step — for most actions the moment the step completes, for a `select` the moment its option list
+is open — and overlays it with visual annotations: an arrow for the cursor movement, a frame
 around the action's target, a star where the mouse clicks, and the `highlight` ellipse.
 
 This feature is LLM-free and requires no additional dependencies beyond the compiled sidecar.
@@ -29,6 +30,8 @@ A guide requires a successful prior `compile` step. It produces no LLM calls, TT
 A single PDF guide contains one or more pages:
 
 - **Interactive step (click, hover, type)** — Full-width annotated screenshot (left), narration text (right).
+- **Dropdown step (`select`)** — The same layout, but the frame is taken **while the option list is
+  open**. See [Dropdowns](#dropdowns-select).
 - **Navigation** — Page with text "Otwórz adres:" followed by the URL (`navigate` steps).
 - **Section divider** — A card-style slide inserted as a visual break (`slide` steps).
 - **Wait/when gates** — No page. Conditional waits and background polling produce no output.
@@ -46,6 +49,50 @@ Screenshots are overlaid with visual markers:
 - **Ellipse** — A `highlight` step's mark, in the colour the scenario chose. Instead of
   the circling cursor the film shows, the guide draws the finished ellipse around the
   control or area being pointed at.
+
+## Dropdowns (`select`)
+
+A `select` page is photographed **mid-interaction**: the option list is unfurled, and the option the
+step chooses is starred the way a `click` step's target is. It is the one action whose marks are
+split across two boxes:
+
+- the **star** on the option row — the thing the reader is being told to click, drawn exactly as on
+  a `click` page;
+- the **red frame** around the control itself, so the reader can see which field they are in;
+- the **arrow** ending at the option row's edge rather than at the control's.
+
+The next step's arrow starts from that row, where the reader's eye was left.
+
+Under `mode: native` (below) there is no row, so a `select` page is marked like any other framed
+action: an arrow to the control's frame and the frame itself, with no star — nothing visible is
+being clicked.
+
+This works because Guidebot injects a DOM replacement for the native option list (the same one that
+makes dropdowns visible in `render` videos) — a native `<select>`'s list is drawn by the operating
+system and no browser-automation tool can screenshot it. Pages that enhance their own selects
+(select2, Tom Select, Chosen) already draw a DOM list, and the guide drives that one instead.
+
+`config.selects.mode: native`, or `mode: native` on a single step, opts out: the cursor still travels
+to the control and the value is still chosen, but the frame shows the collapsed control and the page
+carries only the red frame — there is no list to reveal. Use it for a widget the guide cannot drive;
+the error message says so and names the option it was trying to choose.
+
+Both settings are documented in the
+[scenario reference](scenario-reference.md).
+
+A step marked `optional: true` is skipped when the list **does not contain** the wanted
+option — the one case where skipping silently is right, because that is exactly what
+`optional` claims. Every other dropdown failure (a click that did not change the
+selection, a widget that cannot be unfurled, the overlay removed mid-step) stops the
+guide even for an optional step: otherwise the page would vanish from the PDF without a
+word and the defect would stay on the site.
+
+Two cases are worth naming outright, because they read like "the option is missing" and
+are not. A `disabled` option **is** on the list — the page simply refuses it — so an
+`optional: true` step stops on it rather than skipping; otherwise the guide would quietly
+stop covering a control the site deliberately locked. The same goes for a `multiple` /
+`size > 1` list with no size on the page at all: nothing was learned about which options
+it offers, and the wanted one may well be there.
 
 ## Narration text: `say`, `teach`, or `caption`
 
@@ -97,10 +144,6 @@ The current guide feature has the following scope:
 - **No numbered multi-step grouping** — Steps are rendered individually. Future versions may allow
   multi-step sequences to be visually grouped or numbered (e.g. "Step 1 of 5").
 - **No PDF layout customization** — Margins, fonts, colors, and page dimensions are fixed.
-- **`select` shows no expanded dropdown** — A `select` step actually chooses the option, and the
-  PDF page shows the screenshot taken **after** the choice. The native `<select>` option list is
-  drawn by the operating system, so no browser-automation tool can capture it — the guide shows
-  the collapsed control with its new value, never the open list.
 - **`scroll` only produces its own page with text** — A `scroll` step always actually scrolls the
   page (screenshots are taken from the visible viewport, so scrolling is required for later steps
   to show the right part of the page), but it only creates its own PDF page when it also carries

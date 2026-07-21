@@ -13,7 +13,7 @@ import pytest
 from playwright.async_api import async_playwright
 
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.compile import run_compile
+from guidebot_recorder.recorder.compile import run_compile, run_compile_in_browser
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 
 pytestmark = pytest.mark.integration
@@ -227,10 +227,10 @@ async def test_guide_handles_select_and_scroll(tmp_path):
         browser = await pw.chromium.launch(headless=True)
         try:
             # --- compile (offline reasoner, no LLM) ---
-            page = await browser.new_page()
-            reasoner = SelectScrollMockReasoner()
-            await run_compile(path, page, reasoner, selects=None)
-            await page.context.close()
+            # `run_compile_in_browser`, not `run_compile`: the scenario has a
+            # `select:` step, so compile must resolve it against the same shimmed
+            # DOM the guide now drives.
+            await run_compile_in_browser(path, browser, SelectScrollMockReasoner())
 
             # --- guide ---
             out = tmp_path / "select-scroll.pdf"
@@ -275,10 +275,7 @@ async def test_guide_select_actually_executes_and_unlocks_next_step(tmp_path):
         browser = await pw.chromium.launch(headless=True)
         try:
             # --- compile (offline reasoner, no LLM) ---
-            page = await browser.new_page()
-            reasoner = SelectRevealMockReasoner()
-            await run_compile(path, page, reasoner, selects=None)
-            await page.context.close()
+            await run_compile_in_browser(path, browser, SelectRevealMockReasoner())
 
             # --- guide ---
             out = tmp_path / "select-reveal.pdf"
@@ -319,6 +316,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
     from guidebot_recorder.recorder.recorder import Recorder
     from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
     from guidebot_recorder.scenario.loader import load_scenario
+    from guidebot_recorder.selects import install_selects
 
     url = SELECT_SCROLL_FIXTURE.resolve().as_uri()
     path = tmp_path / "select-scroll-direct.scenario.yaml"
@@ -328,10 +326,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
         browser = await pw.chromium.launch(headless=True)
         try:
             # --- compile (offline reasoner, no LLM) ---
-            compile_page = await browser.new_page()
-            reasoner = SelectScrollMockReasoner()
-            await run_compile(path, compile_page, reasoner, selects=None)
-            await compile_page.context.close()
+            await run_compile_in_browser(path, browser, SelectScrollMockReasoner())
 
             # --- guide's own context/overlay/Recorder recipe, driven directly ---
             scenario = load_scenario(path, None)
@@ -345,12 +340,19 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
             try:
                 overlay = Overlay(cfg.cursor, cfg.viewport)
                 await overlay.install_context(context)
+                selects = await install_selects(context, cfg)
                 page = await context.new_page()
                 page.set_default_timeout(10.0 * 1000)
                 recorder = Recorder(page, overlay, frame=None, type_delay_ms=None)
 
                 pages = await capture_pages(
-                    scenario, compiled, page, recorder, tmp_path / "shots", timeout=10.0
+                    scenario,
+                    compiled,
+                    page,
+                    recorder,
+                    tmp_path / "shots",
+                    timeout=10.0,
+                    selects=selects,
                 )
 
                 scroll_y = await page.evaluate("window.scrollY")

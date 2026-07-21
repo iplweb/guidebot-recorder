@@ -556,9 +556,12 @@ ekran. Żeby mimo to pokazać wybór na filmie, Guidebot wstrzykuje nakładkę D
 (`config.selects`, opisana niżej), która zamienia surową kontrolkę na widżet z listą
 naprawdę rozwijaną w dół, w DOM-ie. Podczas `render` kursor dojeżdża do kontrolki i
 klika ją, lista się rozwija, kursor dojeżdża do wybranego wiersza i klika go — dwa
-widoczne gesty zamiast niewidocznej zmiany wartości. Podczas `compile` wartość
-ustawiana jest wprost, bez animacji — kompilacja ma być szybka, nie efektowna. Tak
-czy inaczej element kończy na `option`, więc kolejne kroki i render są zgodne.
+widoczne gesty zamiast niewidocznej zmiany wartości. `guide` wykonuje te same dwa
+gesty i robi kadr do PDF **pomiędzy** nimi — przy rozwiniętej liście, z zakreślonym
+wierszem opcji — więc drukowany przewodnik pokazuje listę tak samo jak film. Podczas
+`compile` wartość ustawiana jest wprost, bez animacji — kompilacja ma być szybka,
+nie efektowna. Tak czy inaczej element kończy na `option`, więc kolejne kroki
+i render są zgodne.
 
 **Widżety, które strona sama już ulepszyła, są celowo pozostawiane bez zmian.**
 Jeśli aplikacja docelowa podmienia swój `<select>` na własny dropdown — select2,

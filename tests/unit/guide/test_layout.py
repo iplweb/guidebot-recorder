@@ -66,6 +66,34 @@ def test_stylesheet_defines_the_star_and_frame_rules():
     assert ".frame {" in html
 
 
+def test_a_select_steps_marks_render_through_the_one_shared_arrowhead():
+    """A `select:` page inherits the shrunken arrowhead instead of its own copy.
+
+    The head is defined once, in `_ARROW_MARKER`, and every `.arrow` picks it up
+    from a single `marker-end` rule — so shrinking it (markerWidth 10 -> 6, i.e.
+    ~40 px down to ~24 once `stroke-width: 4` scales it) reached the select
+    step's arrow to the option row for free. Pinned so a later select-specific
+    marker, or a regrown one, is caught: the stub it was drawing is worst exactly
+    on the short row-to-row hops a select produces.
+    """
+
+    pages = [
+        _shot_page(
+            [
+                Annotation(kind="arrow", x1=10.0, y1=10.0, x2=200.0, y2=300.0),
+                Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0),
+                Annotation(kind="click", cx=100.0, cy=200.0, r_inner=16.0, r_outer=30.0),
+            ]
+        )
+    ]
+    html = render_html(pages, title="x")
+
+    assert html.count("<marker") == 1  # one definition, not one per action
+    assert 'markerWidth="6"' in html
+    assert "marker-end: url(#ah);" in html
+    assert '<line class="arrow" x1="10.0" y1="10.0" x2="200.0" y2="300.0"/>' in html
+
+
 def test_text_page_has_no_svg():
     pages = [
         GuidePage(kind="text", screenshot=None, text="tylko tekst", heading=None, annotations=[])

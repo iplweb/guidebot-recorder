@@ -17,6 +17,7 @@ from guidebot_recorder.recorder._debug import scenario_sensitive_values
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.selects import install_selects
 
 
 async def run_guide(
@@ -69,6 +70,11 @@ async def run_guide(
     # run_render): chrome.js shadows window.top, and cursor.js relies on the
     # real one to decide whether to mount inside the site iframe.
     await overlay.install_context(context)
+    # The DOM select shim, through the same funnel compile, render and setup
+    # replay use — a `select:` page is worth reading only if the frame shows the
+    # list unfurled, and that list is DOM only because this script is here.
+    # `None` under `selects.mode: native`, which keeps the page's own control.
+    selects = await install_selects(context, cfg)
     chrome = Chrome(cfg.chrome, bare_popups=cfg.popup.is_bare) if cfg.chrome.enabled else None
     if chrome is not None:
         await chrome.install_context(context)
@@ -97,6 +103,7 @@ async def run_guide(
             verbose=verbose,
             pause_on_error=pause_on_error,
             sensitive_values=sensitive_values,
+            selects=selects,
         )
     finally:
         await context.close()

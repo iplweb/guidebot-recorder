@@ -1,8 +1,9 @@
 # Tworzenie przewodników PDF krok po kroku
 
 Guidebot potrafi wyrenderować skompilowany scenariusz jako krajobrazowy przewodnik PDF — jeden
-anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża kadr w momencie
-zakończenia interaktywnego kroku i nakłada na niego adnotacje: strzałkę ruchu kursora, ramkę
+anotowany krok na stronę, obok tekstu narracji. Każda strona przewodnika zamraża ten kadr, który
+najlepiej tłumaczy dany krok — dla większości akcji moment jej zakończenia, dla `select` moment,
+w którym lista opcji jest rozwinięta — i nakłada na niego adnotacje: strzałkę ruchu kursora, ramkę
 wokół celu akcji, gwiazdkę w miejscu kliknięcia i elipsę zakreślenia.
 
 Ta funkcja nie wymaga LLM ani dodatkowych zależności poza skompilowanym sidecarem.
@@ -30,6 +31,8 @@ TTS ani wideo.
 Jeden przewodnik PDF zawiera jedną lub więcej stron:
 
 - **Interaktywny krok (click, hover, type)** — Anotowany zrzut ekranu (lewo), tekst narracji (prawo).
+- **Krok z listą rozwijaną (`select`)** — Ten sam układ, ale kadr jest robiony **przy rozwiniętej
+  liście opcji**. Patrz [Listy rozwijane](#listy-rozwijane-select).
 - **Nawigacja** — Strona z tekstem „Otwórz adres:" i adresem URL (kroki `navigate`).
 - **Plansza podziału** — Karta w stylu slajdu wstawiona jako przerwa wizualna (kroki `slide`).
 - **Bramy wait/when** — Bez strony. Warunkowe czekania i tło nie produkują wyjścia.
@@ -48,6 +51,51 @@ Zrzuty ekranu są nakładane adnotacjami:
 - **Elipsa** — Zakreślenie z kroku `highlight`, w kolorze ustawionym w scenariuszu.
   Zamiast okrężnego ruchu kursora, który widać w filmie, przewodnik pokazuje samą
   gotową elipsę wokół wskazanego elementu lub obszaru.
+
+## Listy rozwijane (`select`)
+
+Strona kroku `select` jest fotografowana **w trakcie interakcji**: lista opcji jest rozwinięta,
+a wybierana opcja jest oznaczona gwiazdką tak samo jak cel kroku `click`. To jedyna akcja, której
+znaki rozkładają się na dwa prostokąty:
+
+- **gwiazdka** na wierszu opcji — to, co czytelnik ma kliknąć, rysowana dokładnie jak na stronie
+  kroku `click`;
+- **czerwona ramka** wokół samej kontrolki, żeby było widać, w którym polu jesteśmy;
+- **strzałka** kończąca się na krawędzi wiersza opcji, a nie kontrolki.
+
+Strzałka kolejnego kroku zaczyna się od tego wiersza — tam, gdzie zostało oko czytelnika.
+
+W trybie `mode: native` (poniżej) nie ma wiersza, więc strona kroku `select` jest oznaczona jak
+każda inna akcja z ramką: strzałka do ramki kontrolki i sama ramka, bez gwiazdki — nic widocznego
+nie jest klikane.
+
+Działa to dlatego, że Guidebot wstrzykuje nakładkę DOM zastępującą natywną listę opcji (tę samą,
+która pokazuje listy rozwijane na filmach z `render`) — listę natywnego `<select>` rysuje system
+operacyjny i żadne narzędzie do automatyzacji przeglądarki nie potrafi jej zrzucić. Strony, które
+ulepszają swoje selecty same (select2, Tom Select, Chosen), mają już listę w DOM i przewodnik
+steruje właśnie nią.
+
+`config.selects.mode: native`, albo `mode: native` na pojedynczym kroku, wyłącza nakładkę: kursor
+nadal dojeżdża do kontrolki, wartość nadal zostaje wybrana, ale kadr pokazuje zwiniętą kontrolkę,
+a strona niesie tylko czerwoną ramkę — nie ma czego rozwijać. Użyj tego dla widżetu, którego
+przewodnik nie potrafi obsłużyć; komunikat błędu mówi wprost, o którą sytuację chodzi, i podaje
+nazwę szukanej opcji.
+
+Obie opcje są opisane w [referencji scenariusza](scenario-reference.md).
+
+Krok z `optional: true` jest pomijany, gdy lista **nie zawiera** szukanej opcji — to
+jedyna sytuacja, w której ciche pominięcie jest poprawne, bo dokładnie o tym mówi
+`optional`. Każda inna porażka listy rozwijanej (kliknięcie, które nie zmieniło wyboru;
+widżet, którego nie da się rozwinąć; nakładka zdjęta w trakcie kroku) zatrzymuje
+przewodnik także dla kroku opcjonalnego — inaczej strona zniknęłaby po cichu z PDF-a,
+a usterka została na stronie.
+
+Dwa przypadki warto wymienić wprost, bo bywają brane za „brak opcji", a nim nie są.
+Opcja `disabled` **jest** na liście — strona po prostu jej nie przyjmuje — więc krok
+`optional: true` zatrzyma się na niej, zamiast ją pominąć; inaczej przewodnik po cichu
+przestałby pokazywać kontrolkę, którą strona celowo zablokowała. Tak samo lista
+`multiple` / `size > 1`, która nie ma na stronie żadnego rozmiaru: o jej opcjach nie
+dowiedzieliśmy się wtedy niczego, a szukana może tam być.
 
 ## Tekst narracji: `say`, `teach` lub `caption`
 
@@ -100,10 +148,6 @@ Funkcja przewodnika ma następujący zakres:
 - **Brak grupowania wieloetapowego** — Kroki są renderowane indywidualnie. Przyszłe wersje mogą
   pozwolić na wizualne grupowanie sekwencji kroków lub numerowanie (np. „Krok 1 z 5").
 - **Brak dostosowania layoutu PDF** — Marginesy, czcionki, kolory i wymiary strony są ustalone.
-- **`select` bez podglądu rozwiniętej listy** — Krok `select` faktycznie wybiera opcję, a strona
-  PDF pokazuje zrzut zrobiony **po** wyborze. Natywna lista opcji `<select>` jest rysowana przez
-  system operacyjny, więc żadne narzędzie do automatyzacji przeglądarki nie potrafi jej zrzucić —
-  przewodnik pokazuje zwiniętą kontrolkę z już ustawioną wartością, nigdy rozwiniętą listę.
 - **`scroll` własną stronę produkuje tylko z tekstem** — Krok `scroll` zawsze faktycznie przewija
   stronę (zrzuty są robione z widocznego obszaru viewportu, więc przewinięcie jest konieczne, by
   kolejne kroki pokazywały właściwy fragment), ale własną stronę PDF tworzy tylko wtedy, gdy niesie

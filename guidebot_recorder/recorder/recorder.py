@@ -9,7 +9,7 @@ The overlay is optional — the `compile` phase needs no animation, so it can us
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import NamedTuple
 
 from playwright.async_api import ElementHandle, Frame, Locator, Page
@@ -34,6 +34,25 @@ _WAIT_STATE: dict[str, str] = {"visible": "visible", "hidden": "hidden", "enable
 #: it), but bounded: a list that never appears must fail, not hang.
 OPTION_WAIT_MS = 5000
 
+#: :attr:`SelectDriveError.reason` — the control does not offer that option.
+#:
+#: The one cause a caller may legitimately answer with something other than
+#: "fail": an ``optional: true`` step means "do this if it is on offer", and a
+#: dropdown that no longer lists the label is exactly the absence that clause
+#: describes. It is the same verdict ``validate.reuse_failure`` reports as
+#: ``option_missing`` for a step it *does* get to preflight — an optional step
+#: skips that preflight, so the miss can only surface from the drive itself.
+OPTION_MISSING = "option_missing"
+
+#: :attr:`SelectDriveError.reason` — anything else, and therefore a failure.
+#:
+#: Deliberately the default, so a raise site that says nothing is loud: a click
+#: that did not take, a widget with nothing to unfurl, a shim taken off the
+#: select mid-step and a row the page never rendered are all *broken steps*,
+#: and a caller that quietly skipped them would hide the very failures this
+#: choreography exists to surface.
+UNDRIVABLE = "undrivable"
+
 
 class SelectDriveError(RuntimeError):
     """A ``select:`` step could not be performed *visibly*.
@@ -50,10 +69,25 @@ class SelectDriveError(RuntimeError):
     remove, and would do it unobservably — the run would succeed and only a
     viewer would ever discover the step is unwatchable.
 
+    ``reason`` splits "this control does not offer that option"
+    (:data:`OPTION_MISSING`) from every other way the step can fail
+    (:data:`UNDRIVABLE`). The split exists because those two answer the
+    ``optional: true`` question differently and nothing else does: a label that
+    is not on the list is the absence an optional step is allowed to shrug off,
+    while a click that did not take, an undrivable widget, a shim removed
+    mid-step and a row that never appeared all mean the step is broken however
+    the author marked it. It is a machine-readable field rather than a message
+    substring for the obvious reason — the messages are Polish prose written to
+    be rewritten.
+
     The render layer catches this and re-raises it as a ``RenderError`` carrying
     the index of the failing step. ``RenderError`` lives in ``render.py``, which
     imports this module, so it cannot be raised from here without a cycle.
     """
+
+    def __init__(self, message: str, *, reason: str = UNDRIVABLE) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 #: (el) => {installed, shimmed, listbox, hidden, markerClass} — how this select
@@ -116,20 +150,22 @@ _OPTION_INDEX_JS = """(el, label) => {
   return -1;
 }"""
 
-#: (el, label) => boolean | null — whether the ``<option>`` carrying ``label``
-#: is ``disabled``, using the same label rule as ``_OPTION_INDEX_JS``.
+#: (el, label) => {index, disabled} — everything "can this option be chosen?"
+#: needs, in one round trip.
 #:
-#: ``null`` when no option matches ``label`` at all: that is a different
-#: failure (an absent option), and is left to ``Locator.select_option`` to
-#: report on its own terms, exactly as it already does today.
-_OPTION_DISABLED_JS = """(el, label) => {
-  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
-  const wanted = norm(label);
-  for (const opt of el.options) {
-    if (norm(opt.label) === wanted) return opt.disabled;
-  }
-  return null;
-}"""
+#: ``index`` is :data:`_OPTION_INDEX_JS`'s answer (``-1`` when absent); ``disabled``
+#: is that option's ``disabled`` flag, and ``false`` when there is no such option
+#: — an absent option is not a disabled one, and the two are different verdicts
+#: (see :meth:`Recorder._require_option`).
+#:
+#: Composed from :data:`_OPTION_INDEX_JS` rather than repeating its loop, the same
+#: way :data:`_SHIM_STATE_JS` embeds ``SELECT_SHAPE_JS``: the label rule is stated
+#: once, so "which option is this?" cannot come out differently depending on which
+#: of the two questions was being asked.
+_OPTION_STATE_JS = f"""(el, label) => {{
+  const index = ({_OPTION_INDEX_JS})(el, label);
+  return {{index: index, disabled: index >= 0 && el.options[index].disabled}};
+}}"""
 
 #: (el) => void — hand this select back to the browser, durably.
 #:
@@ -242,6 +278,40 @@ class PointResult(NamedTuple):
     center: tuple[float, float] | None
 
 
+class SelectReveal(NamedTuple):
+    """Where a ``select:`` step's marks belong, at the instant before the choice.
+
+    ``control_*`` is the control the viewer points at: the ``<select>`` itself
+    when the shim owns it, the page's own widget when the page took it over, the
+    listbox when it draws its own rows. ``row_*`` is the option row that is about
+    to be clicked.
+
+    ``row_*`` is ``None`` exactly when nothing was unfurled — ``mode: native``,
+    where the option list is an OS popup no screenshot can hold, or a compile run
+    with no overlay at all. A consumer reads that as "there is no row to mark".
+
+    Boxes are Playwright bounding boxes in viewport pixels — the same units
+    :meth:`Recorder.point` already hands the PDF guide.
+    """
+
+    control_box: dict | None
+    control_center: tuple[float, float] | None
+    row_box: dict | None = None
+    row_center: tuple[float, float] | None = None
+
+
+#: Awaited by :meth:`Recorder.select` while the option list is open.
+RevealHook = Callable[[SelectReveal], Awaitable[None]]
+
+
+def _center_of(box: dict | None) -> tuple[float, float] | None:
+    """Centre of a Playwright bounding box, or ``None`` when there is no box."""
+
+    if box is None:
+        return None
+    return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+
 class Recorder:
     def __init__(
         self,
@@ -314,10 +384,9 @@ class Recorder:
         rippled = False
         if self.overlay is not None:
             box = await control.bounding_box()
-            if box is not None:
-                cx = box["x"] + box["width"] / 2
-                cy = box["y"] + box["height"] / 2
-                center = (cx, cy)
+            center = _center_of(box)
+            if center is not None:
+                cx, cy = center
                 await self.overlay.move_to(self.page, cx, cy)
                 if ripple:
                     await self.overlay.ripple(self.page, flash=click_sound)
@@ -416,7 +485,15 @@ class Recorder:
         if needs_fix:
             await locator.fill(text)
 
-    async def select(self, target: Target, option: str, *, native: bool = False) -> None:
+    async def select(
+        self,
+        target: Target,
+        option: str,
+        *,
+        native: bool = False,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """Choose ``option`` (a visible label) from a ``<select>``, on camera.
 
         A native select draws its option list as an OS popup, which the
@@ -447,6 +524,16 @@ class Recorder:
                 that one control back to the browser (see :data:`_PIN_NATIVE_JS`)
                 — otherwise the cursor would be landing on a widget the hatch
                 just opted out of.
+            ripple: draw the click ring (and its flash) when the cursor lands.
+                The PDF guide turns it off: a still capture wants a clean frame,
+                and the ring would be frozen mid-animation in it.
+            on_revealed: awaited **exactly once, immediately before the click (or
+                ``select_option``) that commits the choice**, on every path. That
+                instant is the only one at which the list is open, the cursor is
+                on the option row and nothing has been chosen yet — which is
+                precisely the frame the PDF guide has to keep. It is handed a
+                :class:`SelectReveal`; a hook that raises aborts the step with
+                the choice not made.
 
         Without an overlay (compile) the value is set directly and nothing is
         animated — compilation is meant to be fast, not pretty — but an enhanced
@@ -455,7 +542,13 @@ class Recorder:
         is narrower than "drivable"; see its docstring for what it cannot see.
 
         Raises:
-            SelectDriveError: nothing visible could be clicked for this select.
+            SelectDriveError: nothing visible could be clicked for this select,
+                the option is ``disabled``, or the option is not on offer —
+                :attr:`SelectDriveError.reason` tells the last of those apart
+                from the rest on every path, direct ones included. The two
+                listless paths ask :meth:`_require_option` before they call
+                ``select_option``, so neither refusal costs a step timeout and
+                surfaces as a raw Playwright error.
             SelectsNotReadyError: the widget is installed in this frame but its
                 first classification pass never finished (see
                 :data:`READY_WAIT_MS`).
@@ -470,14 +563,9 @@ class Recorder:
                 await self._pin_native(locator)
             else:
                 await self._probe_drivable(locator, option)
-            # A select the page enhanced itself is routinely `display: none`
-            # (Tom Select), which Playwright's actionability check would sit out
-            # until it times out. Skipping the check for exactly those is what
-            # makes spec §6's validation relaxation usable: without it a hidden
-            # select would validate and then fail to compile.
-            visible = await locator.is_visible()
-            await self._reject_disabled_option(locator, option)
-            await locator.select_option(label=option, force=not visible)
+            await self._require_option(locator, option)
+            await self._reveal(on_revealed, SelectReveal(None, None))
+            await self._set_option_directly(locator, option)
             return
         if native:
             locator = await build_locator(self.frame, target)
@@ -485,10 +573,16 @@ class Recorder:
             # must be gone before this control is on camera, or the ripple would
             # land on a widget that vanishes out from under it.
             await self._pin_native(locator)
-            await self._approach(locator, click_sound=True)
-            visible = await locator.is_visible()
-            await self._reject_disabled_option(locator, option)
-            await locator.select_option(label=option, force=not visible)
+            # Before the cursor sets off, too: neither an option this select does
+            # not carry nor a `disabled` one can be chosen, and neither should
+            # first cost a glide and a ripple towards a choice that cannot be
+            # made.
+            await self._require_option(locator, option)
+            box, center = await self._approach(locator, ripple=ripple, click_sound=True)
+            # No row geometry: `native` never unfurls anything, so a still
+            # capture can only show the collapsed control.
+            await self._reveal(on_revealed, SelectReveal(box, center))
+            await self._set_option_directly(locator, option)
             return
         locator = await build_locator(self.frame, target)
         # Which of the three shapes this is, read from the DOM once and passed
@@ -497,9 +591,20 @@ class Recorder:
         # own single-beat path rather than an association heuristic to run.
         state = await locator.evaluate(_SHIM_STATE_JS)
         if state["listbox"]:
-            await self._select_in_listbox(locator, state, option)
+            await self._select_in_listbox(
+                locator, state, option, ripple=ripple, on_revealed=on_revealed
+            )
             return
-        await self._select_in_two_beats(locator, state, option)
+        await self._select_in_two_beats(
+            locator, state, option, ripple=ripple, on_revealed=on_revealed
+        )
+
+    @staticmethod
+    async def _reveal(hook: RevealHook | None, reveal: SelectReveal) -> None:
+        """Hand the caller the open list's geometry, before anything is chosen."""
+
+        if hook is not None:
+            await hook(reveal)
 
     async def _await_selects_ready(self) -> None:
         """Wait until this frame owes no classification pass — but not forever.
@@ -579,7 +684,9 @@ class Recorder:
         clicked an unrelated sibling on camera and then blamed the option.
         """
 
-        tail = f'nie da się pokazać na filmie wyboru opcji „{option}"'
+        # Medium-neutral wording: the PDF guide raises these too, and a message
+        # about "the film" reaches an author who asked for a document.
+        tail = f'nie da się pokazać rozwiniętej listy z opcją „{option}"'
         described = await self._describe(locator)
         if state["hidden"]:
             return SelectDriveError(
@@ -606,7 +713,110 @@ class Recorder:
             f"(użyj `mode: native`, jeśli sam wybór wystarczy)"
         )
 
+    async def diagnose_select(self, target: Target, option: str) -> SelectDriveError:
+        """Why this ``<select>`` cannot be revealed, phrased for the author.
+
+        The public face of :meth:`_no_control_error`, for a caller that has
+        already learned *that* a select is undrivable from somewhere else and now
+        wants the situation named. The PDF guide's preflight is that caller: its
+        reuse check answers ``not_visible``, which for a ``select`` action has
+        exactly one cause — ``validate_compile_time``'s select arm reaches it
+        only through ``user_visible_control() is None`` — but says so in a
+        sentence shared with ``click``, ``hover`` and ``type``. Rather than
+        write a second wording for the guide, it asks here and raises what the
+        render would have raised.
+
+        Returns the error rather than raising it so the caller can wrap it in
+        its own step banner (`plik:linia` plus the YAML fragment) without having
+        to catch what it just constructed.
+        """
+
+        locator = await build_locator(self.frame, target)
+        state = await locator.evaluate(_SHIM_STATE_JS)
+        return await self._no_control_error(locator, option, state)
+
+    async def _option_missing_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """This ``<select>`` does not carry that label — the one skippable cause.
+
+        The only refusal a caller is allowed to answer with anything other than
+        "fail" (see :data:`OPTION_MISSING`), so it is built in one place and
+        every path that can establish the fact routes through here — including
+        the two direct ones, which would otherwise leave the miss to
+        ``select_option``'s actionability timeout and report it as a Playwright
+        error nobody can classify.
+        """
+
+        return SelectDriveError(
+            f'lista {await self._describe(locator)} nie zawiera opcji „{option}"',
+            reason=OPTION_MISSING,
+        )
+
+    async def _require_option(self, locator: Locator, option: str) -> int:
+        """ "Can this option be chosen?", asked of the ``<select>`` — the only place.
+
+        Every path that consults the real control before committing goes through
+        here: compile's direct set, ``mode: native``, the natively-visible
+        listbox and the page-widget beat 2. There is exactly one guard because
+        there are exactly two ways the answer can be "no", they are asked in the
+        same breath, and a second copy of either could drift from this one — the
+        mistake this module already paid for when four definitions of "is this
+        select enhanced?" disagreed.
+
+        The two refusals are deliberately *not* interchangeable:
+
+        * no such option — :meth:`_option_missing_error`, the one refusal an
+          ``optional:`` step may answer with a skip (:data:`OPTION_MISSING`);
+        * the option exists but is ``disabled`` — :meth:`_disabled_option_error`,
+          which is :data:`UNDRIVABLE`, because the option *is* on offer and the
+          step asking for it is simply broken.
+
+        Both matter before ``Locator.select_option`` as much as before a glide.
+        Playwright raises nothing of its own for either: for a disabled option it
+        sits in "waiting for element to be visible and enabled" until the whole
+        step timeout elapses, and surfaces a raw English ``TimeoutError`` naming
+        neither the control nor the option — well after this method could have
+        said both, in Polish, and with a ``reason`` a caller can act on.
+
+        Returns the option's index, which :meth:`_select_in_listbox` needs to
+        address the row; :data:`_OPTION_INDEX_JS` (via :data:`_OPTION_STATE_JS`)
+        applies the same ``HTMLOptionElement.label`` rule Playwright's
+        ``select_option(label=…)`` matches on, so this, the row it addresses and
+        the call it guards all agree about which labels exist.
+        """
+
+        state = await locator.evaluate(_OPTION_STATE_JS, option)
+        if state["index"] < 0:
+            raise await self._option_missing_error(locator, option)
+        if state["disabled"]:
+            raise await self._disabled_option_error(locator, option)
+        return state["index"]
+
+    @staticmethod
+    async def _set_option_directly(locator: Locator, option: str) -> None:
+        """Set the value with no list involved, for a control that may be hidden.
+
+        A select the page enhanced itself is routinely ``display: none`` (Tom
+        Select), which Playwright's actionability check would sit out until it
+        times out. Skipping the check for exactly those is what makes spec §6's
+        validation relaxation usable: without it a hidden select would validate
+        and then fail to compile.
+        """
+
+        visible = await locator.is_visible()
+        await locator.select_option(label=option, force=not visible)
+
     async def _no_option_error(self, locator: Locator, option: str) -> SelectDriveError:
+        """The list unfurled but the row never turned up — cause unestablished.
+
+        Deliberately *not* :data:`OPTION_MISSING`. On the shimmed path this is
+        only reached with the option's index already in hand, so the label is
+        demonstrably there and it is the rendering that failed; on the page's own
+        widget the caller has already checked the underlying ``<select>``, so a
+        row that still does not appear means the widget did not draw it. Either
+        way the step is broken, and a caller must not shrug it off as "the option
+        was not on offer".
+        """
+
         return SelectDriveError(
             f"po rozwinięciu {await self._describe(locator)} nie pojawiła się "
             f'opcja „{option}" (limit {OPTION_WAIT_MS} ms)'
@@ -615,37 +825,25 @@ class Recorder:
     async def _disabled_option_error(self, locator: Locator, option: str) -> SelectDriveError:
         """A ``disabled`` option refuses every path this recorder can drive it by.
 
-        Shared by the shimmed-list beat 2 (:meth:`_click_shim_option`) and the
-        direct ``select_option`` paths (:meth:`select`): both end up here rather
-        than each spelling out its own wording, so a disabled option reads the
+        Built in one place and raised from two observations of the same fact:
+        :meth:`_require_option` reading the ``<select>``, and
+        :meth:`_shim_option_row` reading the row the shim rendered after beat 1
+        (where the ``<select>`` is no longer the whole truth — the shim may have
+        been taken off it mid-step). One wording, so a disabled option reads the
         same regardless of which choreography found it.
+
+        :data:`UNDRIVABLE`, emphatically not :data:`OPTION_MISSING`: the option
+        *is* there, on offer and spelled correctly — the page simply refuses it.
+        An ``optional:`` step means "do this if it is offered", so it must fail
+        here rather than shrug, or a scenario would silently stop exercising a
+        control the page deliberately locked.
         """
 
         return SelectDriveError(
             f'opcja „{option}" na liście {await self._describe(locator)} jest '
-            f"wyłączona (`disabled`) — nie da się jej wybrać ani na filmie, "
-            f"ani bezpośrednio"
+            f"wyłączona (`disabled`) — nie da się jej wybrać ani z rozwiniętej "
+            f"listy, ani bezpośrednio"
         )
-
-    async def _reject_disabled_option(self, locator: Locator, option: str) -> None:
-        """Fail before ``Locator.select_option``'s actionability wait, not after it.
-
-        ``select_option`` retries "waiting for element to be visible and
-        enabled" until the full step timeout elapses when the wanted option is
-        ``disabled`` — Playwright never raises anything of its own for this,
-        it just exhausts the clock. Left unchecked, that surfaces as a raw,
-        English ``playwright.TimeoutError`` with no call log clue about *which*
-        option or control was the problem, well after this method could have
-        already said so.
-
-        Silent when no option matches ``option`` at all: that is a different,
-        pre-existing failure (an absent option), and is left to
-        ``select_option`` to report on its own terms, unchanged.
-        """
-
-        disabled = await locator.evaluate(_OPTION_DISABLED_JS, option)
-        if disabled:
-            raise await self._disabled_option_error(locator, option)
 
     async def _unshimmed_mid_step_error(self, locator: Locator, option: str) -> SelectDriveError:
         """Beat 1 opened our list; by beat 2 the shim was no longer on this select.
@@ -754,7 +952,41 @@ class Recorder:
             return
         raise await self._no_control_error(locator, option, state)
 
-    async def _select_in_listbox(self, locator: Locator, state: dict, option: str) -> None:
+    async def _commit_option(
+        self,
+        select: Locator,
+        row: Locator | ElementHandle,
+        option: str,
+        *,
+        ripple: bool,
+        on_revealed: RevealHook | None,
+        control_box: dict | None,
+        control_center: tuple[float, float] | None,
+    ) -> None:
+        """The tail all three on-camera paths share: land on the row, then choose.
+
+        Written once because the order inside it is load-bearing and the three
+        paths must not be free to disagree about it: the cursor arrives, the
+        caller gets its one look at the open list, and only then does the click
+        that closes the list and changes the value happen. Reading the select
+        back afterwards is what turns a click that landed on nothing into a
+        failure instead of a quietly wrong recording.
+        """
+
+        box, center = await self._approach(row, ripple=ripple, click_sound=True)
+        await self._reveal(on_revealed, SelectReveal(control_box, control_center, box, center))
+        await row.click()
+        await self._confirm_selected(select, option)
+
+    async def _select_in_listbox(
+        self,
+        locator: Locator,
+        state: dict,
+        option: str,
+        *,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """One visible beat for a select that renders its own in-page listbox.
 
         ``multiple`` and ``size > 1`` are the shim's documented non-goal — they
@@ -785,15 +1017,20 @@ class Recorder:
 
         if state["hidden"]:
             raise await self._hidden_listbox_error(locator, option)
-        index = await locator.evaluate(_OPTION_INDEX_JS, option)
-        if index < 0:
-            raise SelectDriveError(
-                f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
-            )
+        index = await self._require_option(locator, option)
         row = locator.locator("option").nth(index)
-        await self._approach(row, click_sound=True)
-        await row.click()
-        await self._confirm_selected(locator, option)
+        # The listbox *is* the control the viewer sees, so its own box is the one
+        # a still capture frames. Reading it moves no cursor and opens nothing.
+        control_box = await locator.bounding_box()
+        await self._commit_option(
+            locator,
+            row,
+            option,
+            ripple=ripple,
+            on_revealed=on_revealed,
+            control_box=control_box,
+            control_center=_center_of(control_box),
+        )
 
     async def _hidden_listbox_error(self, locator: Locator, option: str) -> SelectDriveError:
         """The listbox itself has no box — nothing stands in for it to click instead.
@@ -805,9 +1042,18 @@ class Recorder:
         a native ``<select>`` would be exactly as hidden, so ``mode: native``
         would not help here either. Same reasoning, same omission, as
         :meth:`_no_control_error`'s ``hidden`` branch.
+
+        :data:`UNDRIVABLE`, and never :data:`OPTION_MISSING`: nothing here says
+        anything about which options the control offers — the option list was
+        never even reached. An ``optional:`` step must fail on a control an
+        earlier step hid or a stale compile left behind, exactly as a mandatory
+        one does.
         """
 
-        tail = f'nie da się pokazać na filmie wyboru opcji „{option}"'
+        # Medium-neutral wording, like `_no_control_error`'s: the PDF guide
+        # reaches this too, and "on the film" would reach an author who asked
+        # for a document.
+        tail = f'nie da się pokazać wyboru opcji „{option}"'
         return SelectDriveError(
             f"{await self._describe(locator)} nie ma żadnego rozmiaru na stronie "
             f"(element ukryty albo bez layoutu) — {tail}. Sprawdź, czy "
@@ -816,7 +1062,15 @@ class Recorder:
             f"`compile --force`"
         )
 
-    async def _select_in_two_beats(self, locator: Locator, state: dict, option: str) -> None:
+    async def _select_in_two_beats(
+        self,
+        locator: Locator,
+        state: dict,
+        option: str,
+        *,
+        ripple: bool = True,
+        on_revealed: RevealHook | None = None,
+    ) -> None:
         """Open the list, then click the option — both with the cursor visible."""
 
         control: Locator | ElementHandle
@@ -839,15 +1093,32 @@ class Recorder:
             # it.
             await self.frame.evaluate(_SNAPSHOT_JS)
 
-            await self._approach(control, click_sound=True)  # beat 1
+            control_box, control_center = await self._approach(  # beat 1
+                control, ripple=ripple, click_sound=True
+            )
             await control.click()
             await self.page.wait_for_timeout(self.open_hold_ms)
 
+            row: Locator | ElementHandle
             if state["shimmed"]:  # beat 2
-                await self._click_shim_option(locator, option)
+                row = await self._shim_option_row(locator, option)
             else:
-                await self._click_appeared_option(locator, option)
-            await self._confirm_selected(locator, option)
+                row = await self._appeared_option_row(locator, option)
+            try:
+                await self._commit_option(
+                    locator,
+                    row,
+                    option,
+                    ripple=ripple,
+                    on_revealed=on_revealed,
+                    control_box=control_box,
+                    control_center=control_center,
+                )
+            finally:
+                # A handle on the page-widget path; a `Locator` on the shimmed
+                # one, which owns nothing to release.
+                if isinstance(row, ElementHandle):
+                    await row.dispose()
         finally:
             # `control` is a `Locator` on the shimmed path (nothing to release)
             # and a handle on the page-widget one, which this frame owns from
@@ -866,8 +1137,25 @@ class Recorder:
             raise await self._no_control_error(locator, option, state)
         return control
 
-    async def _click_shim_option(self, locator: Locator, option: str) -> None:
-        """Beat 2 for a shimmed select: click the row the shim rendered."""
+    async def _shim_option_row(self, locator: Locator, option: str) -> Locator:
+        """Beat 2 for a shimmed select: the row the shim rendered, ready to click.
+
+        Everything that has to be true *before* the cursor sets off happens here
+        — the row exists, is visible, is not ``disabled``, and the list has been
+        scrolled to it — and nothing that changes the page's state does. Handing
+        the row back rather than clicking it is what lets the PDF guide take its
+        frame in between; the click itself is :meth:`_commit_option`'s.
+
+        The one path that does *not* ask :meth:`_require_option`, and the reason
+        is specific: by beat 2 the ``<select>`` is no longer the whole truth. The
+        shim may have been taken off it while the list was opening, and what the
+        cursor is about to land on is the shim's rendered row, so both questions
+        have to be put to the rendered list. The *verdicts* are still the shared
+        ones — :meth:`_option_missing_error` and :meth:`_disabled_option_error` —
+        so a caller sees the same message and the same
+        :attr:`SelectDriveError.reason` here as anywhere else; only the thing
+        being looked at differs.
+        """
 
         # Read both *after* beat 1: the observer may have unshimmed and
         # reclassified the select while the list was opening (late select2
@@ -883,9 +1171,7 @@ class Recorder:
         if uid is None:
             raise await self._unshimmed_mid_step_error(locator, option)
         if index is None or index < 0:
-            raise SelectDriveError(
-                f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
-            )
+            raise await self._option_missing_error(locator, option)
         # uid-scoped: the bare index attribute matches every shimmed select on the
         # page, which is a Playwright strict-mode violation.
         row = self.frame.locator(
@@ -908,25 +1194,34 @@ class Recorder:
         await locator.evaluate(
             "(el, i) => window.__guidebot_selects.scrollOptionIntoView(el, i)", index
         )
-        await self._approach(row, click_sound=True)
-        await row.click()
+        return row
 
-    async def _click_appeared_option(self, locator: Locator, option: str) -> None:
-        """Beat 2 for a page's own widget: click the row it just rendered.
+    async def _appeared_option_row(self, locator: Locator, option: str) -> ElementHandle:
+        """Beat 2 for a page's own widget: the row it just rendered.
 
         "The row it just rendered" is defined entirely by the snapshot taken
         before beat 1, so a missing snapshot is not a degraded search — it is no
         search at all, and must be said out loud rather than answered with the
         first node on the page that happens to carry the label.
+
+        The underlying ``<select>`` is consulted before the wait, via the shared
+        :meth:`_require_option`, because it is the only thing here that can tell
+        "the option is not on offer" from "the widget did not draw a row", and
+        those two want different answers from a caller (:data:`OPTION_MISSING`).
+        A page widget keeps the original's ``<option>`` elements — that is what
+        it submits — so the same question ``validate.reuse_failure`` asks at
+        preflight is answerable here, ``disabled`` included. It also saves
+        waiting :data:`OPTION_WAIT_MS` for a row that could not exist.
         """
 
         if not await self.frame.evaluate(_HAS_SNAPSHOT_JS):
             raise SelectDriveError(
                 f"stan sprzed rozwinięcia listy {await self._describe(locator)} zniknął "
                 f"— dokument został podmieniony w trakcie kroku, więc nie da się odróżnić "
-                f"świeżo narysowanych opcji od reszty strony; nie da się pokazać na "
-                f'filmie wyboru opcji „{option}"'
+                f"świeżo narysowanych opcji od reszty strony; nie da się pokazać "
+                f'rozwiniętej listy z opcją „{option}"'
             )
+        await self._require_option(locator, option)
         try:
             handle = await self.frame.wait_for_function(
                 _APPEARED_NODE_JS, arg=option, timeout=OPTION_WAIT_MS
@@ -937,10 +1232,9 @@ class Recorder:
         if row is None:
             await handle.dispose()
             raise await self._no_option_error(locator, option)
-        # ``_approach`` scrolls the row into view on both axes, which is what
-        # scrolls an internally-scrolling widget list to it.
-        await self._approach(row, click_sound=True)
-        await row.click()
+        # ``_commit_option``'s approach scrolls the row into view on both axes,
+        # which is what scrolls an internally-scrolling widget list to it.
+        return row
 
     async def highlight(self, target: Target, spec: ResolvedHighlight) -> None:
         """Lap an ellipse around the target, leaving a marker trail — touching nothing.

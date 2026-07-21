@@ -8,6 +8,7 @@ from guidebot_recorder.guide.annotate import (
     CLICK_INNER,
     CLICK_OUTER,
     annotations_for,
+    cursor_shape,
     target_shape,
 )
 from guidebot_recorder.guide.geometry import Rect
@@ -62,6 +63,87 @@ def test_missing_box_omits_rect_marks():
     assert anns == []
 
 
+# --- `select`, whose marks are split across two boxes ------------------------
+# The option row is a box of its own, and the step means two things at once:
+# *this is the field* (the control) and *this is the row to click*. So it is the
+# one action whose frame, star and arrow do not all land on the same rectangle.
+
+ROW = {"x": 12.0, "y": 70.0, "width": 96.0, "height": 26.0}
+ROW_CENTER = (60.0, 83.0)
+
+
+def test_select_without_a_row_is_marked_like_any_other_framed_action():
+    """`mode: native` unfurls nothing, so there is no row to send anyone to.
+
+    And no star either: the star means "the mouse clicks here", and under
+    `native` nothing visible is clicked — the value is simply set.
+    """
+
+    anns = annotations_for("select", prev_cursor=(5.0, 5.0), center=CENTER, box=BOX)
+
+    assert set(_kinds(anns)) == {"arrow", "frame"}
+    frame = next(a for a in anns if a.kind == "frame")
+    assert (frame.x, frame.y, frame.w, frame.h) == (10.0, 20.0, 100.0, 40.0)
+
+
+def test_select_with_an_open_list_stars_the_row_and_frames_the_control():
+    anns = annotations_for(
+        "select", prev_cursor=(5.0, 5.0), center=CENTER, box=BOX, row_box=ROW, row_center=ROW_CENTER
+    )
+
+    assert set(_kinds(anns)) == {"arrow", "frame", "click"}
+    # the star marks the option about to be clicked...
+    star = next(a for a in anns if a.kind == "click")
+    assert (star.cx, star.cy) == ROW_CENTER
+    # ...the frame stays on the control, so the field is still legible...
+    frame = next(a for a in anns if a.kind == "frame")
+    assert (frame.x, frame.y, frame.w, frame.h) == (10.0, 20.0, 100.0, 40.0)
+    # ...and the arrow stops at the *row's* rim, not the control's: coming from
+    # the top-left it enters through the row's top edge.
+    arrow = next(a for a in anns if a.kind == "arrow")
+    assert arrow.y2 == pytest.approx(ROW["y"])
+    assert ROW["x"] <= arrow.x2 <= ROW["x"] + ROW["width"]
+
+
+def test_the_row_star_is_the_same_mark_a_click_step_draws():
+    """One visual language: a starred option row and a starred button are alike.
+
+    Sizing it down to fit the row would have made it a second, quieter mark for
+    the same instruction — and a star locates its target by its centre anyway,
+    so it stays unambiguous on a row a couple of dozen pixels tall where an
+    outline would have enclosed the neighbours too.
+    """
+
+    on_row = annotations_for(
+        "select", prev_cursor=None, center=CENTER, box=BOX, row_box=ROW, row_center=ROW_CENTER
+    )
+    on_button = annotations_for("click", prev_cursor=None, center=CENTER, box=BOX)
+
+    star = next(a for a in on_row if a.kind == "click")
+    reference = next(a for a in on_button if a.kind == "click")
+    assert (star.r_inner, star.r_outer) == (reference.r_inner, reference.r_outer)
+    # ...and it points at the row it belongs to, not merely near it
+    assert ROW["x"] <= star.cx <= ROW["x"] + ROW["width"]
+    assert ROW["y"] <= star.cy <= ROW["y"] + ROW["height"]
+
+
+def test_a_boxless_control_still_marks_the_row():
+    """A `display: none` original has no box; the option row is what matters."""
+
+    anns = annotations_for(
+        "select", prev_cursor=None, center=None, box=None, row_box=ROW, row_center=ROW_CENTER
+    )
+    assert _kinds(anns) == ["click"]
+
+
+def test_the_cursor_is_left_on_the_option_row_not_on_the_control():
+    """What the *next* step's arrow starts from — the row, where the eye was left."""
+
+    assert cursor_shape("select", box=BOX, row_box=ROW) == Rect(12.0, 70.0, 96.0, 26.0)
+    # ...and with no list unfurled it falls back to the target's own shape
+    assert cursor_shape("select", box=BOX) == target_shape("select", box=BOX)
+
+
 def test_the_arrow_stops_at_the_frame_of_the_target_not_its_centre():
     anns = annotations_for("click", prev_cursor=LEFT_CENTER, center=RIGHT_CENTER, box=RIGHT_BOX)
 
@@ -102,6 +184,42 @@ def test_overlapping_targets_get_no_arrow():
     )
 
     assert "arrow" not in _kinds(anns)
+
+
+def test_a_selects_row_arrow_obeys_the_same_drop_rules_as_any_other():
+    """The row is clipped and length-checked like every other arrow target.
+
+    `cursor_shape` hands the row's `Rect` straight to `clipped_arrow`, so a
+    select inherits the shared overlap and `MIN_ARROW` rules rather than keeping
+    a select-only arrow that could go on drawing the all-head-no-shaft stub
+    those rules exist to suppress. Both branches are pinned, because a
+    select-only copy would most plausibly show up as one of them quietly not
+    applying.
+    """
+
+    row = {"x": 300.0, "y": 100.0, "width": 100.0, "height": 40.0}
+    row_center = (350.0, 120.0)
+
+    def _for_select(prev_cursor, prev_shape):
+        return annotations_for(
+            "select",
+            prev_cursor=prev_cursor,
+            prev_shape=prev_shape,
+            center=CENTER,
+            box=BOX,
+            row_box=row,
+            row_center=row_center,
+        )
+
+    overlapping = _for_select((310.0, 120.0), Rect(x=290.0, y=100.0, w=100.0, h=40.0))
+    assert "arrow" not in _kinds(overlapping)
+
+    # Near-adjacent boxes: the clip leaves 4 px of gap, under `MIN_ARROW`.
+    too_short = _for_select((250.0, 120.0), Rect(x=200.0, y=100.0, w=96.0, h=40.0))
+    assert "arrow" not in _kinds(too_short)
+
+    # ...and a real gap still gets its arrow, so neither assertion above is vacuous.
+    assert "arrow" in _kinds(_for_select((50.0, 120.0), Rect(x=0.0, y=100.0, w=100.0, h=40.0)))
 
 
 @pytest.mark.parametrize("action", ["click", "type", "hover", "select"])

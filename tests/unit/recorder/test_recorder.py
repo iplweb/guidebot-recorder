@@ -5,7 +5,7 @@ from playwright.async_api import Locator, async_playwright
 from guidebot_recorder.models.scenario import Scroll
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.recorder import OPTION_MISSING, Recorder, SelectDriveError
 
 
 @pytest.fixture
@@ -268,10 +268,43 @@ async def test_select_native_sets_value_at_once_with_overlay(page):
 
 
 async def test_select_unknown_option_raises(page):
+    """Even the listless path names the miss instead of timing out on it.
+
+    The direct set (compile, and `mode: native`) has no list to consult, so a
+    label the select does not carry used to reach `select_option` and surface as
+    a 15 s Playwright timeout in English — unclassifiable, so a caller could not
+    tell it from a control it could not drive at all. `reason` is what the PDF
+    guide's `optional:` skip reads, and it has to mean the same thing on all
+    four paths.
+    """
+
     await page.set_content(_SELECT_HTML)
     rec = Recorder(page, overlay=None)
-    with pytest.raises(PlaywrightError):
+    with pytest.raises(SelectDriveError) as exc_info:
         await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej")
+    assert exc_info.value.reason == OPTION_MISSING
+    assert "nie zawiera opcji" in str(exc_info.value)
+
+
+async def test_native_select_with_a_vanished_option_never_moves_the_cursor(page):
+    """`mode: native` refuses before the glide, not after it.
+
+    The refusal a caller may answer with a skip should not first cost an
+    approach and a ripple towards a choice that cannot be made — and on the
+    guide's path it would also mean a still frame taken of a step that is about
+    to be skipped.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_SELECT_HTML)
+    await overlay.install(page)
+    rec = Recorder(page, overlay)
+
+    with pytest.raises(SelectDriveError) as exc_info:
+        await rec.select(RoleTarget(role="combobox", name="Report"), "nie ma takiej", native=True)
+
+    assert exc_info.value.reason == OPTION_MISSING
+    assert overlay.pos == (0.0, 0.0)  # the cursor never set off
 
 
 _TALL_PAGE = "<div style='height:3000px'>tall</div>"

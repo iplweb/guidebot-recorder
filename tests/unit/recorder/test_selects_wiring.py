@@ -1,11 +1,11 @@
-"""Wiring of the DOM select shim into compile, render and setup replay (spec §1/§5).
+"""Wiring of the DOM select shim into every phase that drives pages (spec §1/§5).
 
-Three browser contexts drive scenario steps and therefore install the widget:
-``run_compile_in_browser``, the render context and ``replay_setup``. Two others
-deliberately do not — ``check_logged_in`` (a headless probe) and
-``_manual_finish`` (a human's browser) — and that omission is asserted here so a
-future "install it everywhere" refactor fails loudly instead of silently
-shimming a live operator's dropdowns.
+Four browser contexts drive scenario steps and therefore install the widget:
+``run_compile_in_browser``, the render context, ``replay_setup`` and the PDF
+guide's ``run_guide``. Two others deliberately do not — ``check_logged_in`` (a
+headless probe) and ``_manual_finish`` (a human's browser) — and that omission is
+asserted here so a future "install it everywhere" refactor fails loudly instead
+of silently shimming a live operator's dropdowns.
 
 The render context's own installation (and its before-``chrome.js`` ordering) is
 covered in ``test_render.py``, where a full render is already paid for.
@@ -23,6 +23,7 @@ from playwright.async_api import Browser, async_playwright
 from pydantic import ValidationError
 
 import guidebot_recorder.recorder.compile as compile_module
+from guidebot_recorder.guide.guide import run_guide
 from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import (
@@ -331,6 +332,36 @@ async def test_replay_setup_installs_the_shim(tmp_path: Path, browser, installs)
         await replay_setup(browser, setup, {}, timeout=5)
 
     assert len(installs) == 1
+
+
+async def test_guide_context_installs_the_shim(tmp_path: Path, browser, installs) -> None:
+    """The PDF guide photographs the DOM the render films, so it needs the same one.
+
+    Without this the guide's `select:` page shows a collapsed control that has
+    silently changed value — the exact complaint the shim exists to answer.
+    """
+
+    path = tmp_path / "wybor.scenario.yaml"
+    path.write_text(_scenario_yaml(selects_block="  selects: {settleMs: 20}\n"), encoding="utf-8")
+    await run_compile_in_browser(path, browser, _MockReasoner())
+    installs.clear()  # the compile context's own install is not what this asserts
+
+    await run_guide(path, tmp_path / "guide.pdf", browser, timeout=10.0)
+
+    assert len(installs) == 1
+
+
+async def test_guide_context_installs_nothing_in_native_mode(
+    tmp_path: Path, browser, installs
+) -> None:
+    path = tmp_path / "wybor.scenario.yaml"
+    path.write_text(_scenario_yaml(selects_block="  selects: {mode: native}\n"), encoding="utf-8")
+    await run_compile_in_browser(path, browser, _MockReasoner())
+    installs.clear()
+
+    await run_guide(path, tmp_path / "guide.pdf", browser, timeout=10.0)
+
+    assert installs == []
 
 
 async def test_check_logged_in_does_not_install_the_shim(browser, installs) -> None:
