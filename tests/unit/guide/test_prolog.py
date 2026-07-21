@@ -47,6 +47,15 @@ def test_classify_kinds():
     assert classify_step_of(Step(wait=1.5, say="czekamy")) == "text"
 
 
+def test_classify_select_is_an_action():
+    assert classify_step_of(Step(select={"from": "zakres", "option": "Zakres lat"})) == "action"
+
+
+def test_classify_scroll_is_its_own_kind_regardless_of_say():
+    assert classify_step_of(Step(scroll="down")) == "scroll"
+    assert classify_step_of(Step(scroll="down", say="Przewijamy w dół")) == "scroll"
+
+
 def test_scan_raises_on_popup():
     scen = Scenario(config=_cfg(), steps=[Step(click="opens something")])
     with pytest.raises(GuideError, match="popup"):
