@@ -61,6 +61,22 @@ _SHIM_STATE_JS = """(el) => {
   return { installed: !!api, shimmed: !!(api && api.isShimmed(el)) };
 }"""
 
+#: (el) => void — hand this select back to the browser, durably.
+#:
+#: The per-step ``mode: native`` override exists for one stubborn widget in an
+#: otherwise shimmed scenario, so under a global ``shim`` the select it names is
+#: already shimmed: the widget's capture-phase ``keydown`` handler would swallow
+#: the arrow keys of :meth:`Recorder._step_option_visibly`, leaving the value to
+#: be set by its final ``select_option`` guard — invisibly, which is the one
+#: thing an escape hatch must never be. Absent (bare context, ``mode: native``
+#: globally) this is a no-op: there is no shim to undo.
+_PIN_NATIVE_JS = """(el) => {
+  const api = window.__guidebot_selects;
+  if (api && api.pinNative) {
+    api.pinNative(el);
+  }
+}"""
+
 #: The readiness barrier of spec §3, read straight off the page.
 #:
 #: Deliberately not routed through :class:`guidebot_recorder.selects.Selects`:
@@ -259,6 +275,10 @@ class Recorder:
                 Under an overlay it keeps the pre-shim behaviour: the value is
                 *stepped* with arrow keys on the collapsed control. An escape
                 hatch must never be less visible than what shipped before.
+                Under a global ``shim`` the select it names is already shimmed,
+                so both paths first hand that one control back to the browser
+                for the rest of the run (see :data:`_PIN_NATIVE_JS`) — otherwise
+                the hatch would be driving the very widget it opted out of.
 
         Without an overlay (compile) the value is set directly and nothing is
         animated — compilation is meant to be fast, not pretty — but the
@@ -274,7 +294,9 @@ class Recorder:
         await self.frame.evaluate(_SELECTS_READY_JS)
         if self.overlay is None:
             locator = await self._point_and_prepare(target, click_sound=True)
-            if not native:
+            if native:
+                await self._pin_native(locator)
+            else:
                 await self._probe_drivable(locator, option)
             # A select the page enhanced itself is routinely `display: none`
             # (Tom Select), which Playwright's actionability check would sit out
@@ -285,10 +307,20 @@ class Recorder:
             await locator.select_option(label=option, force=not visible)
             return
         if native:
-            locator = await self._point_and_prepare(target, click_sound=True)
+            locator = await build_locator(self.frame, target)
+            # Before the cursor sets off, not after: the arrow keys below reach
+            # the browser's own control only once the shim has let go of this
+            # select, and the shim button must be gone before it is on camera.
+            await self._pin_native(locator)
+            await self._approach(locator, click_sound=True)
             await self._step_option_visibly(locator, option)
             return
         await self._select_in_two_beats(target, option)
+
+    async def _pin_native(self, locator: Locator) -> None:
+        """Drop the shim from this select and keep it off (see :data:`_PIN_NATIVE_JS`)."""
+
+        await locator.evaluate(_PIN_NATIVE_JS)
 
     async def _describe(self, control: Locator | ElementHandle) -> str:
         """A short control name for an error message (``select#woj``)."""

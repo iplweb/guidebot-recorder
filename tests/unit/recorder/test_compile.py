@@ -70,7 +70,7 @@ async def test_compile_fills_cached_action(tmp_path, page):
     path.write_text(SCENARIO, encoding="utf-8")
     reasoner = MockReasoner()
 
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     compiled = load_compiled(compiled_path(path))
     ca = compiled.actions[1]
@@ -88,11 +88,11 @@ async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     path.write_text(SCENARIO, encoding="utf-8")
 
     first = MockReasoner()
-    await run_compile(path, page, first)
+    await run_compile(path, page, first, selects=None)
     assert first.calls == 1
 
     second = MockReasoner()
-    await run_compile(path, page, second)
+    await run_compile(path, page, second, selects=None)
     assert second.calls == 0  # reuse — LLM nie wołany
 
 
@@ -111,12 +111,12 @@ async def test_recompile_reuses_cache_without_rewriting_unchanged_sidecar(
 
     monkeypatch.setattr(compile_module, "write_compiled", count_write)
 
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
     assert writes == 1  # fresh resolve checkpoint; navigate does not rewrite the sidecar
 
     writes = 0
     reasoner = MockReasoner()
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     assert reasoner.calls == 0
     assert writes == 0
@@ -150,7 +150,7 @@ async def test_fresh_resolution_is_checkpointed_before_a_later_failure(tmp_path,
             )
 
     with pytest.raises(RuntimeError, match="synthetic second-step failure"):
-        await run_compile(path, page, FailsSecondResolution())
+        await run_compile(path, page, FailsSecondResolution(), selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert compiled.actions[1] is not None
@@ -182,7 +182,7 @@ async def test_targetless_compile_still_writes_final_aligned_sidecar(tmp_path, p
 
     monkeypatch.setattr(compile_module, "write_compiled", count_write)
 
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert compiled.actions == [None]
@@ -204,7 +204,7 @@ async def test_empty_scenario_still_does_not_create_sidecar(tmp_path, page):
         encoding="utf-8",
     )
 
-    await run_compile(path, page, MockReasoner(), force=True)
+    await run_compile(path, page, MockReasoner(), force=True, selects=None)
 
     assert not compiled_path(path).exists()
 
@@ -228,7 +228,7 @@ async def test_slide_compiles_to_null_without_reasoner(tmp_path, page):
     path.write_text(scenario, encoding="utf-8")
     reasoner = MockReasoner()
 
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert len(compiled.actions) == 3  # jeden slot na krok — również dla slide
@@ -254,13 +254,13 @@ async def test_editing_translation_does_not_invalidate_canonical_teach(tmp_path,
     )
     path = tmp_path / "multilingual.scenario.yaml"
     path.write_text(scenario, encoding="utf-8")
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     path.write_text(scenario.replace("Click Log in", "Choose Log in"), encoding="utf-8")
 
     assert compile_up_to_date(path) is True
     reasoner = MockReasoner()
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
     assert reasoner.calls == 0
     action = load_compiled(compiled_path(path)).actions[1]
     assert action is not None
@@ -272,7 +272,7 @@ async def test_compile_sets_viewport_from_config(tmp_path, page):
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
 
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     assert page.viewport_size == {"width": 800, "height": 600}
 
@@ -282,11 +282,11 @@ async def test_compile_force_reresolves(tmp_path, page):
     path.write_text(SCENARIO, encoding="utf-8")
 
     first = MockReasoner()
-    await run_compile(path, page, first)
+    await run_compile(path, page, first, selects=None)
     assert first.calls == 1
 
     forced = MockReasoner()
-    await run_compile(path, page, forced, force=True)
+    await run_compile(path, page, forced, force=True, selects=None)
     assert forced.calls == 1  # --force ignoruje cache i woła reasonera ponownie
 
 
@@ -309,7 +309,7 @@ async def test_compile_navigates_with_object_form_and_ignores_render_type_flag(t
     )
     reasoner = MockReasoner()
 
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     assert await page.get_by_role("heading", name="Object navigation").count() == 1
     assert reasoner.calls == 0
@@ -349,7 +349,7 @@ async def test_teach_type_reprompts_missing_input_text_before_filling(tmp_path, 
             return ReasonerResult("type", target, input_text="demo@example.com")
 
     reasoner = RetryingReasoner()
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     compiled = load_compiled(compiled_path(path))
     action = compiled.actions[1]
@@ -385,7 +385,7 @@ async def test_teach_type_rejects_missing_or_invented_text_after_reprompts(
 
     reasoner = InvalidReasoner()
     with pytest.raises(RuntimeError, match=message):
-        await run_compile(path, page, reasoner)
+        await run_compile(path, page, reasoner, selects=None)
 
     assert reasoner.calls == 2
     assert await page.locator("#email").input_value() == ""
@@ -418,7 +418,7 @@ async def test_teach_type_rejects_sensitive_literal_before_reasoner_or_log(
 
     reasoner = SensitiveReasoner()
     with pytest.raises(RuntimeError, match="wartości wrażliwe"):
-        await run_compile(path, page, reasoner, verbose=True)
+        await run_compile(path, page, reasoner, verbose=True, selects=None)
 
     assert reasoner.calls == 0
     assert await page.locator("#email").input_value() == ""
@@ -457,7 +457,7 @@ async def test_teach_type_rejects_password_dom_target_before_typing(tmp_path, pa
 
     reasoner = PasswordReasoner()
     with pytest.raises(RuntimeError, match="pole wygląda na przeznaczone"):
-        await run_compile(path, page, reasoner)
+        await run_compile(path, page, reasoner, selects=None)
 
     assert reasoner.calls == 2
     assert await page.locator("#value").input_value() == ""
@@ -505,6 +505,7 @@ async def test_enter_text_runtime_error_redacts_value_from_exception_and_verbose
             page,
             TypeReasoner(),
             {"PASSWORD": secret},
+            selects=None,
             verbose=True,
         )
 
@@ -547,6 +548,7 @@ async def test_navigate_runtime_error_redacts_expanded_env_value(
             page,
             MockReasoner(),
             {"TOKEN": secret},
+            selects=None,
             verbose=True,
         )
 
@@ -578,7 +580,7 @@ async def test_popup_opened_during_reasoning_is_unexpected_and_click_is_not_run(
             return ReasonerResult("click", RoleTarget(role="button", name="Cel", exact=True))
 
     with pytest.raises(RuntimeError, match="podczas rozwiązywania.*przed akcją click"):
-        await run_compile(path, page, PopupDuringReasoning())
+        await run_compile(path, page, PopupDuringReasoning(), selects=None)
 
     assert await page.get_by_role("button", name="Cel").get_attribute("data-clicked") is None
 
@@ -614,7 +616,7 @@ async def test_popup_opened_during_click_preparation_is_not_attributed(tmp_path,
             return ReasonerResult("click", RoleTarget(role="button", name="Cel", exact=True))
 
     with pytest.raises(RuntimeError, match="przed akcją click"):
-        await run_compile(path, page, TargetReasoner())
+        await run_compile(path, page, TargetReasoner(), selects=None)
 
     assert await page.get_by_role("button", name="Cel").get_attribute("data-clicked") is None
 
@@ -651,7 +653,7 @@ async def test_popup_after_click_discovery_deadline_is_unexpected(tmp_path, page
     monkeypatch.setattr(Recorder, "apply_readiness", delayed_readiness)
 
     with pytest.raises(RuntimeError, match="nieoczekiwany dodatkowy popup"):
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
 
 
 async def test_popup_quiescence_never_extends_hard_discovery_deadline():
@@ -684,7 +686,7 @@ async def test_popup_quiescence_never_extends_hard_discovery_deadline():
 async def test_old_compiler_version_is_not_up_to_date(tmp_path, page):
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     cpath = compiled_path(path)
     compiled = load_compiled(cpath)
@@ -697,7 +699,7 @@ async def test_old_compiler_version_is_not_up_to_date(tmp_path, page):
 async def test_old_action_fingerprint_is_not_up_to_date(tmp_path, page):
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     cpath = compiled_path(path)
     compiled = load_compiled(cpath)
@@ -753,7 +755,7 @@ def test_targetless_scenario_requires_current_aligned_sidecar(tmp_path):
 async def test_target_step_changed_to_say_requires_compile(tmp_path, page):
     path = tmp_path / "changed-kind.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
-    await run_compile(path, page, MockReasoner())
+    await run_compile(path, page, MockReasoner(), selects=None)
 
     path.write_text(
         SCENARIO.replace('- teach: "kliknij Zaloguj"', '- say: "To już narracja"'),
@@ -797,7 +799,7 @@ async def test_compile_rejects_second_popup_in_session(tmp_path, page):
             return ReasonerResult("click", RoleTarget(role="button", name=name, exact=True))
 
     with pytest.raises(RuntimeError, match="co najwyżej jeden popup"):
-        await run_compile(path, page, TwoPopupReasoner())
+        await run_compile(path, page, TwoPopupReasoner(), selects=None)
 
 
 async def test_compile_rejects_second_sequential_popup_after_first_closes(tmp_path, page):
@@ -843,7 +845,7 @@ async def test_compile_rejects_second_sequential_popup_after_first_closes(tmp_pa
             return ReasonerResult("click", RoleTarget(role="button", name=name, exact=True))
 
     with pytest.raises(RuntimeError, match="co najwyżej jeden popup"):
-        await run_compile(path, page, SequentialPopupReasoner())
+        await run_compile(path, page, SequentialPopupReasoner(), selects=None)
 
 
 async def test_compile_rejects_two_popups_opened_by_one_click(tmp_path, page):
@@ -874,7 +876,7 @@ async def test_compile_rejects_two_popups_opened_by_one_click(tmp_path, page):
             return ReasonerResult("click", RoleTarget(role="button", name="Otwórz dwa", exact=True))
 
     with pytest.raises(RuntimeError, match="dokładnie jeden popup"):
-        await run_compile(path, page, TwoAtOnceReasoner())
+        await run_compile(path, page, TwoAtOnceReasoner(), selects=None)
 
 
 async def test_close_window_compiles_to_null_and_returns_to_main(tmp_path, page):
@@ -915,7 +917,7 @@ async def test_close_window_compiles_to_null_and_returns_to_main(tmp_path, page)
                 target=RoleTarget(role="link", name="otworz", exact=True),
             )
 
-    await run_compile(path, page, LinkReasoner())
+    await run_compile(path, page, LinkReasoner(), selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert len(compiled.actions) == 4  # jeden slot na krok — również dla closeWindow
@@ -940,7 +942,7 @@ async def test_close_window_without_an_open_window_fails(tmp_path, page):
     path.write_text(scenario, encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="closeWindow bez otwartego okna"):
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
 
 
 def test_compile_short_description_for_close_window():

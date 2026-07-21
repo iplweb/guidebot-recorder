@@ -107,7 +107,7 @@ async def test_end_to_end_compile_then_render(tmp_path, monkeypatch, capsys):
         # --- compile ---
         page = await browser.new_page()
         reasoner = MockReasoner()
-        await run_compile(path, page, reasoner, verbose=True)
+        await run_compile(path, page, reasoner, verbose=True, selects=None)
         assert await page.get_by_role("textbox", name="E-mail").input_value() == secret_email
         await page.context.close()
 
@@ -125,7 +125,7 @@ async def test_end_to_end_compile_then_render(tmp_path, monkeypatch, capsys):
         # --- re-compile: reuse, zero wywołań reasonera ---
         page2 = await browser.new_page()
         reasoner2 = MockReasoner()
-        await run_compile(path, page2, reasoner2)
+        await run_compile(path, page2, reasoner2, selects=None)
         await page2.context.close()
         assert reasoner2.calls == 0
 

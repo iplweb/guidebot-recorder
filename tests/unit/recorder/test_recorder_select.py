@@ -200,6 +200,37 @@ async def test_native_with_overlay_still_steps_the_value_with_arrow_keys(page):
     assert events == ["click", "key", "key"]
 
 
+async def test_native_under_a_global_shim_drives_a_genuinely_native_control(page):
+    """The per-step escape hatch has to work where it is needed: under the shim.
+
+    A globally shimmed select swallows the arrow keys in its own capture-phase
+    `keydown` handler, so the stepping animation never plays and the value ends
+    up set by `_step_option_visibly`'s final `select_option` guard — silently,
+    which is the one thing the escape hatch must never be.
+    """
+    overlay = await _raw_page(page)
+    events: list[str] = []
+    rec = Recorder(page, overlay, on_sfx=events.append, open_hold_ms=10)
+
+    await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX", native=True)
+
+    assert await page.locator("select").input_value() == "BibTeX"
+    assert events == ["click", "key", "key"]
+    # The value alone proves nothing here — `_step_option_visibly` ends with a
+    # `select_option` guard that lands it either way (and headless Chromium does
+    # not step a native select on `press` at all). What separates the escape
+    # hatch from the bug is the *state the keys were sent into*: shimmed, they
+    # went to the widget's own handler and unfurled its list on camera.
+    state = await page.evaluate(
+        """() => ({
+      shimmed: window.__guidebot_selects.isShimmed(document.querySelector('select')),
+      overlays: document.querySelectorAll(
+        '[data-guidebot-select-button],[data-guidebot-select-list]').length,
+    })"""
+    )
+    assert state == {"shimmed": False, "overlays": 0}
+
+
 async def test_native_without_overlay_takes_the_direct_path(page):
     await page.set_content(_PLAIN_SELECT)
     events: list[str] = []

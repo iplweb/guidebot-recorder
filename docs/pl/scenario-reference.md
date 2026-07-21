@@ -520,7 +520,9 @@ strzałkami zamiast otwierać listę (skok o więcej niż dwanaście pozycji ust
 jest od razu, by animacja nie trwała zbyt długo). `mode` ma też formę globalną,
 `config.selects.mode` (patrz sekcja `selects` niżej); wartość na poziomie kroku
 domyślnie ją dziedziczy i nadpisuje ją dla jednej upartej kontrolki w reszcie
-poprawnego scenariusza:
+poprawnego scenariusza. Przy globalnym `shim` nadpisanie *zdejmuje* też nakładkę
+z tej jednej kontrolki przed jej obsłużeniem i nie zakłada jej ponownie do końca
+nagrania; pozostałe selecty na stronie zachowują swoją listę w DOM:
 
 ```yaml
 - select:

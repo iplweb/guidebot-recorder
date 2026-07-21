@@ -74,7 +74,7 @@ async def test_absent_gate_records_pending_for_gate_and_children(tmp_path, page,
     path.write_text(BRANCH_SCENARIO, encoding="utf-8")
     reasoner = BranchReasoner()
 
-    await run_compile(path, page, reasoner)  # returns normally — no raise
+    await run_compile(path, page, reasoner, selects=None)  # returns normally — no raise
 
     compiled = load_compiled(compiled_path(path))
     assert len(compiled.actions) == 5  # flat: navigate, gate, say, teach, teach
@@ -93,7 +93,7 @@ async def test_pending_fingerprint_tracks_the_source_instruction(tmp_path, page)
     path = tmp_path / "gate.scenario.yaml"
     path.write_text(BRANCH_SCENARIO, encoding="utf-8")
 
-    await run_compile(path, page, BranchReasoner())
+    await run_compile(path, page, BranchReasoner(), selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert compiled.actions[1].fingerprint.compiled_from == "baner cookies"
@@ -107,24 +107,24 @@ async def test_pending_entry_counts_as_up_to_date(tmp_path, page):
 
     path = tmp_path / "gate.scenario.yaml"
     path.write_text(BRANCH_SCENARIO, encoding="utf-8")
-    await run_compile(path, page, BranchReasoner())
+    await run_compile(path, page, BranchReasoner(), selects=None)
 
     assert compile_up_to_date(path) is True
 
     second = BranchReasoner()
-    await run_compile(path, page, second)
+    await run_compile(path, page, second, selects=None)
     assert second.instructions == []  # nothing re-resolved
 
 
 async def test_force_reattempts_a_pending_entry(tmp_path, page):
     path = tmp_path / "gate.scenario.yaml"
     path.write_text(BRANCH_SCENARIO, encoding="utf-8")
-    await run_compile(path, page, BranchReasoner())
+    await run_compile(path, page, BranchReasoner(), selects=None)
 
     assert compile_up_to_date(path, force=True) is False
 
     second = BranchReasoner()
-    await run_compile(path, page, second, force=True)
+    await run_compile(path, page, second, force=True, selects=None)
     assert "baner cookies" in second.instructions
 
 
@@ -133,7 +133,7 @@ async def test_optional_step_records_pending_and_later_steps_still_compile(tmp_p
     path.write_text(OPTIONAL_STEP_SCENARIO, encoding="utf-8")
     reasoner = BranchReasoner()
 
-    await run_compile(path, page, reasoner)
+    await run_compile(path, page, reasoner, selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert compiled.actions[0] is None
@@ -149,7 +149,7 @@ async def test_multiple_actions_on_an_optional_step_is_still_fatal(tmp_path, pag
     path.write_text(OPTIONAL_STEP_SCENARIO, encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="multiple_actions"):
-        await run_compile(path, page, BranchReasoner(reason="multiple_actions"))
+        await run_compile(path, page, BranchReasoner(reason="multiple_actions"), selects=None)
 
 
 async def test_absent_target_on_a_required_step_still_fails(tmp_path, page):
@@ -170,7 +170,7 @@ async def test_absent_target_on_a_required_step_still_fails(tmp_path, page):
     )
 
     with pytest.raises(RuntimeError, match="no_handle"):
-        await run_compile(path, page, BranchReasoner())
+        await run_compile(path, page, BranchReasoner(), selects=None)
 
 
 async def test_present_gate_compiles_gate_and_children(tmp_path, page):
@@ -203,7 +203,7 @@ async def test_present_gate_compiles_gate_and_children(tmp_path, page):
                 action="click", target=RoleTarget(role="button", name="Zaloguj", exact=True)
             )
 
-    await run_compile(path, page, PresentReasoner())
+    await run_compile(path, page, PresentReasoner(), selects=None)
 
     compiled = load_compiled(compiled_path(path))
     assert isinstance(compiled.actions[1], CachedAction)

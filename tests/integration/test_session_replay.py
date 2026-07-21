@@ -142,7 +142,7 @@ async def test_replay_of_compiled_setup_yields_session_cookie(server, browser, t
 
     # 1) Compile the setup with a deterministic reasoner (freezes the click target).
     page = await browser.new_page()
-    await run_compile(setup, page, _LoginReasoner(), {})
+    await run_compile(setup, page, _LoginReasoner(), {}, selects=None)
     await page.context.close()
 
     # 2) Replay it with the RAISING reasoner: frozen targets only, no inference.
@@ -171,7 +171,7 @@ async def test_ensure_session_double_failure_diagnostic_hides_page_text(
     # verify text that will NOT be present on the dashboard → health-check fails
     setup = _write_setup(tmp_path, server, verify="TEKST-KTÓREGO-NIE-MA")
     page = await browser.new_page()
-    await run_compile(setup, page, _LoginReasoner(), {})
+    await run_compile(setup, page, _LoginReasoner(), {}, selects=None)
     await page.context.close()
 
     target = tmp_path / "target.scenario.yaml"

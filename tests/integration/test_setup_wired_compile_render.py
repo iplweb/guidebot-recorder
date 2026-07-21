@@ -213,7 +213,7 @@ def _write_target(dir_: Path, base_url: str, *, with_setup: bool) -> Path:
 
 async def _compile_setup(browser, setup: Path) -> None:
     page = await browser.new_page()
-    await run_compile(setup, page, SetupReasoner(), {})
+    await run_compile(setup, page, SetupReasoner(), {}, selects=None)
     await page.context.close()
 
 

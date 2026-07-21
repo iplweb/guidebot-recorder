@@ -6,6 +6,6 @@ appears in Playwright's screencast. This package injects a DOM replacement:
 ``chrome/``), ``selects.js`` is the widget itself.
 """
 
-from guidebot_recorder.selects.selects import Selects
+from guidebot_recorder.selects.selects import Selects, install_selects
 
-__all__ = ["Selects"]
+__all__ = ["Selects", "install_selects"]

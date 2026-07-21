@@ -38,10 +38,11 @@ from guidebot_recorder.models.config import (
     config_hash,
     site_viewport,
 )
-from guidebot_recorder.recorder.compile import install_selects, run_compile
+from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.resolver.page_context import Candidate
 from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.selects import install_selects
 
 __all__ = [
     "RaisingReasoner",

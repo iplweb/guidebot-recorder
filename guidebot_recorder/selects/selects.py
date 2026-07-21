@@ -18,7 +18,7 @@ from importlib.resources import files
 
 from playwright.async_api import BrowserContext
 
-from guidebot_recorder.models.config import SelectsConfig
+from guidebot_recorder.models.config import Config, SelectsConfig
 
 # Floor for :meth:`Selects.wait_ready`'s deadline, in seconds. Generous next to
 # the default ``settle_ms``, so it only ever fires when something is truly
@@ -144,3 +144,29 @@ class Selects:
             if "guidebot selects ready timeout" not in str(exc):
                 raise
             raise self._not_ready(frame, timeout) from exc
+
+
+async def install_selects(context: BrowserContext, cfg: Config) -> Selects | None:
+    """Install the DOM select shim on a browser context that drives scenario steps.
+
+    The single funnel for every such context — compile
+    (``compile.run_compile_in_browser``), render (``render.run_render``) and
+    setup replay (``session.replay_setup``) — so the three cannot drift apart and
+    compile keeps freezing targets against the very DOM render later drives. It
+    lives beside the widget it installs, so no phase owns it and every phase
+    imports it from the same place.
+
+    Returns the controller, whose :meth:`Selects.wait_ready` is the readiness
+    barrier the caller must take before resolving a step — or ``None`` when
+    ``config.selects.mode`` is ``native``: that escape hatch keeps the page's own
+    control, so there is no widget to install and nothing to wait for.
+
+    Callers that also install ``chrome.js`` MUST call this first; see the
+    role-gating ordering contract documented in ``render.run_render``.
+    """
+
+    if cfg.selects.mode == "native":
+        return None
+    selects = Selects(cfg.selects)
+    await selects.install_context(context)
+    return selects

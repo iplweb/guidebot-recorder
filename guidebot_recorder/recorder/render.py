@@ -60,7 +60,7 @@ from guidebot_recorder.recorder._debug import (
     redact_exception,
     scenario_sensitive_values,
 )
-from guidebot_recorder.recorder.compile import install_selects, select_mode
+from guidebot_recorder.recorder.compile import select_mode
 from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
 from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
@@ -74,6 +74,7 @@ from guidebot_recorder.resolver.resolution import (
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.selects import install_selects
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import (
     CACHE_SCHEMA_VERSION,
@@ -2382,6 +2383,11 @@ async def run_render(
                 type_jitter_ms=cfg.typing.jitter_ms,
                 type_max_delay_factor=cfg.typing.max_delay_factor,
                 on_sfx=(sfx_sink if cfg.sound.enabled else None),
+                # How long the unfurled option list is held before the cursor
+                # sets off towards the chosen row. Render is the only phase that
+                # animates a `select:` step, so this is the one place the
+                # configured value can take effect at all.
+                open_hold_ms=cfg.selects.open_hold_ms,
             )
             try:
                 opened = await _render_step(

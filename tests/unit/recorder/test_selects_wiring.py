@@ -13,6 +13,7 @@ covered in ``test_render.py``, where a full render is already paid for.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from guidebot_recorder.models.config import Config, SelectsConfig, TtsConfig, Vi
 from guidebot_recorder.models.scenario import Scenario, Select, Step
 from guidebot_recorder.models.target import LabelTarget, RoleTarget
 from guidebot_recorder.recorder.compile import (
-    install_selects,
+    run_compile,
     run_compile_in_browser,
     select_mode,
 )
@@ -38,7 +39,7 @@ from guidebot_recorder.recorder.session import (
 )
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.resolver.resolution import ResolvedTarget
-from guidebot_recorder.selects import Selects
+from guidebot_recorder.selects import Selects, install_selects
 
 # charset is explicit: without it Chromium decodes a data: URL as latin-1 and the
 # Polish label no longer matches.
@@ -143,6 +144,36 @@ async def test_install_selects_installs_nothing_in_native_mode() -> None:
 
     assert await install_selects(context, _config(selects=SelectsConfig(mode="native"))) is None
     assert context.scripts == []
+
+
+def test_install_selects_lives_in_the_selects_package() -> None:
+    """Its home is the package it installs, not the compile phase that uses it.
+
+    ``compile`` was only ever a landlord of convenience; ``render`` and
+    ``session`` import it too, so keeping it there made the shim's installation
+    a detail of one phase instead of a service of the ``selects`` package.
+    """
+
+    import guidebot_recorder.selects.selects as selects_module
+
+    assert install_selects.__module__ == selects_module.__name__
+    # ``compile`` still calls it — it just no longer publishes it.
+    assert "install_selects" not in compile_module.__all__
+
+
+def test_run_compile_requires_an_explicit_selects_argument() -> None:
+    """No default: "no shim here" must be a decision, not an omission.
+
+    With a default, a future caller that forgets ``selects=`` silently loses the
+    readiness barrier — compile then resolves targets against an unshimmed DOM
+    while render drives a shimmed one, which is exactly the silent failure the
+    spec's error-handling section forbids.
+    """
+
+    parameter = inspect.signature(run_compile).parameters["selects"]
+
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 # --------------------------------------------------------------------------- #

@@ -646,7 +646,9 @@ glides to the control and clicks it, but the collapsed value is *stepped* to
 options is set directly to keep the animation short). `mode` also has a global
 form, `config.selects.mode` (see the `selects` config block below); the per-step
 value defaults to it and overrides it for one stubborn control in an otherwise fine
-scenario:
+scenario. Under a global `shim` the override also *removes* the shim from that one
+control before driving it, and keeps it off for the rest of the recording; every
+other select on the page keeps its DOM list:
 
 ```yaml
 - select:

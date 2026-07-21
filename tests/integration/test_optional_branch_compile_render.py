@@ -187,7 +187,7 @@ async def test_same_compiled_renders_with_and_without_banner(tmp_path, capsys) -
 
         compile_page = await browser.new_page()
         reasoner = BannerReasoner()
-        await run_compile(path, compile_page, reasoner)
+        await run_compile(path, compile_page, reasoner, selects=None)
         await compile_page.context.close()
 
         # The banner was up: gate and child are fully frozen, nothing pending.
@@ -247,7 +247,7 @@ async def test_absent_banner_compiles_to_pending_and_renders_skipped(tmp_path, c
 
         compile_page = await browser.new_page()
         reasoner = BannerReasoner()
-        await run_compile(path, compile_page, reasoner)
+        await run_compile(path, compile_page, reasoner, selects=None)
         await compile_page.context.close()
 
         compiled = load_compiled(compiled_path(path))
@@ -291,7 +291,7 @@ async def test_delayed_banner_is_resolved_in_place_and_then_cached(tmp_path, cap
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, BannerReasoner())
+        await run_compile(path, compile_page, BannerReasoner(), selects=None)
         await compile_page.context.close()
 
         compiled = load_compiled(compiled_path(path))

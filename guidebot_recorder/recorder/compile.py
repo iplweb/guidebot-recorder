@@ -69,12 +69,11 @@ from guidebot_recorder.resolver.resolution import (
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
-from guidebot_recorder.selects import Selects
+from guidebot_recorder.selects import Selects, install_selects
 
 __all__ = [
     "compile_up_to_date",
     "heuristic_expect",
-    "install_selects",
     "run_compile",
     "run_compile_in_browser",
     "select_mode",
@@ -82,32 +81,6 @@ __all__ = [
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
-
-
-async def install_selects(context: BrowserContext, cfg: Config) -> Selects | None:
-    """Install the DOM select shim on a browser context that drives scenario steps.
-
-    The single funnel for every such context — compile
-    (:func:`run_compile_in_browser`), render (``render.run_render``) and setup
-    replay (``session.replay_setup``) — so the three cannot drift apart and
-    compile keeps freezing targets against the very DOM render later drives.
-    It lives here, the lowest layer of the three, because ``session`` and
-    ``render`` both already depend on this module.
-
-    Returns the controller, whose :meth:`Selects.wait_ready` is the readiness
-    barrier the caller must take before resolving a step — or ``None`` when
-    ``config.selects.mode`` is ``native``: that escape hatch keeps the page's own
-    control, so there is no widget to install and nothing to wait for.
-
-    Callers that also install ``chrome.js`` MUST call this first; see the
-    role-gating ordering contract documented in ``render.run_render``.
-    """
-
-    if cfg.selects.mode == "native":
-        return None
-    selects = Selects(cfg.selects)
-    await selects.install_context(context)
-    return selects
 
 
 def select_mode(step: Step, cfg: Config) -> str:
@@ -307,20 +280,26 @@ async def run_compile(
     reasoner: Reasoner,
     env: Mapping[str, str] | None = None,
     *,
+    selects: Selects | None,
     timeout: float = 30.0,
     force: bool = False,
     pause_on_error: bool = False,
     verbose: bool = False,
-    selects: Selects | None = None,
 ) -> None:
     """Compile the scenario on an already-prepared page.
 
-    ``selects`` is the controller returned by :func:`install_selects` for this
-    page's context, or ``None`` when no shim was installed (``mode: native``, or
-    a caller driving a bare context). It is passed in rather than rebuilt here
-    because only the caller that created the context knows whether the init
-    script was actually registered — waiting on a widget that was never injected
-    would fail every compile instead of catching a real problem.
+    ``selects`` is the controller returned by
+    :func:`guidebot_recorder.selects.install_selects` for this page's context,
+    or ``None`` when no shim was installed (``mode: native``, or a caller
+    driving a bare context). It is passed in rather than rebuilt here because
+    only the caller that created the context knows whether the init script was
+    actually registered — waiting on a widget that was never injected would fail
+    every compile instead of catching a real problem.
+
+    Required rather than defaulted, deliberately. A caller that forgot it would
+    silently lose the readiness barrier and freeze targets against an unshimmed
+    DOM that render then drives shimmed — a divergence nothing would report.
+    Passing ``selects=None`` says "no shim here" out loud, at the call site.
     """
 
     path = Path(path)

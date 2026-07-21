@@ -382,7 +382,7 @@ async def test_render_produces_mp4_with_audio(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -462,7 +462,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -470,6 +470,51 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
         await browser.close()
 
     assert order == ["overlay", "slide", "selects", "chrome"]
+
+
+async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, monkeypatch):
+    """``config.selects.openHoldMs`` must reach the beat-2 pause, or it is inert.
+
+    The kwarg's own default happens to equal ``SelectsConfig``'s, so a render
+    that never forwards the configured value still produces a plausible film —
+    the setting simply does nothing, silently.
+    """
+    path = tmp_path / "hold.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Hold
+              viewport: {width: 640, height: 480}
+              tts: {provider: fake, voice: v, lang: pl-PL}
+              selects: {openHoldMs: 123}
+            steps:
+              - say: "Witaj."
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    holds: list[float | None] = []
+    original_recorder = render_module.Recorder
+
+    class SpyRecorder(original_recorder):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            holds.append(kwargs.get("open_hold_ms"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(render_module, "Recorder", SpyRecorder)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, MockReasoner(), selects=None)
+        await page.context.close()
+
+        await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert holds and set(holds) == {123}
 
 
 async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path, monkeypatch):
@@ -507,7 +552,7 @@ async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path,
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -826,7 +871,7 @@ async def test_render_rejects_old_compiler_version(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         cpath = compiled_path(path)
@@ -859,7 +904,7 @@ async def test_render_rejects_teach_text_changed_after_compile(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, TypeReasoner())
+        await run_compile(path, page, TypeReasoner(), selects=None)
         await page.context.close()
 
         path.write_text(
@@ -878,7 +923,7 @@ async def test_render_fails_when_expected_popup_does_not_open(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         cpath = compiled_path(path)
@@ -928,7 +973,7 @@ async def test_render_fails_when_popup_closes_during_opening(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         popup_html.write_text("<script>window.close()</script>", encoding="utf-8")
@@ -965,7 +1010,7 @@ async def test_render_fails_on_unexpected_popup(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         cpath = compiled_path(path)
@@ -1017,7 +1062,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         # The timer fires after narration but while Recorder is moving/settling
@@ -1057,7 +1102,7 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         # Keep the compiled target/lifecycle metadata, then simulate runtime drift
@@ -1109,7 +1154,7 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1146,7 +1191,7 @@ async def test_render_respects_typing_animate_false(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1198,7 +1243,7 @@ async def _compile_sound_scenario(path: Path, sound_yaml: str) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, SoundReasoner())
+        await run_compile(path, page, SoundReasoner(), selects=None)
         await page.context.close()
         await browser.close()
 
@@ -1337,7 +1382,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1409,7 +1454,7 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1472,7 +1517,7 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1539,7 +1584,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1619,7 +1664,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1663,7 +1708,7 @@ async def test_intro_enabled_replaces_bootstrap(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1704,7 +1749,7 @@ async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -1786,7 +1831,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, PopupCursorReasoner())
+        await run_compile(path, page, PopupCursorReasoner(), selects=None)
         await page.context.close()
 
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
@@ -1966,7 +2011,7 @@ async def test_run_render_hold_frame_overrides_reach_the_pacing_decision(tmp_pat
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         await run_render(
@@ -2017,7 +2062,7 @@ async def test_run_render_uses_the_scenario_value_when_no_override_is_given(tmp_
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
 
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
@@ -2074,7 +2119,7 @@ async def test_hold_frame_film_matches_the_model_exactly(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
         await run_render(path, out, LongTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -2209,7 +2254,7 @@ async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
         await run_render(path, out, LongTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -2288,7 +2333,7 @@ async def test_hold_frame_narrations_never_overlap(tmp_path, monkeypatch):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
         await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -2381,7 +2426,7 @@ async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypa
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, MockReasoner())
+        await run_compile(path, page, MockReasoner(), selects=None)
         await page.context.close()
         await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -3256,7 +3301,7 @@ async def test_close_window_returns_to_main_and_restores_the_cursor(tmp_path):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, LinkReasoner())
+        await run_compile(path, page, LinkReasoner(), selects=None)
         await page.context.close()
 
         out = tmp_path / "out.mp4"
@@ -3284,7 +3329,7 @@ async def test_close_window_hands_the_cursor_back_to_its_pre_popup_position(tmp_
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, LinkReasoner())
+        await run_compile(path, page, LinkReasoner(), selects=None)
         await page.context.close()
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -3343,7 +3388,7 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, LinkReasoner())
+        await run_compile(path, page, LinkReasoner(), selects=None)
         await page.context.close()
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -3468,7 +3513,7 @@ async def test_blank_tab_gets_an_address_bar_while_other_popups_stay_bare(tmp_pa
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, LinkReasoner())
+        await run_compile(path, page, LinkReasoner(), selects=None)
         await page.context.close()
 
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
@@ -3526,7 +3571,7 @@ async def test_sized_window_open_popup_never_mounts_the_address_bar(tmp_path, mo
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         page = await browser.new_page()
-        await run_compile(path, page, LinkReasoner())
+        await run_compile(path, page, LinkReasoner(), selects=None)
         await page.context.close()
 
         await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)

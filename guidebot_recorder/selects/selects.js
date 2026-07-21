@@ -29,6 +29,10 @@
   const API_VERSION = 1;
 
   const MARKER_ATTRIBUTE = "data-guidebot-shimmed";
+  // "This select is the per-step `mode: native` escape hatch — hands off."
+  // Durable on purpose: dropping the shim alone would last only until the next
+  // classification pass shimmed the select right back, under the recorder's feet.
+  const NATIVE_ATTRIBUTE = "data-guidebot-native";
   const BUTTON_ATTRIBUTE = "data-guidebot-select-button";
   const LIST_ATTRIBUTE = "data-guidebot-select-list";
   const FOR_ATTRIBUTE = "data-guidebot-for";
@@ -136,6 +140,7 @@
       close: () => {},
       optionIndexFor: () => -1,
       scrollOptionIntoView: () => {},
+      pinNative: () => {},
       refresh: () => {},
     });
     markReady();
@@ -233,6 +238,11 @@
    */
   function isShimmable(select) {
     if (!select.isConnected) {
+      return false;
+    }
+    // A step that asked for `mode: native` owns this control for the rest of the
+    // run; re-shimming it would swallow the arrow keys that step exists to show.
+    if (select.hasAttribute(NATIVE_ATTRIBUTE)) {
       return false;
     }
     if (select.multiple || select.size > 1) {
@@ -1286,6 +1296,26 @@
     },
     optionIndexFor: optionIndexFor,
     scrollOptionIntoView: scrollOptionIntoView,
+    /**
+     * Hand one select back to the browser — the per-step `mode: native` hatch.
+     *
+     * Under a global `shim` the select the step wants native is already shimmed,
+     * so opting out has to undo the shim *and* stay undone: the marker is what
+     * `isShimmable` reads, so no later classification pass takes the control
+     * back while the recorder is stepping it with arrow keys.
+     *
+     * Deliberately one-way for the life of the document. A step is the only
+     * caller, its choice is per-scenario and static, and a select that flipped
+     * back to shimmed mid-run would be exactly the race this removes.
+     */
+    pinNative: (element) => {
+      const select = resolveSelect(element);
+      if (!select) {
+        return;
+      }
+      select.setAttribute(NATIVE_ATTRIBUTE, "");
+      unshim(select);
+    },
     /**
      * Re-arm the settle debounce — deliberately *not* an immediate pass.
      *
