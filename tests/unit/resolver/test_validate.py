@@ -17,6 +17,7 @@ from guidebot_recorder.resolver.validate import (
     ValidationOk,
     build_locator,
     is_sensitive_type_target,
+    reuse_failure,
     reuse_is_valid,
     validate_compile_time,
 )
@@ -264,3 +265,78 @@ async def test_wait_for_cache_without_state_is_invalid(page):
     identity = await capture_identity(await build_locator(page, target))
 
     assert await reuse_is_valid(page, _cached(target, identity, action="waitFor")) is False
+
+
+async def test_reuse_failure_returns_none_when_structural_checks_and_identity_match(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    target = RoleTarget(role="button", name="Zaloguj")
+    identity = await capture_identity(await build_locator(page, target))
+
+    assert await reuse_failure(page, _cached(target, identity)) is None
+
+
+async def test_reuse_failure_returns_identity_mismatch_when_captured_identity_differs(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    cached = _cached(
+        RoleTarget(role="button", name="Zaloguj"),
+        Identity(tag="a", ancestry_digest="not-the-current-digest"),
+    )
+
+    assert await reuse_failure(page, cached) == "identity_mismatch"
+
+
+async def test_reuse_failure_returns_not_found_when_target_missing_from_dom(page):
+    await page.set_content("<main></main>")
+    target = RoleTarget(role="button", name="Zaloguj")
+    identity = Identity(tag="button", ancestry_digest="whatever")
+
+    assert await reuse_failure(page, _cached(target, identity)) == "not_found"
+
+
+async def test_reuse_failure_returns_sensitive_target_for_teach_type_on_password_field(page):
+    await page.set_content('<label for="value">Access</label><input id="value" type="password">')
+    target = LabelTarget(label="Access")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = CachedAction(
+        action="type",
+        target=target,
+        identity=identity,
+        expect="none",
+        input_text="hunter2",
+        fingerprint=Fingerprint(
+            command_kind="teach",
+            compiled_from="enter hunter2 into the field",
+            expect="none",
+            config_hash="config",
+        ),
+    )
+
+    assert await reuse_failure(page, cached) == "sensitive_target"
+
+
+async def test_reuse_failure_hidden_wait_regression_returns_none_without_identity_check(page):
+    # count() == 0: element is absent, which is the success condition for a
+    # hidden wait. A buggy implementation that fell through to the identity
+    # checks below would return "identity_missing" instead, since a hidden
+    # wait's cached entry never carries an identity by design.
+    await page.set_content("<main></main>")
+    cached = _cached(
+        ByTestidTarget(testid="spinner"),
+        None,
+        action="waitFor",
+        state="hidden",
+    )
+
+    assert await reuse_failure(page, cached) is None
+
+
+async def test_reuse_is_valid_still_returns_bool_not_reason(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    cached = _cached(
+        RoleTarget(role="button", name="Zaloguj"),
+        Identity(tag="a", ancestry_digest="not-the-current-digest"),
+    )
+
+    result = await reuse_is_valid(page, cached)
+
+    assert result is False
