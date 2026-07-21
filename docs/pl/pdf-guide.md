@@ -69,11 +69,18 @@ uv run guidebot guide SCENARIUSZ.yaml --out WYNIK.pdf [OPCJE]
 | Opcja | Domyślnie | Znaczenie |
 |---|---:|---|
 | `--out ŚCIEŻKA`, `-o ŚCIEŻKA` | wymagana | Docelowy `.pdf`. Katalogi-rodzice są tworzone. |
+| `--headed` | wyłączone | Pokazuje Chromium. |
+| `--pause-on-error` | wyłączone | Po błędzie zatrzymuje widoczną stronę do inspekcji. |
 | `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
 | `--verbose`, `-v` | wyłączone | Pokazuje postęp budowania stron i szczegóły kroków. |
 
 Wartość `--timeout` jest używana identycznie do poleceń `compile` i `render` i dotyczy
 wszystkich akcji przeglądarki podczas generowania przewodnika.
+
+`--headed` i `--pause-on-error` działają tak samo jak w `compile` i `render`: to
+narzędzia diagnostyczne, gdy przechwytywanie zachowuje się inaczej niż oczekujesz.
+Domyślnie przewodnik powstaje bez widocznego okna, ale nie jest to wymóg —
+składanie PDF działa w obu trybach.
 
 ## Obecne ograniczenia v1
 

@@ -147,6 +147,8 @@ anotowanym zrzutem ekranu na znaczący krok, tekstem narracji obok i legendą wi
 | Opcja | Domyślnie | Znaczenie |
 |---|---:|---|
 | `--out ŚCIEŻKA`, `-o ŚCIEŻKA` | wymagana | Docelowy `.pdf`. Katalogi-rodzice są tworzone. |
+| `--headed` | wyłączone | Pokazuje Chromium. |
+| `--pause-on-error` | wyłączone | Po błędzie zatrzymuje widoczną stronę do inspekcji. |
 | `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
 | `--verbose`, `-v` | wyłączone | Pokazuje postęp budowania stron i szczegóły kroków. |
 
