@@ -36,8 +36,10 @@ class SelectDriveError(RuntimeError):
 
     Raised when the choreography has nothing for the cursor to click: the page
     enhanced the ``<select>`` itself and the association heuristic found no
-    visible control, or the unfurled list never produced a row matching the
-    option label within :data:`OPTION_WAIT_MS`.
+    visible control, the select is on screen but has no DOM option list to
+    unfurl, or the list that did unfurl never produced a row matching the option
+    label within :data:`OPTION_WAIT_MS`. The message names which of those it is,
+    because the three want different fixes.
 
     There is deliberately no fallback to ``select_option()``. Falling back would
     restore exactly the invisible value change this choreography exists to
@@ -50,15 +52,50 @@ class SelectDriveError(RuntimeError):
     """
 
 
-#: (el) => {installed, shimmed} — how this select relates to the shim.
+#: (el) => {installed, shimmed, listbox, hidden} — how this select is presented.
 #:
 #: ``installed`` distinguishes "the widget ran and decided not to shim this
 #: select" (so the page enhanced it itself, or ``mode: native`` is in force)
 #: from "no shim layer here at all" — a bare context such as a health probe or
 #: a unit-test page. Only the former says anything about drivability.
+#:
+#: ``listbox`` is the shim's own non-goal, read back here: ``multiple`` and
+#: ``size > 1`` render their option list in the page already, so the shim never
+#: touches them — which is precisely why they need their own path rather than
+#: the page-widget one. ``hidden`` mirrors the geometric half of the shim's
+#: ``isEnhanced`` test, and is what tells "the page replaced this control"
+#: apart from "the control is on screen but carries no DOM list".
 _SHIM_STATE_JS = """(el) => {
   const api = window.__guidebot_selects;
-  return { installed: !!api, shimmed: !!(api && api.isShimmed(el)) };
+  const computed = window.getComputedStyle(el);
+  const rect = el.getBoundingClientRect();
+  return {
+    installed: !!api,
+    shimmed: !!(api && api.isShimmed(el)),
+    listbox: !!el.multiple || el.size > 1,
+    hidden:
+      computed.display === "none" ||
+      computed.visibility === "hidden" ||
+      rect.width < 8 ||
+      rect.height < 8,
+  };
+}"""
+
+#: (el, label) => number — index of the first ``<option>`` carrying ``label``.
+#:
+#: ``HTMLOptionElement.label`` is the ``label`` attribute when present and the
+#: trimmed text otherwise, which is the same rule Playwright's
+#: ``select_option(label=…)`` applies — so the option this finds is the option
+#: the direct path would have set. ``el.options`` is the flattened, document
+#: order list, so the index also addresses ``locator("option").nth(i)`` even
+#: across ``<optgroup>`` boundaries. ``-1`` when no option matches.
+_OPTION_INDEX_JS = """(el, label) => {
+  const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
+  const wanted = norm(label);
+  for (let i = 0; i < el.options.length; i += 1) {
+    if (norm(el.options[i].label) === wanted) return i;
+  }
+  return -1;
 }"""
 
 #: (el) => void — hand this select back to the browser, durably.
@@ -266,6 +303,12 @@ class Recorder:
         enhance their own selects (select2, Tom Select) already have a DOM list;
         those are driven the same way, only the two click targets differ.
 
+        A ``multiple`` / ``size > 1`` select is the third shape and gets its own,
+        single-beat path (:meth:`_select_in_listbox`): its option list is already
+        laid out in the page, so there is no list to unfurl and nothing for the
+        shim to stand in for — the cursor simply travels to the ``<option>`` and
+        clicks it.
+
         Args:
             target: the frozen target of the ``<select>`` itself — never of the
                 widget standing in for it, which no ``Target`` names.
@@ -317,7 +360,16 @@ class Recorder:
             visible = await locator.is_visible()
             await locator.select_option(label=option, force=not visible)
             return
-        await self._select_in_two_beats(target, option)
+        locator = await build_locator(self.frame, target)
+        # Which of the three shapes this is, read from the DOM once and passed
+        # down. "Not shimmed" is not on its own evidence of a page widget: the
+        # shim also declines a natively-visible listbox, and that one has its
+        # own single-beat path rather than an association heuristic to run.
+        state = await locator.evaluate(_SHIM_STATE_JS)
+        if state["listbox"]:
+            await self._select_in_listbox(locator, option)
+            return
+        await self._select_in_two_beats(locator, state, option)
 
     async def _pin_native(self, locator: Locator) -> None:
         """Drop the shim from this select and keep it off (see :data:`_PIN_NATIVE_JS`)."""
@@ -329,10 +381,31 @@ class Recorder:
 
         return await control.evaluate(_DESCRIBE_JS)
 
-    async def _no_control_error(self, locator: Locator, option: str) -> SelectDriveError:
+    async def _no_control_error(
+        self, locator: Locator, option: str, state: dict
+    ) -> SelectDriveError:
+        """Name the situation the select is actually in, not just the empty result.
+
+        Two different pages end up here and they need different fixes, so the
+        message must not collapse them. Either the page hid the ``<select>`` and
+        the association heuristic found nothing standing in for it (a widget
+        library that failed to initialise, or one whose control loads over the
+        network), or the select is on screen but carries no DOM option list of
+        ours (a marker class the shim honours, ``mode: native`` pinned onto it,
+        or no shim installed in this context at all).
+        """
+
+        tail = f'nie da się pokazać na filmie wyboru opcji „{option}"'
+        described = await self._describe(locator)
+        if state["hidden"]:
+            return SelectDriveError(
+                f"strona ukryła {described} i nie znaleziono widocznej kontrolki, "
+                f"która ją zastępuje — {tail}"
+            )
         return SelectDriveError(
-            f"nie znaleziono widocznej kontrolki dla {await self._describe(locator)} — "
-            f'nie da się pokazać na filmie wyboru opcji „{option}"'
+            f"{described} jest widoczna, ale nie ma listy opcji w DOM — nakładka jej "
+            f"nie objęła, a listę natywnego selecta rysuje system operacyjny; {tail} "
+            f"(użyj `mode: native`, jeśli sam wybór wystarczy)"
         )
 
     async def _no_option_error(self, locator: Locator, option: str) -> SelectDriveError:
@@ -345,31 +418,66 @@ class Recorder:
         """Fail at compile time for a widget the render could never drive.
 
         Only meaningful when the shim actually ran and declined to shim this
-        select — that is what "the page enhanced it itself" looks like from
-        here. With no shim installed there is nothing to conclude, and a shimmed
-        select is drivable by construction.
+        select *because the page took it over* — that is what "the page enhanced
+        it itself" looks like from here. With no shim installed there is nothing
+        to conclude, and a shimmed select is drivable by construction.
+
+        "Not shimmed" is not on its own evidence of a page widget, though: the
+        shim also declines a ``multiple`` / ``size > 1`` select, which needs no
+        stand-in because its option list is laid out in the page already. Reading
+        that as "the page must have enhanced this" is what used to send a
+        perfectly filmable listbox into the association heuristic and fail the
+        compile with a missing-widget error.
         """
 
         state = await locator.evaluate(_SHIM_STATE_JS)
-        if not state["installed"] or state["shimmed"]:
+        if not state["installed"] or state["shimmed"] or state["listbox"]:
             return
         control = await associated_control(locator)
         if control is not None and await control.is_visible():
             return
-        raise await self._no_control_error(locator, option)
+        raise await self._no_control_error(locator, option, state)
 
-    async def _select_in_two_beats(self, target: Target, option: str) -> None:
+    async def _select_in_listbox(self, locator: Locator, option: str) -> None:
+        """One visible beat for a select that renders its own in-page listbox.
+
+        ``multiple`` and ``size > 1`` are the shim's documented non-goal — they
+        draw no OS popup, so there is nothing to replace — but that also means
+        their ``<option>`` elements have real layout and are on screen from the
+        start. So the interaction is filmed for real rather than merely
+        approached: the cursor glides to the row and clicks it, exactly once.
+
+        Measured with this repo's pinned Playwright (Chromium 149, headless and
+        headed): a plain left click on an ``<option>`` inside such a select does
+        select it and does fire ``change``, and ``scrollIntoView`` on the option
+        scrolls the listbox's own viewport, so the cursor lands on a row the
+        viewer can already see (:meth:`_approach` does that scroll).
+
+        The click's effect on *other* options is the same as the direct path's:
+        an unmodified click replaces the whole selection, and so does
+        ``select_option(label=…)``. A ``select:`` step has always meant "this one
+        option is now chosen", and it still does.
+        """
+
+        index = await locator.evaluate(_OPTION_INDEX_JS, option)
+        if index < 0:
+            raise SelectDriveError(
+                f'lista {await self._describe(locator)} nie zawiera opcji „{option}"'
+            )
+        row = locator.locator("option").nth(index)
+        await self._approach(row, click_sound=True)
+        await row.click()
+
+    async def _select_in_two_beats(self, locator: Locator, state: dict, option: str) -> None:
         """Open the list, then click the option — both with the cursor visible."""
 
-        locator = await build_locator(self.frame, target)
-        state = await locator.evaluate(_SHIM_STATE_JS)
         control: Locator | ElementHandle
         if state["shimmed"]:
             # The shim button is ``pointer-events: none``, so the <select> is the
             # hit target; its mousedown handler is what unfurls the DOM list.
             control = locator
         else:
-            control = await self._page_widget(locator, option)
+            control = await self._page_widget(locator, state, option)
         # Beat 2 of the page-widget path recognises the option rows by "appeared
         # after the click", so the snapshot has to be taken before it.
         await self.frame.evaluate(_SNAPSHOT_JS)
@@ -383,12 +491,12 @@ class Recorder:
         else:
             await self._click_appeared_option(locator, option)
 
-    async def _page_widget(self, locator: Locator, option: str) -> ElementHandle:
+    async def _page_widget(self, locator: Locator, state: dict, option: str) -> ElementHandle:
         """The visible control a page's own dropdown widget puts in the select's place."""
 
         control = await associated_control(locator)
         if control is None or not await control.is_visible():
-            raise await self._no_control_error(locator, option)
+            raise await self._no_control_error(locator, option, state)
         return control
 
     async def _click_shim_option(self, locator: Locator, option: str) -> None:

@@ -69,7 +69,7 @@ steps:
   - select: {{from: "lista formatów raportu", option: "BibTeX"}}
   - select: {{from: "lista województw", option: "Mazowieckie"}}
   - select: {{from: "lista miast", option: "Lublin"}}
-  - select: {{from: "lista tagów", option: "pilne", mode: native}}
+  - select: {{from: "lista tagów", option: "pilne"}}
 """
 
 CLICK_SCENARIO = """\
@@ -198,6 +198,20 @@ _PROBE_JS = """() => {
     (event) => {
       const el = event.target;
       if (!el || !el.closest) return;
+      if (el.tagName === "OPTION") {
+        // A `multiple` / `size > 1` select needs no shim: its rows are laid out
+        // in the page already. What has to be true at click time is that the row
+        // is inside the listbox's own visible box — i.e. the viewer saw it.
+        const box = el.getBoundingClientRect();
+        const owner = el.closest("select").getBoundingClientRect();
+        window.__gbSelectProbe.push({
+          kind: "listboxOption",
+          label: (el.textContent || "").replace(/\\s+/g, " ").trim(),
+          visible: box.width > 0 && box.height > 0,
+          insideListbox: box.top >= owner.top - 1 && box.bottom <= owner.bottom + 1,
+        });
+        return;
+      }
       const list = el.closest("[data-guidebot-select-list], [data-fake-list]");
       if (list === null) {
         window.__gbSelectProbe.push({
@@ -390,10 +404,12 @@ async def test_four_controls_compile_and_render_with_the_list_open_at_click_time
     compile + render, the chosen option ends up selected, and for the three
     drop-downs the list is attached and visible **in the click event itself**.
 
-    The ``<select multiple>`` is driven with the per-step ``mode: native`` escape
-    hatch: it renders its own in-page listbox, so the shim deliberately leaves it
-    alone (spec non-goal) and the two-beat choreography has no list of its own to
-    click for it.
+    All four run on the default ``mode: shim``, with no per-step escape hatch
+    anywhere: this is the shipped configuration. The ``<select multiple>`` is
+    still never shimmed (spec non-goal — it draws no OS popup), but its rows are
+    laid out in the page already, so the cursor clicks the ``<option>`` where it
+    sits and the click is asserted to have landed inside the listbox's visible
+    box.
     """
 
     path = _write(tmp_path, "selects.scenario.yaml", FOUR_CONTROLS_SCENARIO, FIXTURE)
@@ -465,8 +481,20 @@ async def test_four_controls_compile_and_render_with_the_list_open_at_click_time
     assert tom["events"][0]["id"] == "miasto-widget"
     assert tom["events"][1]["shim"] is False
 
-    # <select multiple> took the native escape hatch; nothing was shimmed for it.
-    assert spy.selects[3]["native"] is True
+    # <select multiple>: the default mode, no escape hatch, one visible beat —
+    # the pointer landed on the <option> itself, inside the listbox's own box.
+    listbox = spy.selects[3]
+    assert listbox["native"] is False
+    assert listbox["events"] == [
+        {
+            "kind": "listboxOption",
+            "label": "pilne",
+            "visible": True,
+            "insideListbox": True,
+        }
+    ]
+    # ...and it stayed unshimmed throughout: no button, no DOM list of ours.
+    assert listbox["shims"]["tagi"] is False
 
 
 # --- a click: step aimed at a shimmed select --------------------------------

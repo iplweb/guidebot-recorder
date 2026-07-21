@@ -631,12 +631,24 @@ by its `aria-controls`/`aria-owns`, an `aria-labelledby`/`aria-describedby`
 back-reference, or, failing both, the nearest visible sibling), then the option row
 that appears once it opens.
 
-If neither beat finds anything to click — no visible control associated with an
-already-enhanced select, or no row matching `option` after opening it — the run
-**fails** rather than silently setting the value; a widget the shim cannot drive is
-not one Guidebot will pretend to have shown. `compile` also probes an enhanced
-widget's drivability up front, so an undriveable one is caught there instead of
-partway through a render.
+**A `<select multiple>` or `<select size="2">` needs no shim and gets none.** It
+already draws its option list in the page rather than as an OS popup, so there is
+nothing to replace — and because its rows are laid out on screen from the start,
+there is also no list to unfurl. The choreography is a single beat: the cursor
+glides straight to the `<option>` and clicks it, scrolling the listbox to it first
+if it sits below the fold. The control keeps its own native appearance throughout.
+
+As always for `select`, this picks **one** option: clicking it deselects whatever
+else was selected, exactly as setting the value directly does. There is no way to
+choose several options in one step.
+
+If nothing can be clicked — no visible control associated with an already-enhanced
+select, a select that is on screen but carries no option list Guidebot can open,
+or no row matching `option` after opening it — the run **fails** rather than
+silently setting the value; a widget the shim cannot drive is not one Guidebot will
+pretend to have shown. The error message says which of those situations it is in.
+`compile` also probes an enhanced widget's drivability up front, so an undriveable
+one is caught there instead of partway through a render.
 
 For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
 loads its options over the network, for instance — use the per-step **`mode:

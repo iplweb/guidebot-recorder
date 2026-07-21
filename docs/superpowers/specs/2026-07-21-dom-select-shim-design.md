@@ -48,8 +48,14 @@ better than an invisible one. (Stated by the commissioner when scope was agreed.
 - Replacing controls the page already enhanced (select2 and friends). Their
   lists are DOM and already record correctly; we drive them, we do not rebuild
   them.
-- Multi-select. `<select multiple>` and `<select size="2+">` already render as an
-  in-page listbox with no OS popup, so they are left untouched.
+- *Shimming* multi-selects. `<select multiple>` and `<select size="2+">` already
+  render as an in-page listbox with no OS popup, so the shim never touches them:
+  no button, no DOM list, no re-parenting. They are still **driven**, by §4's
+  third row — their `<option>` elements have real layout, so the cursor can go
+  to one and click it. What is out of scope is rebuilding them.
+- Choosing *several* options. `select:` picks one option by label, and picking
+  it deselects the others — measured to be exactly what
+  `select_option(label=…)` did before this branch, so the semantics do not move.
 - Search-as-you-type / AJAX-loaded option sets. Where a page's widget loads
   options remotely, driving it may fail; §8 makes that a hard error with a
   per-step escape hatch, not a silent degradation.
@@ -195,12 +201,32 @@ while render drives at t=5 s against a shimmed one.
    internally to the wanted option if needed, glide the cursor to its row (hover
    highlight) → ripple → click (SFX `click`).
 
-The same choreography serves both classes; only the targets differ:
+The same choreography serves both drop-down classes; only the targets differ.
+The third class, a natively-visible listbox, has no list to unfurl and so has no
+beat 1 at all:
 
 | | beat 1 clicks | beat 2 clicks |
 | --- | --- | --- |
 | shim | the `<select>` itself (its `mousedown` opens the list) | `[data-guidebot-option-index="N"]` |
 | page widget (select2 etc.) | the visible control associated with the hidden select | the node that appeared after opening whose trimmed text equals the option label |
+| listbox (`multiple` / `size > 1`) | — the list is already on screen | the `<option>` whose `label` equals the wanted one, where it sits |
+
+**Which class a select belongs to is read from the DOM, not inferred from "the
+shim declined it".** The shim declines a select for two unrelated reasons — the
+page took it over, or it is a natively-visible listbox — and treating the second
+as the first sent a perfectly filmable listbox into the association heuristic,
+which had nothing to find. `multiple`/`size > 1` is therefore tested directly,
+ahead of the page-widget branch, in both the render choreography and compile's
+drivability probe.
+
+**The listbox row really is clickable**, measured with this repo's pinned
+Playwright (Chromium 149.0.7827.55, headless *and* headed): a plain left click on
+an `<option>` inside a `multiple` / `size > 1` select selects it and fires
+`change`; `scrollIntoView` on the option scrolls the listbox's own viewport, so
+the cursor lands on a row the viewer can already see; and the click replaces the
+whole selection — byte-identical in effect to `select_option(label=…)`, which was
+measured to do the same. So this path is a real on-camera interaction, not a
+cursor-travel-then-set-the-value approximation, and it changes no semantics.
 
 **The association heuristic is pinned** (both here and in §6, one algorithm, not
 two): given the hidden `<select>`, take the first of —
@@ -240,7 +266,9 @@ the option list is exactly what an OS-drawn popup cannot show.
 Compile does, however, **probe drivability** of
 an enhanced widget (can the association heuristic resolve a visible control?)
 and fails there, so an undriveable widget surfaces before a multi-minute render
-is paid for.
+is paid for. The probe skips a shimmed select (drivable by construction), a
+context with no shim installed (nothing to conclude) **and a natively-visible
+listbox** (drivable by construction too — its rows are on screen).
 
 **Re-selecting the current option**: when the clicked option is already
 `select.selectedIndex`, the shim updates nothing and dispatches **no** `input`
@@ -300,6 +328,16 @@ If beat 2 cannot find a node matching the option label within the timeout, or
 the association heuristic exhausts its four steps, the run **fails** with a
 `RenderError` naming the option label and the control.
 
+**The message names the situation, not just the empty result.** "No visible
+control" is the *answer*, not the diagnosis, and the two pages that produce it
+want opposite fixes: either the page hid the `<select>` and nothing stands in for
+it (a widget library that failed to initialise, or one whose control arrives over
+the network), or the select is on screen but carries no DOM list at all (a marker
+class the shim honours, `mode: native` pinned onto it, or no shim installed in
+that context). Reporting both as "the page must have enhanced this itself" is
+what made the multi-select regression unreadable, so the wording is derived from
+the select's own computed geometry, not from "the shim declined it".
+
 There is deliberately **no silent fallback** to `select_option()`. Falling back
 would restore precisely the invisible magic this feature exists to remove, and
 would do so unobservably: the run would succeed, the file would look fine, and
@@ -329,9 +367,9 @@ Test-first, in this order:
 | JS | `tests/unit/selects/test_selects_js.py` (patterned on `tests/unit/overlay/test_cursor_js.py`) | raw select gets button + list and **is not re-parented** (ancestor chain identical before/after); 1×1-clipped and `display:none` selects untouched; `multiple` / `size>1` untouched; `mousedown` opens the list and suppresses the native popup; choosing an option sets `value` and fires `change`; re-choosing the current option fires **nothing**; list opens downward and clamps `max-height`; geometry re-pins after scroll; `MutationObserver` shims a late select, unshims one that gains a marker class, drops one removed from the document |
 | Model | `tests/unit/models/` | `SelectsConfig` defaults and validation; per-step `Select.mode`; `config_hash` — default projection equals the pre-change hash, `native` differs |
 | Resolver | `tests/unit/resolver/` | §6 relaxation: a `display:none` select with a visible associated widget validates; one with no resolvable control fails; the association heuristic's four steps in priority order |
-| Recorder | `tests/unit/recorder/` | the two beats fire in order, two `click` SFX, the list scrolls to the option before the cursor glide; §8 raises `RenderError` with the option label; per-step `mode: native` takes the direct path |
+| Recorder | `tests/unit/recorder/` | the two beats fire in order, two `click` SFX, the list scrolls to the option before the cursor glide; §8 raises `RenderError` with the option label; per-step `mode: native` takes the direct path; a `multiple` / `size>1` listbox is driven in one beat by clicking the `<option>` itself — one `click` SFX, `change` fired once, the listbox scrolled so the row is inside its own visible box, the selection replaced (not extended), and still no shim overlay; the two failure messages tell "the page hid it" from "it is visible but has no DOM list" |
 | Back-compat | `tests/integration/` | **a `*.compiled.yaml` produced without the shim still renders with it** — the §5 no-recompile claim, and the single most expensive claim to get wrong |
-| Integration | `tests/integration/fixtures/selects.html` + `tests/integration/test_selects_compile_render.py` | four controls — raw, fake-select2 (1×1 clipped), fake-Tom-Select (`display:none`), `multiple` — survive compile + render; the option ends selected; at click time the list is present and visible; a `click:` step targeting a shimmed select unfurls the list; a select inside a popup window works |
+| Integration | `tests/integration/fixtures/selects.html` + `tests/integration/test_selects_compile_render.py` | four controls — raw, fake-select2 (1×1 clipped), fake-Tom-Select (`display:none`), `multiple` — survive compile + render **on the default `mode: shim`, with no per-step escape hatch anywhere**; the option ends selected; at click time the drop-downs' list is present and visible and the listbox's clicked `<option>` is inside its own visible box; a `click:` step targeting a shimmed select unfurls the list; a select inside a popup window works |
 
 The fake select2 / Tom Select fixtures reproduce the *pattern* rather than
 vendoring the libraries: a hidden original plus a sibling widget that opens a

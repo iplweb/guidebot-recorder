@@ -506,10 +506,23 @@ steruje wtedy bezpośrednio widoczną kontrolką powiązaną z ukrytym selectem
 `aria-labelledby`/`aria-describedby`, a w ostateczności po najbliższym widocznym
 rodzeństwie), a potem wierszem opcji, który pojawia się po jej otwarciu.
 
-Jeśli żaden z tych dwóch kroków nie znajdzie niczego do kliknięcia — brak widocznej
-kontrolki powiązanej z już ulepszonym selectem albo brak wiersza pasującego do
-`option` po otwarciu listy — przebieg kończy się **błędem**, zamiast po cichu
-ustawić wartość. `compile` sprawdza też z góry, czy ulepszony widżet da się
+**`<select multiple>` i `<select size="2">` nie potrzebują nakładki i jej nie
+dostają.** Taka kontrolka rysuje listę opcji w samej stronie, a nie jako popup
+systemu, więc nie ma czego podmieniać — a skoro jej wiersze są widoczne od
+początku, nie ma też czego rozwijać. Choreografia to jeden gest: kursor dojeżdża
+wprost do `<option>` i klika go, wcześniej przewijając listę do tego wiersza,
+jeśli jest poniżej widocznego obszaru. Kontrolka zachowuje przy tym swój natywny
+wygląd.
+
+Jak zawsze przy `select`, wybierana jest **jedna** opcja: kliknięcie odznacza
+wszystkie pozostałe, dokładnie tak samo jak bezpośrednie ustawienie wartości. Nie
+da się wybrać wielu opcji w jednym kroku.
+
+Jeśli nie ma czego kliknąć — brak widocznej kontrolki powiązanej z już ulepszonym
+selectem, select widoczny, ale bez listy opcji, którą Guidebot potrafiłby otworzyć,
+albo brak wiersza pasującego do `option` po otwarciu listy — przebieg kończy się
+**błędem**, zamiast po cichu ustawić wartość. Komunikat błędu mówi, o którą z tych
+sytuacji chodzi. `compile` sprawdza też z góry, czy ulepszony widżet da się
 sterować, więc niesterowalny widżet wychodzi na jaw tam, a nie w połowie renderu.
 
 Dla widżetu, którego nakładka naprawdę nie potrafi obsłużyć — np. listy

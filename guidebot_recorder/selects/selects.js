@@ -235,6 +235,11 @@
   /**
    * `multiple` and `size > 1` already render as an in-page listbox with no OS
    * popup, so they record fine as they are and are left untouched.
+   *
+   * "Not shimmed" therefore means two unrelated things, and a caller must not
+   * read it as "the page enhanced this itself": the recorder re-tests
+   * `multiple` / `size > 1` on its own and drives such a select by clicking the
+   * `<option>` where it already sits.
    */
   function isShimmable(select) {
     if (!select.isConnected) {
