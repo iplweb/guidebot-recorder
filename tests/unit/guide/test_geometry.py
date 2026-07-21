@@ -64,6 +64,26 @@ def test_the_ellipse_exit_lies_on_the_ray_not_behind_it():
     assert exit_point == pytest.approx((-40.0, 0.0))
 
 
+def test_a_ray_from_off_centre_inside_the_ellipse_exits_on_the_rim_ahead():
+    """The linear term of the ellipse quadratic must survive.
+
+    Every other ellipse test starts at the centre (``u = v = 0``), where the
+    ``b`` coefficient of the quadratic is zero regardless — so a ``b = 0.0``
+    mutation slips through unnoticed. This ray starts *off* the centre and
+    moving, so ``b`` is non-zero and its sign matters: the exit has to land on
+    the rim (equation == 1.0) and lie *ahead* of the origin along the ray, not
+    at the far root behind it.
+    """
+
+    e = Ellipse(cx=100.0, cy=100.0, rx=50.0, ry=20.0)
+    origin = (110.0, 100.0)  # inside the ellipse, but 10px to the right of centre
+
+    exit_point = ray_exit(origin, (200.0, 100.0), e)
+
+    assert _on_ellipse(exit_point, e) == pytest.approx(1.0)
+    assert exit_point[0] > origin[0]  # forward along the +x ray, not the root behind it
+
+
 @pytest.mark.parametrize(
     "shape",
     [RECT, Ellipse(cx=50.0, cy=25.0, rx=50.0, ry=25.0)],
@@ -73,6 +93,26 @@ def test_a_point_outside_the_shape_is_returned_unchanged(shape):
     outside = (500.0, 500.0)
 
     assert ray_exit(outside, (0.0, 0.0), shape) == outside
+
+
+@pytest.mark.parametrize(
+    ("origin", "shape"),
+    [
+        ((0.0, 25.0), RECT),  # exactly on the left edge
+        ((0.0, 0.0), RECT),  # exactly on a corner
+        ((100.0, 25.0), Ellipse(cx=50.0, cy=25.0, rx=50.0, ry=25.0)),  # exactly on the rim
+    ],
+    ids=["rect-edge", "rect-corner", "ellipse-rim"],
+)
+def test_a_point_exactly_on_the_boundary_is_returned_unchanged(origin, shape):
+    """Containment is strict — `r.x < ox` for rects, `u² + v² >= 1` for ellipses.
+
+    A point sitting *on* the boundary is not "inside", so nothing is clipped and
+    the origin comes back untouched. Pins the boundary of the containment test
+    the plain outside/inside cases leave open.
+    """
+
+    assert ray_exit(origin, CENTER, shape) == origin
 
 
 @pytest.mark.parametrize(

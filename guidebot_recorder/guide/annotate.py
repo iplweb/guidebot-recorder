@@ -7,10 +7,10 @@ from guidebot_recorder.guide.model import Annotation
 from guidebot_recorder.models.scenario import ResolvedHighlight
 from guidebot_recorder.overlay.geometry import Ellipse, ellipse_around, fit_to_bounds
 
-#: click star: each of the eight arms spans these radii around the cursor
-#: (screenshot px, deviceScaleFactor already applied upstream). The gap left by
-#: `CLICK_INNER` clears the 16 px cursor ring drawn by `overlay/cursor.js`, so
-#: the cursor itself stays readable inside the star.
+#: click star: each of the eight arms spans these radii around the click point
+#: (viewport px — the guide never sets a deviceScaleFactor). `CLICK_INNER` leaves
+#: a hole in the middle so the arms are a burst radiating outward rather than a
+#: solid asterisk; the click point stays legible inside it.
 CLICK_INNER = 16.0
 CLICK_OUTER = 30.0
 
@@ -29,11 +29,12 @@ def target_shape(
 ) -> Shape | None:
     """The shape the annotations draw around the target.
 
-    `highlight` -> the ellipse fitted to the screenshot (the very one its
-    annotation draws); any other action with a box -> a `Rect` from that box;
-    no box -> ``None``. A `highlight` without a `mark` is ``None`` too: the
-    padding is unknown, so there is no ellipse to compute — and such a step
-    gets no highlight annotation either.
+    `highlight` -> the ellipse its annotation draws: fitted to `bounds` when
+    given, raw otherwise (the fit only matters against a real screenshot). Any
+    other action with a box -> a `Rect` from that box; no box -> ``None``. A
+    `highlight` without a `mark` is ``None`` too: the padding is unknown, so
+    there is no ellipse to compute — and such a step gets no highlight
+    annotation either.
 
     Pure and cheap on purpose: `capture.py` calls it again to remember the
     previous target, which is clearer than threading a tuple back out of
@@ -65,7 +66,12 @@ def annotations_for(
     mark: ResolvedHighlight | None = None,
     bounds: _Point | None = None,
 ) -> list[Annotation]:
-    """Build the marks for one target action, omitting any mark that lacks geometry."""
+    """Build the marks for one target action.
+
+    A mark is omitted when it lacks geometry; the arrow is also dropped when
+    clipping against the two targets leaves nothing to draw (they overlap, or
+    the gap is shorter than `MIN_ARROW`).
+    """
 
     anns: list[Annotation] = []
     shape = target_shape(action, box=box, mark=mark, bounds=bounds)
