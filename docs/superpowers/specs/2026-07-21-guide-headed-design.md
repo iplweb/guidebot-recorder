@@ -20,12 +20,17 @@ tych flag — okno jest zawsze niewidoczne, a jedyną diagnostyką pozostaje
 Poprzedni projekt (`2026-07-20-pdf-step-guide-design.md`, decyzja **S4**)
 zakładał, że `page.pdf()` rzuca wyjątek w przeglądarce headed, i wyprowadzał z
 tego wniosek, że faza druku musi zawsze działać headless. To założenie
-powtórzone jest w repozytorium w trzech miejscach:
+powtórzone jest w kodzie w czterech miejscach:
 
 - `cli.py:362` — komentarz `# page.pdf() needs headless`,
-- `guide/pdf.py:12` — docstring „Browser MUST be headless (page.pdf throws
-  otherwise)”,
+- `guide/pdf.py:1` — docstring modułu „…via headless Chromium page.pdf()”,
+- `guide/pdf.py:12` — docstring funkcji „Browser MUST be headless (page.pdf
+  throws otherwise)”,
 - `guide/guide.py:34` — docstring „this phase is always headless”.
+
+Poza kodem reguła występuje jeszcze w dokumentach projektowych: w starym
+specu (`2026-07-20-pdf-step-guide-design.md:54-55,166,196,210`) oraz w planie
+wdrożenia (`docs/superpowers/plans/2026-07-20-pdf-step-guide.md:18,842,896,1209`).
 
 To jedno źródło przepisane trzy razy, nie trzy niezależne potwierdzenia.
 Zweryfikowano je empirycznie 2026-07-21:
@@ -53,8 +58,8 @@ W zakresie:
 - Flagi `--headed` i `--pause-on-error` w `guidebot guide`.
 - Zatrzymanie na błędzie w pętli przechwytywania, z redakcją sekretów w
   komunikacie.
-- Usunięcie z repozytorium nieprawdziwej reguły „page.pdf wymaga headless”
-  (trzy miejsca wymienione wyżej) i odnotowanie wycofania S4 w starym specu.
+- Usunięcie z kodu nieprawdziwej reguły „page.pdf wymaga headless” (cztery
+  miejsca wymienione wyżej) i odnotowanie wycofania S4 w starym specu.
 
 Poza zakresem (świadomie):
 
@@ -65,6 +70,10 @@ Poza zakresem (świadomie):
   jest tam dziś przekazywany dalej bez redakcji, więc nieredagowany komunikat
   może dotrzeć do użytkownika niezależnie od nowych flag. To istniejąca
   usterka, nie regresja tej zmiany — osobne zadanie.
+- **Edycja planu wdrożenia `docs/superpowers/plans/2026-07-20-pdf-step-guide.md`.**
+  To artefakt historyczny — zapis planu, który został wykonany w danym
+  momencie. Zostaje nietknięty; wycofanie odnotowujemy w specu, bo spec jest
+  dokumentem normatywnym, a plan nie.
 - **Podniesienie dolnej granicy `playwright>=1.47`** w `pyproject.toml`.
   Bardzo stary Chromium mógłby jeszcze podlegać oryginalnemu ograniczeniu, ale
   `--headed` jest ścieżką debugową: awaria byłaby głośna i natychmiastowa, a
@@ -92,8 +101,9 @@ Uruchomienie przeglądarki zmienia się z `launch(headless=True)` na
 
 ### 2. `guidebot_recorder/guide/pdf.py`
 
-Docstring `html_to_pdf` przestaje twierdzić, że przeglądarka musi być
-headless. Zostaje opis tego, co funkcja robi.
+Oba docstringi przestają twierdzić, że przeglądarka musi być headless —
+zarówno docstring modułu (linia 1, „…via headless Chromium page.pdf()”), jak i
+docstring funkcji `html_to_pdf` (linia 12). Zostaje opis tego, co kod robi.
 
 ### 3. `guidebot_recorder/guide/guide.py`
 
@@ -112,8 +122,24 @@ headless. Zostaje opis tego, co funkcja robi.
 ### 4. `guidebot_recorder/guide/capture.py`
 
 `capture_pages` przyjmuje `pause_on_error: bool = False` oraz
-`sensitive_values: Iterable[str] = ()`. Ciało pętli po krokach zostaje
-opakowane w `try/except`, wzorowane na `render.py:2438-2452`:
+`sensitive_values: Iterable[str] = ()`.
+
+Helper importujemy formą `from guidebot_recorder.recorder._debug import
+pause_for_inspection` — nie `from ... import _debug`. To nie jest kosmetyka:
+przesądza, że symbol staje się atrybutem modułu `guide.capture`, a więc
+testy mogą go podmienić przez `monkeypatch.setattr(capture,
+"pause_for_inspection", ...)`, spójnie z istniejącym wzorcem
+`monkeypatch.setattr(capture, "reuse_is_valid", ...)`
+(`tests/unit/guide/test_capture.py:92`).
+
+Ciało pętli po krokach zostaje opakowane w `try/except`, wzorowane na
+`render.py:2438-2452`. **`try` zaczyna się dopiero po `kind = classify(fs)`**
+(`capture.py:67`), a nagłówek pętli wraz z obsługą `skipped_branch`
+(`capture.py:62-66`) zostaje przed nim. Inaczej wyjątek rzucony z `classify()`
+trafiłby w handler, w którym `kind` jest jeszcze niezwiązane — `NameError`
+zamaskowałby prawdziwy błąd na pierwszej iteracji, a na kolejnych handler
+raportowałby `kind` z poprzedniego kroku. `index` jest bezpieczny w obu
+wariantach, bo pochodzi z `enumerate` w nagłówku pętli.
 
 ```python
 except Exception as exc:
@@ -132,6 +158,10 @@ Trzy różnice wobec renderera, wynikające z tego, że `guide` jest prostszy:
   opakowywanie zepsułoby te komunikaty;
 - `phase="guide"` w komunikacie pauzy.
 
+Liczne `continue` wewnątrz pętli nie omijają `except` (kończą iterację
+normalnie), a wewnętrzny `raise` z `capture.py:155` zostanie przez ten handler
+złapany — zgodnie z intencją.
+
 Ograniczenie znane i akceptowane: `except Exception` nie łapie
 `asyncio.CancelledError` (dziedziczy z `BaseException`), więc Ctrl-C nie
 uruchamia pauzy. To pożądane — pauza przy przerwaniu przez użytkownika byłaby
@@ -139,20 +169,42 @@ irytująca.
 
 ### 5. Dokumentacja
 
-`docs/pl/pdf-guide.md` i `docs/en/pdf-guide.md` — opis obu flag. W starym
-specu `2026-07-20-pdf-step-guide-design.md` dopisek przy S4, że przesłanka
-została obalona empirycznie (z wersjami) i decyzja jest wycofana.
+Cztery pliki dokumentacji, bo opcje `guide` są udokumentowane w dwóch
+miejscach na język:
+
+- `docs/pl/cli-reference.md:148-152` i odpowiadająca tabela w
+  `docs/en/cli-reference.md` (sekcja `## \`guidebot guide\``, od linii 196) —
+  **tabela opcji**, dziś wymieniająca tylko `--out`, `--timeout`, `--verbose`.
+  Wszystkie pozostałe komendy mają tam już wiersze `--headed` /
+  `--pause-on-error` (np. `docs/pl/cli-reference.md:31,33`), więc pominięcie
+  `guide` zostawiłoby dokładnie tę niespójność, którą ten spec usuwa.
+- `docs/pl/pdf-guide.md:69-74` i `docs/en/pdf-guide.md:71` — również **tabela
+  opcji**, nie tylko proza.
+
+W starym specu `2026-07-20-pdf-step-guide-design.md` dopisek przy S4, że
+przesłanka została obalona empirycznie (z wersjami) i decyzja jest wycofana.
+Dopisek musi objąć wszystkie miejsca, w których ten spec powtarza regułę
+(linie 54-55, 166, 196, 210), a nie tylko sam punkt S4 — inaczej dokument
+zostanie wewnętrznie sprzeczny.
 
 ## Testy
 
 Test integracyjny w trybie headed jest niemożliwy w CI (brak wyświetlacza),
 więc weryfikacja idzie przez testy jednostkowe:
 
-- `tests/unit/guide/test_capture.py` — monkeypatch `pause_for_inspection`;
-  krok rzuca wyjątek → helper wywołany przy `pause_on_error=True`, niewywołany
-  przy `False`, a wyjątek w obu przypadkach propaguje dalej.
-- `tests/unit/guide/test_capture.py` — komunikat pauzy dostaje przekazane
-  `sensitive_values` (asercja na argumencie, nie na treści wydruku).
+- `tests/unit/guide/test_capture.py` — `monkeypatch.setattr(capture,
+  "pause_for_inspection", fake)`, czyli patch celuje w
+  `guidebot_recorder.guide.capture.pause_for_inspection` (wymaga formy importu
+  ustalonej w §4). Krok rzuca wyjątek → helper wywołany przy
+  `pause_on_error=True`, niewywołany przy `False`, a wyjątek w obu
+  przypadkach propaguje dalej.
+- `tests/unit/guide/test_capture.py` — helper dostaje przekazane
+  `sensitive_values` (asercja na argumencie zarejestrowanym przez fake, nie na
+  treści wydruku).
+
+Istniejące fixture'y `FakePage` / `FakeRecorder` / `_compiled` w tym pliku
+wystarczą. `FakePage` nie ma metody `.pause()`, ale przy podmienionym helperze
+nie jest ona wołana.
 - `tests/integration/test_guide.py` — bez zmian, musi pozostać zielony; to
   dowód, że domyślna ścieżka headless nie ucierpiała.
 
