@@ -837,9 +837,12 @@ dystrybuowane z pakietem.
 
 ### `expect`
 
-Model przyjmuje pole `expect`, lecz compiler sam wyprowadza gotowość z obserwowanej
-zmiany URL i nie traktuje źródłowej wartości jako stabilnego sterowania. Nie używaj
-`expect` w scenariuszach; dla SPA dodaj jawny `wait`.
+Kompilator sam wylicza gotowość (`navigation`/`idle`/`none`) z obserwowanej zmiany URL
+i zamraża ten wynik w skompilowanym sidecarze (`CachedAction`/`Fingerprint`) — nigdy nie
+czyta wartości z kroku źródłowego. Pole `expect` na kroku scenariusza jest odrzucane już
+przy wczytywaniu pliku, z komunikatem tłumaczącym dlaczego i co usunąć; usunięcie niczego
+nie zmienia w zachowaniu, bo pole nigdy nie było brane pod uwagę. Dla aktualizacji SPA pod
+tym samym adresem URL użyj jawnego `wait`.
 
 ## Gałęzie opcjonalne {#galezie-opcjonalne}
 

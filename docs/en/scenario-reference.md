@@ -1126,12 +1126,14 @@ Only one pop-up lifecycle is supported. A second, simultaneous, unexpected, or
 independently closing page fails. There is no explicit tab/window switch command, and
 targets inside any iframe remain unsupported.
 
-### `expect` is not a supported authoring control
+### `expect` is rejected on authored steps
 
-The internal step model currently accepts an `expect` field, but the compiler derives
-readiness from observed URL change and does not honor the source value as a stable
-user control. Do not add `expect` to authored scenarios. For same-URL SPA updates,
-use explicit waits and verify the result.
+The compiler derives readiness (`navigation`/`idle`/`none`) itself from the observed URL
+change around each action and freezes that observation into the compiled sidecar
+(`CachedAction`/`Fingerprint`) — it never reads a value from the source step. Writing
+`expect:` on a step is therefore rejected at load time, with a message that explains why
+and tells you to delete it; nothing changes when you do, since the field was never
+consulted. For same-URL SPA updates, use explicit waits and verify the result instead.
 
 ## Recompile matrix
 
