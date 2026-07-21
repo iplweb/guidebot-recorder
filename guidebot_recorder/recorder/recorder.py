@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import NamedTuple
 
 from playwright.async_api import ElementHandle, Frame, Locator, Page
 from playwright.async_api import Error as PlaywrightError
@@ -212,6 +213,12 @@ _APPEARED_NODE_JS = """(label) => {
 }"""
 
 
+class PointResult(NamedTuple):
+    locator: Locator
+    box: dict | None
+    center: tuple[float, float] | None
+
+
 class Recorder:
     def __init__(
         self,
@@ -261,38 +268,61 @@ class Recorder:
         self,
         control: Locator | ElementHandle,
         *,
+        ripple: bool = True,
         click_sound: bool = False,
-    ) -> None:
+    ) -> tuple[dict | None, tuple[float, float] | None]:
         """Glide the cursor onto ``control``, ripple, and settle.
 
         Takes a ``Locator`` *or* an ``ElementHandle`` because the select
         choreography aims at nodes that no frozen ``Target`` names — a page
         widget resolved by the association heuristic, or an option row that only
         exists once the list is open.
+
+        Returns the control's bounding box and center (viewport pixels), both
+        ``None`` when it has no box, so :meth:`point` can hand them to callers
+        that annotate the frame without re-resolving.
         """
 
         # scroll to the target on BOTH axes — an element can be off-screen horizontally
         # too, and Playwright's auto-scroll is vertically centric
         await control.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
+        box: dict | None = None
+        center: tuple[float, float] | None = None
         rippled = False
         if self.overlay is not None:
             box = await control.bounding_box()
             if box is not None:
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
+                center = (cx, cy)
                 await self.overlay.move_to(self.page, cx, cy)
-                await self.overlay.ripple(self.page, flash=click_sound)
-                if click_sound and self._on_sfx is not None:
-                    self._on_sfx("click")  # AT ripple time, before the settle pause
-                rippled = True
-                await self.page.wait_for_timeout(self.settle_ms)
+                if ripple:
+                    await self.overlay.ripple(self.page, flash=click_sound)
+                    if click_sound and self._on_sfx is not None:
+                        self._on_sfx("click")  # AT ripple time, before the settle pause
+                    rippled = True
+                    await self.page.wait_for_timeout(self.settle_ms)
         if click_sound and not rippled and self._on_sfx is not None:
             self._on_sfx("click")  # fallback: no overlay / no bbox
+        return box, center
+
+    async def point(
+        self, target: Target, *, ripple: bool = True, click_sound: bool = False
+    ) -> PointResult:
+        """Resolve the target, scroll it into view, move the cursor onto it.
+
+        Returns the locator plus the target's bounding box and center (viewport
+        pixels) so callers (e.g. the PDF guide) can annotate without re-resolving.
+        ``ripple=False`` suppresses the click ring — a still capture wants a
+        clean frame. ``box``/``center`` are None when the element has no box.
+        """
+        locator = await build_locator(self.frame, target)
+        box, center = await self._approach(locator, ripple=ripple, click_sound=click_sound)
+        return PointResult(locator, box, center)
 
     async def _point_and_prepare(self, target: Target, *, click_sound: bool = False) -> Locator:
-        locator = await build_locator(self.frame, target)
-        await self._approach(locator, click_sound=click_sound)
-        return locator
+        res = await self.point(target, ripple=True, click_sound=click_sound)
+        return res.locator
 
     async def navigate(self, url: str) -> None:
         # For the main window ``self.frame`` is the site iframe, so this navigates

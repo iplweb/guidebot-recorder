@@ -141,6 +141,10 @@ class Step(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     say: str | None = None
+    #: richer per-step text for the PDF guide; overrides narration in `guide`,
+    #: ignored by the video renderer. Not a command (does not count toward
+    #: "exactly one command"); a step with only `caption` is still an empty step.
+    caption: str | None = None
     teach: str | None = None
     navigate: str | NavigateConfig | None = None
     click: str | None = None

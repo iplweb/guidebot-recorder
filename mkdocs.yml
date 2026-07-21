@@ -65,6 +65,7 @@ plugins:
             Concepts: Podstawy
             How it works: Jak to działa
             Scenario files: Pliki scenariusza
+            Building step-by-step PDF guides: Tworzenie przewodników PDF krok po kroku
             Multilingual audio: Wielojęzyczne audio
             Localized render sets: Zlokalizowane zestawy renderów
             Reference: Dokumentacja
@@ -79,6 +80,7 @@ nav:
   - Concepts:
       - How it works: how-it-works.md
       - Scenario files: scenario-files.md
+      - Building step-by-step PDF guides: pdf-guide.md
       - Multilingual audio: multilingual-audio.md
       - Localized render sets: localized-render-sets.md
   - Reference:

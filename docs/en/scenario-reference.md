@@ -611,6 +611,27 @@ non-select control (a custom `role="combobox"` widget, a button) is a `not_selec
 validation error. `option` is the visible label of the option to pick; it is shown,
 never spoken, and is **not** environment-substituted.
 
+Validation also checks that the resolved `<select>` actually **offers** the requested
+option; if it does not, the target is rejected with `option_missing`, and the message
+lists the labels the element really has. This is the semantic safety net for dropdowns
+with no accessible name, which the resolver can only address positionally
+(`combobox nth=N`): that index shifts with the state of the DOM, so without the check a
+wrong-but-plausible `<select>` would pass validation and the mistake would only surface
+later — as a compile-time timeout, or as a render that clicks the wrong control on
+camera. The comparison collapses whitespace and is then case-sensitive: exactly the
+rule every execution path applies (see below), so validation never refuses a control
+Guidebot could have driven, and never blesses one it could not.
+
+The check applies to exactly the controls whose own `<option>` elements are what
+Guidebot will search at render time — a shimmed `<select>` and a natively-visible
+listbox (`multiple` / `size="2"`). **A `<select>` the page has already enhanced is
+exempt**, because Guidebot drives such a widget through the page's own DOM list and
+never through the hidden original's options: a select2 dropdown backed by AJAX
+legitimately carries no options at all until the user opens it, and rejecting it
+would refuse a control Guidebot can drive perfectly well. A `<select>` that carries
+no options *and* is not enhanced is still rejected, with a message saying there is
+nothing to choose from.
+
 A native `<select>`'s option list is drawn by the operating system, so no
 browser-automation tool — Playwright included — can unfurl or screenshot it. To make
 the choice visible anyway, Guidebot injects a DOM shim (`config.selects`, described

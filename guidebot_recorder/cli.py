@@ -26,7 +26,11 @@ from guidebot_recorder.recorder.session import (
     establish_session,
 )
 from guidebot_recorder.resolver.reasoner import CodexReasoner
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import (
+    CompiledSidecarError,
+    guard_source_scenario,
+    load_scenario,
+)
 from guidebot_recorder.scenario.render_set import RenderSetPlan, load_render_set
 from guidebot_recorder.tts.edge import EdgeTtsProvider
 
@@ -76,6 +80,11 @@ def compile_cmd(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp i kolejne kroki"),
 ) -> None:
     """Skompiluj intencje → `*.compiled.yaml` (faza AI)."""
+    try:
+        guard_source_scenario(path)
+    except CompiledSidecarError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
     if not force and compile_up_to_date(path):
         typer.echo("nic do skompilowania (aktualne)")
         return
@@ -223,6 +232,12 @@ def render_cmd(
         typer.echo("BŁĄD: --auto-heal nie jest zaimplementowane w v1", err=True)
         raise typer.Exit(code=2)
 
+    try:
+        guard_source_scenario(path)
+    except CompiledSidecarError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
     scenario = load_scenario(path)
     cfg = scenario.config
     # `run_render` reloads the scenario from `path` itself, so the hold-frame
@@ -329,6 +344,44 @@ def render_set_cmd(
         raise typer.Exit(code=1) from None
     for output in outputs:
         typer.echo(f"zrenderowano: {output}")
+
+
+@app.command("guide")
+def guide_cmd(
+    path: Path,
+    out: Path = typer.Option(..., "--out", "-o", help="Ścieżka wyjściowa .pdf"),
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
+    ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp"),
+) -> None:
+    """Zbuduj przewodnik PDF krok-po-kroku ze skompilowanego scenariusza (0×LLM)."""
+    from guidebot_recorder.guide.guide import run_guide
+    from guidebot_recorder.guide.prolog import GuideError
+
+    async def _run() -> int:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=not headed)
+            try:
+                return await run_guide(
+                    path,
+                    out,
+                    browser,
+                    timeout=timeout,
+                    verbose=verbose,
+                    pause_on_error=pause_on_error,
+                )
+            finally:
+                await browser.close()
+
+    try:
+        count = asyncio.run(_run())
+    except GuideError as exc:
+        typer.echo(f"BŁĄD: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(f"zbudowano przewodnik: {out} ({count} stron)")
 
 
 if __name__ == "__main__":

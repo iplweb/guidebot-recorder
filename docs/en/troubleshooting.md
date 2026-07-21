@@ -90,6 +90,41 @@ account preference, or server state. Make that input deterministic. If the local
 page also changes routes or target labels, use a
 [localized render set](localized-render-sets.md).
 
+## `select` resolves to the wrong dropdown
+
+The symptom is `option_missing` in the compile error:
+
+```
+nie udało się zwalidować namiaru dla: 'the formal character dropdown'
+(ostatnie odrzucenie: The <select> has no option labelled 'Journal article';
+ it offers: 'Unit report', 'Author report'.)
+```
+
+The resolver picked a `<select>` that does not carry the requested option. This is
+most common where dropdowns have no accessible name and can only be addressed
+positionally (`combobox nth=N`) — an added row, an added frame, or an AJAX widget swap
+shifts that index, so the same description lands on a different element.
+
+1. Check that `option` matches the label in the interface. Whitespace does not matter
+   (runs of it are collapsed on both sides); **case does**, and so does everything
+   else. That is the same rule every execution path applies, so a label accepted here
+   is a label Guidebot can really pick — and one rejected here would have failed
+   during playback anyway.
+2. Make `from` more specific: name the section heading, the row label, or the purpose
+   of the dropdown so the description separates it from the other lists on the page.
+3. Add a `wait` before the step if the dropdown arrives via AJAX — the resolver
+   chooses from what is on the page at compile time.
+
+The label list in the message shows which element the resolver actually hit, which
+usually identifies the mistaken `<select>` immediately.
+
+The check deliberately does not fire for a `<select>` the page has enhanced with its
+own widget (select2 and friends): Guidebot drives those through the page's DOM list,
+not through the hidden original's options, so an option set that stays empty until
+the widget is opened is not evidence of a wrong target. A mistake there surfaces in
+`render` instead, as an option row that never appears — see
+[`select` in the scenario reference](scenario-reference.md#select).
+
 ## `teach` cannot type a value
 
 Compiler v2 accepts literal demonstrations such as “Type `demo@example.com` into the

@@ -51,6 +51,41 @@ Snapshot jest ograniczony do 200 semantycznych kandydatów i zwykle do elementó
 widocznych w viewportcie. Guidebot może przewinąć do już rozwiązanego targetu, ale nie
 ma źródłowej komendy `scroll`.
 
+## `select` trafia w złą listę rozwijaną
+
+Objaw to `option_missing` w komunikacie kompilacji:
+
+```
+nie udało się zwalidować namiaru dla: 'lista wyboru charakteru formalnego'
+(ostatnie odrzucenie: The <select> has no option labelled 'Artykuł w czasopismie';
+ it offers: 'Raport jednostki', 'Raport autora'.)
+```
+
+Resolver wskazał `<select>`, który nie ma żądanej opcji. Najczęściej dzieje się to
+tam, gdzie listy nie mają nazwy dostępnej i mogą być namierzone tylko pozycyjnie
+(`combobox nth=N`) — dodany wiersz, dodana ramka albo AJAX podmieniający widget
+przesuwa numerację i ten sam opis wskazuje inny element.
+
+1. Sprawdź, czy `option` dokładnie odpowiada etykiecie w interfejsie. Białe znaki nie
+   mają znaczenia (ich ciągi są normalizowane po obu stronach), ale **wielkość liter
+   ma** — tak samo jak cała reszta. To ta sama reguła, którą stosuje każda ścieżka
+   wykonania, więc etykieta przyjęta tutaj jest etykietą, którą Guidebot naprawdę
+   potrafi wybrać, a odrzucona i tak przewróciłaby się przy odtwarzaniu.
+2. Doprecyzuj `from`: dopisz nagłówek sekcji, etykietę wiersza lub funkcję listy, żeby
+   opis odróżniał ją od pozostałych list na stronie.
+3. Dodaj `wait` przed krokiem, jeśli listę dostawia AJAX — resolver wybiera spośród
+   tego, co widzi w chwili kompilacji.
+
+Lista etykiet w komunikacie pokazuje, na jaki element faktycznie trafił resolver, więc
+zwykle od razu widać, o który `<select>` chodzi.
+
+Kontrola celowo nie działa dla `<select>`, który strona przejęła własnym widżetem
+(select2 i podobne): takie kontrolki Guidebot obsługuje przez listę DOM strony, a nie
+przez opcje ukrytego oryginału, więc zestaw opcji pusty do czasu otwarcia widżetu nie
+jest dowodem trafienia w zły element. Pomyłka wychodzi wtedy dopiero przy `render`, w
+postaci wiersza opcji, który się nie pojawia — patrz
+[`select` w referencji scenariusza](scenario-reference.md#select).
+
 ## `teach` → `type` jest odrzucane
 
 Jawny `inputText` musi być niepustym, dokładnym fragmentem instrukcji `teach`. Guidebot

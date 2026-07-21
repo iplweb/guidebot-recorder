@@ -486,6 +486,27 @@ reasonera i musi wskazać natywny element `<select>` — trafienie w inną kontr
 to widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie**
 podlega podstawianiu zmiennych środowiskowych.
 
+Walidacja sprawdza także, czy wskazany `<select>` **w ogóle ma** żądaną opcję — jeśli
+nie, zgłasza `option_missing` i wymienia etykiety, które ten element faktycznie
+oferuje. To zabezpieczenie semantyczne dla list bez nazwy dostępnej, które resolver
+może namierzyć wyłącznie pozycyjnie (`combobox nth=N`): numeracja przesuwa się wraz ze
+stanem DOM, więc bez tej kontroli zły-ale-prawdopodobny `<select>` przeszedłby
+walidację, a pomyłka wyszłaby dopiero później — jako timeout kompilacji albo jako
+render klikający na filmie nie tę kontrolkę. Porównanie normalizuje białe znaki i jest
+następnie **wrażliwe na wielkość liter**: dokładnie ta sama reguła, którą stosuje każda
+ścieżka wykonania (patrz niżej), więc walidacja nigdy nie odrzuca kontrolki, którą
+Guidebot umiałby obsłużyć, i nigdy nie przepuszcza takiej, której by nie umiał.
+
+Kontrola dotyczy dokładnie tych kontrolek, których własne elementy `<option>` Guidebot
+faktycznie przeszukuje przy renderze — `<select>` z nakładką oraz natywnie widocznej
+listy (`multiple` / `size="2"`). **`<select>`, który strona już przejęła własnym
+widżetem, jest z niej wyłączony**: taki widżet Guidebot obsługuje przez listę DOM samej
+strony, nigdy przez opcje ukrytego oryginału, a lista select2 zasilana AJAX-em zupełnie
+normalnie nie ma żadnych opcji, dopóki użytkownik jej nie otworzy — odrzucenie jej
+oznaczałoby odmowę obsługi kontrolki, którą Guidebot obsługuje bez problemu.
+`<select>` bez opcji, którego strona *nie* przejęła, nadal jest odrzucany, z
+komunikatem mówiącym, że nie ma z czego wybierać.
+
 Listę opcji natywnego `<select>` rysuje system operacyjny, więc żadne narzędzie do
 automatyzacji przeglądarki — w tym Playwright — nie rozwinie jej ani nie zrzuci na
 ekran. Żeby mimo to pokazać wybór na filmie, Guidebot wstrzykuje nakładkę DOM

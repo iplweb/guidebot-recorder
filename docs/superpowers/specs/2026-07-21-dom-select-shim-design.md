@@ -398,6 +398,28 @@ select the predicate calls visible, so the first step always answers for a
 shimmed one, and the `<select>` is the click target on camera anyway (the button
 is `pointer-events: none`).
 
+**Addendum, merged from `main`.** `validate_compile_time` gained an optional
+`option=` parameter and an `option_missing` reason: a resolved `<select>` that
+does not offer the wanted label is rejected during resolution rather than timing
+out 15 s later inside `select_option`. Two adjustments make it sit correctly on
+this branch:
+
+- The label comparison is **exact after whitespace collapsing**, not the
+  case-insensitive comparison it landed with. That comparison was written to
+  mirror `_step_option_visibly`, which this branch deleted, and §7 unified
+  label→index matching to exact everywhere. Left alone it would have inverted the
+  change's own invariant — validation looser than execution, so a label differing
+  only in case passes the check and then fails during playback, which is the late
+  failure the check exists to remove.
+- The check is skipped for a select the shared predicate calls **enhanced**. Such
+  a widget is driven through the page's own DOM list (§4, row 2), never through
+  the hidden original's `<option>` elements, and an AJAX-backed select2 carries
+  no options at all until it is opened — so its option set is not evidence about
+  the target, and checking it would reject a control this branch can drive. The
+  other two classes, a shimmed select and a natively-visible listbox, *are*
+  driven off `select.options` (`optionIndexFor` and `_OPTION_INDEX_JS`), so for
+  them an absent label is a real, checkable defect and is rejected early.
+
 ### 7. One predicate for "already enhanced"
 
 `selects/visibility.js` holds the rule — computed `display`/`visibility`, an 8x8
