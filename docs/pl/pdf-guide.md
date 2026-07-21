@@ -87,6 +87,14 @@ Funkcja przewodnika ma następujący zakres:
 - **Brak grupowania wieloetapowego** — Kroki są renderowane indywidualnie. Przyszłe wersje mogą
   pozwolić na wizualne grupowanie sekwencji kroków lub numerowanie (np. „Krok 1 z 5").
 - **Brak dostosowania layoutu PDF** — Marginesy, czcionki, kolory i wymiary strony są ustalone.
+- **`select` bez podglądu rozwiniętej listy** — Krok `select` faktycznie wybiera opcję, a strona
+  PDF pokazuje zrzut zrobiony **po** wyborze. Natywna lista opcji `<select>` jest rysowana przez
+  system operacyjny, więc żadne narzędzie do automatyzacji przeglądarki nie potrafi jej zrzucić —
+  przewodnik pokazuje zwiniętą kontrolkę z już ustawioną wartością, nigdy rozwiniętą listę.
+- **`scroll` własną stronę produkuje tylko z tekstem** — Krok `scroll` zawsze faktycznie przewija
+  stronę (zrzuty są robione z widocznego obszaru viewportu, więc przewinięcie jest konieczne, by
+  kolejne kroki pokazywały właściwy fragment), ale własną stronę PDF tworzy tylko wtedy, gdy niesie
+  `say` lub `caption`. Sam `scroll` bez tekstu tylko przygotowuje widok pod kolejny krok.
 
 Jeśli Twój scenariusz wykracza poza te ograniczenia, użyj `render` do produkcji MP4.
 
