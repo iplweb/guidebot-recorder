@@ -449,9 +449,26 @@ akcje główne są błędem.
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
 blokiem `when` zamiast kroku — patrz [Gałęzie opcjonalne](#galezie-opcjonalne).
 
-Narracją domyślną jest `say`, a gdy go nie ma — `teach`. Same `click`, `hover`,
-`enterText`, `navigate`, `wait`, `slide` i `closeWindow` nie są czytane — tekst planszy
-`slide` jest wyświetlany, nie wypowiadany.
+Narracją domyślną jest `say`, a gdy go nie ma — `teach`; pozostałe komendy milczą, o
+ile same nie niosą `say`. Rozwiązywanie targetu i narracja domyślna dla każdej
+komendy:
+
+| Komenda | Cel rozwiązywany przez agenta? | Narracja domyślnie? |
+|---|---:|---|
+| `say` | Nie | Własny tekst |
+| `navigate` | Nie | Brak |
+| `teach` | Tak | Własny tekst |
+| `click` | Tak | Brak |
+| `hover` | Tak | Brak |
+| `enterText` | Tak, tylko `into` | Tylko towarzyszący `say` |
+| `select` | Tak, tylko `from` | Tylko towarzyszący `say` |
+| `highlight` | Tak, tylko `what` | Tylko towarzyszący `say` |
+| `scroll` | Nie | Tylko towarzyszący `say` |
+| liczbowy `wait` | Nie | Tylko towarzyszący `say` |
+| warunkowy `wait` | Tak, `until` | Tylko towarzyszący `say` |
+| `slide` | Nie | Tylko towarzyszący `say`; tekst na planszy jest wyświetlany, nie wypowiadany |
+| `desktop` | Nie | Tylko towarzyszący `say` |
+| `closeWindow` | Nie | Tylko towarzyszący `say` |
 
 ### `say`
 
@@ -877,9 +894,10 @@ Dla jednego warunkowego kroku zamiast bloku wystarczy `optional: true`:
 ```
 
 Pole jest dozwolone na krokach rozwiązujących target — `teach`, `click`, `hover`,
-`enterText` i warunkowy `wait` — oraz na liczbowym `wait`. Na kroku z samym `say`, na
-`navigate` i na `slide` jest **błędem walidacji**: te kroki niczego nie rozwiązują, więc
-„opcjonalność" obiecywałaby tolerancję, której Guidebot nie daje.
+`enterText`, `select`, `highlight` i warunkowy `wait` — oraz na liczbowym `wait`. Na
+kroku z samym `say`, na `navigate` i na `slide` jest **błędem walidacji**: te kroki
+niczego nie rozwiązują, więc „opcjonalność" obiecywałaby tolerancję, której Guidebot
+nie daje.
 
 ### Compile i render
 
