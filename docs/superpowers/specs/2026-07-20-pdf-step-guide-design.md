@@ -2,7 +2,16 @@
 
 Data: 2026-07-20
 Gałąź: `feat/pdf-step-guide`
-Status: zatwierdzony projekt (spec)
+Status: zatwierdzony projekt (spec); **decyzja S4 wycofana 2026-07-21**
+
+> **Errata 2026-07-21 — decyzja S4 („faza PDF zawsze headless") jest wycofana.**
+> Przesłanka, na której się opierała — „`page.pdf()` rzuca w trybie headed" —
+> została obalona empirycznie. Oryginalne sformułowania zostają w dokumencie
+> nietknięte; miejsca, których to dotyczy (architektura `pdf.py`, sekcja
+> „Kontekst przechwytywania (S1)", zmiany w CLI, obsługa błędów), są oznaczone
+> adnotacją **[Wycofane 2026-07-21]**, a pełne wyjaśnienie z wersjami znajduje
+> się przy S4 w sekcji „Kontekst przechwytywania (S1)". Następca:
+> `2026-07-21-guide-headed-design.md`.
 
 ## Cel
 
@@ -53,6 +62,9 @@ Nowy pakiet `guidebot_recorder/guide/`:
   landscape na krok).
 - `pdf.py` — renderuje HTML do PDF przez Chromium `page.pdf(...)` (zawsze
   headless, `landscape=True`, `print_background=True`).
+  **[Wycofane 2026-07-21]** „zawsze headless" nie obowiązuje — `page.pdf()`
+  działa również w trybie headed; zostają `landscape=True` i
+  `print_background=True`. Patrz errata przy S4 poniżej.
 - `guide.py` — publiczne wejście `run_guide(...)`, spina powyższe; wywoływane
   z CLI.
 
@@ -166,6 +178,25 @@ render, i przez guide; jeśli nie — replikujemy wiernie w `capture.py`.
 Faza PDF (`pdf.py`) **zawsze** działa w headless (bo `page.pdf()` rzuca w
 trybie headed, cli.py:212) — niezależnie od ewentualnej flagi debug w capture.
 
+> **[Wycofane 2026-07-21 — decyzja S4]** Powyższa przesłanka jest nieprawdziwa.
+> `page.pdf()` **nie** rzuca w trybie headed. Reguła pochodziła z czasów, gdy
+> Chromium miał osobną implementację trybu headless; „new headless" ujednolicił
+> ścieżki kodu i `Page.printToPDF` jest dostępne w obu trybach. Zweryfikowano
+> empirycznie 2026-07-21 na Playwright 1.61.0 / Chromium 149.0.7827.55 /
+> macOS (darwin 25.5.0):
+>
+> | Sprawdzenie | Wynik |
+> | --- | --- |
+> | `page.pdf()` na `headless=False`, `set_content` | OK, poprawny PDF (`%PDF-1.4`) |
+> | `guide.pdf.html_to_pdf()` na `headless=False` (`file://`, `goto(wait_until="load")`, `landscape=True`, `print_background=True`) | OK, 13 810 bajtów |
+>
+> **Konsekwencja: decyzja S4 zostaje wycofana, a nie zrealizowana.** Nie jest
+> potrzebna druga instancja przeglądarki ani rozdzielenie fazy przechwytywania
+> od fazy druku — wystarczy jedna przeglądarka uruchomiona z
+> `headless=not headed`, jak w pozostałych komendach. `guidebot guide` dostaje
+> flagi `--headed` i `--pause-on-error`; szczegóły w
+> `2026-07-21-guide-headed-design.md`.
+
 ## Adnotacje (szczegóły geometrii)
 
 Liczone w `annotate.py` z danych zebranych na żywej stronie, w pikselach
@@ -194,6 +225,9 @@ Współrzędne skalują się do rozmiaru `<img>` w układzie strony (viewBox SVG
   `path`, `-o/--out`, `--timeout`, `--verbose`; ładuje scenariusz, uruchamia
   Chromium przez `async_playwright()`, woła `run_guide(...)`. Faza PDF wymusza
   headless niezależnie od flag (S4).
+  **[Wycofane 2026-07-21]** S4 wycofana: faza PDF niczego nie wymusza, a `guide`
+  ma flagi `--headed` i `--pause-on-error` jak `compile`/`render`
+  (`launch(headless=not headed)`). Patrz errata przy S4 wyżej.
 - `pyproject.toml`: bez zmian w zależnościach runtime.
 
 ## Obsługa błędów
@@ -208,6 +242,8 @@ Współrzędne skalują się do rozmiaru `<img>` w układzie strony (viewBox SVG
   „uruchom `compile --force`” (S5).
 - `cached.opens_popup` w którejkolwiek akcji → twardy błąd v1 (B6).
 - Faza `page.pdf()` zawsze headless (S4).
+  **[Wycofane 2026-07-21]** — `page.pdf()` działa w obu trybach, to nie jest
+  warunek poprawności ani przypadek błędny. Patrz errata przy S4 wyżej.
 
 ## Uwagi (z review)
 

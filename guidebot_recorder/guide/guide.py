@@ -13,9 +13,10 @@ from guidebot_recorder.guide.layout import render_html
 from guidebot_recorder.guide.pdf import html_to_pdf
 from guidebot_recorder.guide.prolog import GuideError, scan_for_blockers
 from guidebot_recorder.overlay.overlay import Overlay
+from guidebot_recorder.recorder._debug import scenario_sensitive_values
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
-from guidebot_recorder.scenario.loader import load_scenario
+from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 
 
 async def run_guide(
@@ -26,18 +27,21 @@ async def run_guide(
     env: dict | None = None,
     timeout: float = 15.0,
     verbose: bool = False,
+    pause_on_error: bool = False,
 ) -> int:
     """Compiled scenario -> step-by-step PDF guide. Returns the page count.
 
     Replays the scenario with Playwright exactly like `run_render` does (same
-    context/overlay/chrome-shell setup), minus video recording and TTS — this
-    phase is always headless and 0×LLM (`scan_for_blockers` already rejected
-    anything a static pass cannot resolve).
+    context/overlay/chrome-shell setup), minus video recording and TTS — and
+    0×LLM (`scan_for_blockers` already rejected anything a static pass cannot
+    resolve). The caller decides whether the browser is headless.
     """
 
     path = Path(path)
     out_pdf = Path(out_pdf)
     scenario = load_scenario(path, env)
+    # Only used to redact the `--pause-on-error` message.
+    sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
     cpath = compiled_path(path)
     try:
         compiled = load_compiled(cpath)
@@ -84,7 +88,15 @@ async def run_guide(
 
         shots_dir = out_pdf.parent / (out_pdf.stem + "_shots")
         pages = await capture_pages(
-            scenario, compiled, page, recorder, shots_dir, timeout=timeout, verbose=verbose
+            scenario,
+            compiled,
+            page,
+            recorder,
+            shots_dir,
+            timeout=timeout,
+            verbose=verbose,
+            pause_on_error=pause_on_error,
+            sensitive_values=sensitive_values,
         )
     finally:
         await context.close()

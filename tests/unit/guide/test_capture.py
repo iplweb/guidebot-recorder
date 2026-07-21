@@ -91,7 +91,8 @@ class FakePage:
 async def test_wait_until_step_awaits_the_frozen_waitfor(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "reuse_is_valid", None)  # unused for this path; must not be called
     scenario = Scenario(
-        config=_cfg(), steps=[Step(wait=WaitUntil(until="spinnerowi zniknąć", state="hidden", timeout=7.0))]
+        config=_cfg(),
+        steps=[Step(wait=WaitUntil(until="spinnerowi zniknąć", state="hidden", timeout=7.0))],
     )
     target = _target()
     action = CachedAction(
@@ -158,11 +159,7 @@ async def test_gate_honors_hidden_state_and_the_gates_own_timeout(tmp_path, monk
     monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
     scenario = Scenario(
         config=_cfg(),
-        steps=[
-            WhenBlock(
-                when="a spinner", state="hidden", timeout=3.0, steps=[Step(click="ok")]
-            )
-        ],
+        steps=[WhenBlock(when="a spinner", state="hidden", timeout=3.0, steps=[Step(click="ok")])],
     )
     gate_target = _target()
     gate_action = CachedAction(
@@ -185,6 +182,95 @@ async def test_gate_honors_hidden_state_and_the_gates_own_timeout(tmp_path, monk
         timeout=15.0,  # deliberately different from the gate's own 3.0s timeout
     )
     assert recorder.wait_for_calls == [(gate_target, "hidden", 3.0)]
+
+
+class _Boom(RuntimeError):
+    """A step failure that is neither PlaywrightError nor GuideError."""
+
+
+class FailingRecorder(FakeRecorder):
+    async def point(self, target, ripple=False):
+        raise _Boom("krok padł na sekrecie hunter2")
+
+
+class _RecordingPause:
+    """Stand-in for `pause_for_inspection` that records its call arguments."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    async def __call__(self, page, phase, index, kind, exc, sensitive_values=()):
+        self.calls.append((page, phase, index, kind, exc, sensitive_values))
+
+
+def _click_scenario_and_action():
+    scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    return scenario, action
+
+
+async def test_pause_on_error_pauses_and_reraises_untouched(tmp_path, monkeypatch):
+    """A failing step pauses for inspection, then the original exception propagates."""
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario, action = _click_scenario_and_action()
+    page = FakePage()
+    with pytest.raises(_Boom):  # NOT wrapped in GuideError
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            page,
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+        )
+    assert len(pause.calls) == 1
+    called_page, phase, index, kind, exc, _sensitive = pause.calls[0]
+    assert called_page is page
+    assert phase == "guide"
+    assert index == 0
+    assert kind == "action"
+    assert isinstance(exc, _Boom)
+
+
+async def test_without_pause_on_error_the_helper_is_not_called(tmp_path, monkeypatch):
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario, action = _click_scenario_and_action()
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+        )
+    assert pause.calls == []
+
+
+async def test_pause_receives_the_sensitive_values(tmp_path, monkeypatch):
+    pause = _RecordingPause()
+    monkeypatch.setattr(capture, "pause_for_inspection", pause)
+    monkeypatch.setattr(capture, "reuse_is_valid", _async_true)
+    scenario, action = _click_scenario_and_action()
+    with pytest.raises(_Boom):
+        await capture_pages(
+            scenario,
+            _compiled([action]),
+            FakePage(),
+            FailingRecorder(),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+            sensitive_values=("hunter2",),
+        )
+    assert [call[5] for call in pause.calls] == [("hunter2",)]
 
 
 async def _async_false(*_args, **_kwargs):

@@ -206,6 +206,8 @@ legend (arrows, circles, frames, glows).
 | Option | Default | Meaning |
 |---|---:|---|
 | `--out PATH`, `-o PATH` | required | Destination `.pdf` path. Parent directories are created. |
+| `--headed` | off | Show the Chromium window. |
+| `--pause-on-error` | off | On error, pause and keep a headed page available for inspection. |
 | `--timeout SECONDS` | `15` | Playwright action timeout. |
 | `--verbose`, `-v` | off | Show page-build progress and step details. |
 

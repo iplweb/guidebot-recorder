@@ -350,6 +350,10 @@ def render_set_cmd(
 def guide_cmd(
     path: Path,
     out: Path = typer.Option(..., "--out", "-o", help="Ścieżka wyjściowa .pdf"),
+    headed: bool = typer.Option(False, "--headed", help="Pokaż okno przeglądarki"),
+    pause_on_error: bool = typer.Option(
+        False, "--pause-on-error", help="Przy błędzie zatrzymaj i zostaw okno otwarte (headed)"
+    ),
     timeout: float = typer.Option(15.0, "--timeout", help="Timeout akcji Playwrighta (sekundy)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Pokaż postęp"),
 ) -> None:
@@ -359,9 +363,16 @@ def guide_cmd(
 
     async def _run() -> int:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)  # page.pdf() needs headless
+            browser = await pw.chromium.launch(headless=not headed)
             try:
-                return await run_guide(path, out, browser, timeout=timeout, verbose=verbose)
+                return await run_guide(
+                    path,
+                    out,
+                    browser,
+                    timeout=timeout,
+                    verbose=verbose,
+                    pause_on_error=pause_on_error,
+                )
             finally:
                 await browser.close()
 
