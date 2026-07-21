@@ -90,7 +90,7 @@ którego ma na myśli, a kompilator mierzy jego pozycję i zamraża pozycyjny `n
 Kompilacja i tak kończy się sukcesem, ale wypisuje ostrzeżenie z liczbą trafień:
 
 ```
-namiar pozycyjny (2 z 11 pasujących) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
+namiar pozycyjny (2 z 11 pasujących, nth=1) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
 ```
 
 To nie jest błąd — krok się wyrenderuje. Ostrzeżenie sygnalizuje namiar tak stabilny,

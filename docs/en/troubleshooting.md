@@ -122,7 +122,7 @@ candidate it means and the compiler measures its position, freezing a positional
 Compile still succeeds, but prints a warning naming how many elements matched:
 
 ```
-namiar pozycyjny (2 z 11 pasujących) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
+namiar pozycyjny (2 z 11 pasujących, nth=1) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
 ```
 
 The warning is not an error; the step will render. It flags a target that is only as

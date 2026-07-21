@@ -426,8 +426,12 @@ zamienić.
   unieważnia wpis, a świeża rezolucja mierzy indeks od nowa.
 - Po świeżej rezolucji z `resolved.pinned` niosącym indeks: baner ostrzegawczy
   przez `step_banner(..., warning=True)`, tą samą drogą co `_warn_absent`:
-  `namiar pozycyjny (2 z 11 pasujących) — rozważ doprecyzowanie opisu, żeby
-  wskazywał element jednoznacznie`.
+  `namiar pozycyjny (2 z 11 pasujących, nth=1) — rozważ doprecyzowanie opisu,
+  żeby wskazywał element jednoznacznie`.
+  Liczebnik jest **1-based**, bo to zdanie dla człowieka: „1 z 2" znaczy po
+  polsku „pierwszy z dwóch", więc surowe `nth` opisywałoby drugie trafienie
+  słowami pierwszego. Surowa wartość idzie obok, żeby autor skorelował baner
+  z sidecarem i `--verbose` bez wybierania między czytelnością a odnajdywalnością.
 - `_target_desc` pokazuje `scope` **i `nth`** — inaczej `--verbose` ukrywa
   dokładnie to, co dodajemy.
 
