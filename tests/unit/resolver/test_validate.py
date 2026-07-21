@@ -94,6 +94,55 @@ async def test_validate_compile_time_select_rejects_non_native_combobox(page):
     assert result.reason == "not_select"
 
 
+async def test_validate_compile_time_select_accepts_hidden_select_with_visible_widget(page):
+    # Tom-Select-style hiding: the original <select> is display:none, but a
+    # widget the select's aria-controls names is on screen. §6's relaxation
+    # exists exactly for this case.
+    await page.set_content(
+        """
+        <select data-testid="province" style="display:none" aria-controls="widget">
+          <option>Mazowieckie</option>
+        </select>
+        <div id="widget" style="width:200px;height:30px;">Mazowieckie</div>
+        """
+    )
+
+    result = await validate_compile_time(page, ByTestidTarget(testid="province"), "select")
+
+    assert isinstance(result, ValidationOk)
+
+
+async def test_validate_compile_time_select_rejects_hidden_select_without_a_widget(page):
+    await page.set_content(
+        '<select data-testid="province" style="display:none"><option>Mazowieckie</option></select>'
+    )
+
+    result = await validate_compile_time(page, ByTestidTarget(testid="province"), "select")
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "not_visible"
+
+
+async def test_validate_compile_time_click_does_not_get_the_select_relaxation(page):
+    # The exact same DOM as the accepted `select` case above — a hidden
+    # <select> with a perfectly visible associated widget — but for any other
+    # action the generic "is_visible()" gate must still apply unchanged. The
+    # relaxation is `select`-only and must not leak.
+    await page.set_content(
+        """
+        <select data-testid="province" style="display:none" aria-controls="widget">
+          <option>Mazowieckie</option>
+        </select>
+        <div id="widget" style="width:200px;height:30px;">Mazowieckie</div>
+        """
+    )
+
+    result = await validate_compile_time(page, ByTestidTarget(testid="province"), "click")
+
+    assert isinstance(result, ValidationFail)
+    assert result.reason == "not_visible"
+
+
 async def test_build_locator_supports_all_structural_strategies(page):
     await page.set_content(
         """

@@ -18,6 +18,7 @@ from guidebot_recorder.models.target import (
     TextTarget,
 )
 from guidebot_recorder.resolver.identity_capture import capture_identity
+from guidebot_recorder.resolver.widget import user_visible_control
 
 ValidationReason: TypeAlias = Literal[
     "not_found",
@@ -177,7 +178,15 @@ async def validate_compile_time(
                 "not_unique", f"The target locator matched {count} elements; expected 1."
             )
 
-        if not await locator.is_visible():
+        if action == "select":
+            # A page may hide the real <select> and render its own dropdown
+            # (select2 clips it to 1x1 px — already "visible" by Playwright's
+            # rule below; Tom Select sets display:none, which is not). What
+            # matters for `select` is whether the viewer sees *some* control
+            # for it, not whether this exact element is on screen.
+            if await user_visible_control(locator) is None:
+                return ValidationFail("not_visible", "The matched element is not visible.")
+        elif not await locator.is_visible():
             return ValidationFail("not_visible", "The matched element is not visible.")
 
         if action == "type" and not await _is_type_compatible(locator):
