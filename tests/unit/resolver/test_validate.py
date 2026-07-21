@@ -315,11 +315,23 @@ async def test_reuse_failure_returns_sensitive_target_for_teach_type_on_password
 
 
 async def test_reuse_failure_hidden_wait_regression_returns_none_without_identity_check(page):
-    # count() == 0: element is absent, which is the success condition for a
-    # hidden wait. A buggy implementation that fell through to the identity
-    # checks below would return "identity_missing" instead, since a hidden
-    # wait's cached entry never carries an identity by design.
-    await page.set_content("<main></main>")
+    # Element present, visible, and unique (count() == 1) — the same DOM shape
+    # as test_wait_for_hidden_cache_without_identity_can_be_reused, but this
+    # test asserts on reuse_failure() directly instead of through the
+    # reuse_is_valid() boolean wrapper.
+    #
+    # The count() == 1 shape is what actually exercises the regression this
+    # test is named for: a buggy implementation that dropped the early
+    # ``return`` from the "hidden" branch and fell through to
+    # validate_compile_time() would find a visible, unique match
+    # (ValidationOk), then hit ``if cached.identity is None: return
+    # "identity_missing"`` in reuse_failure() — a hidden wait's cached entry
+    # never carries an identity by design. A DOM with count() == 0 would
+    # *not* prove this: validate_compile_time() returns
+    # ValidationFail("not_found", ...) before any identity check is reached,
+    # so a fall-through bug would surface as "not_found" instead, without
+    # ever exercising the identity_missing branch this test targets.
+    await page.set_content('<div data-testid="spinner">Ładowanie</div>')
     cached = _cached(
         ByTestidTarget(testid="spinner"),
         None,
