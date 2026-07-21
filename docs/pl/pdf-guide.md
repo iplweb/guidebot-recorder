@@ -72,7 +72,7 @@ uv run guidebot guide SCENARIUSZ.yaml --out WYNIK.pdf [OPCJE]
 | `--headed` | wyłączone | Pokazuje Chromium. |
 | `--pause-on-error` | wyłączone | Po błędzie zatrzymuje widoczną stronę do inspekcji. |
 | `--timeout SEKUNDY` | `15` | Timeout akcji Playwrighta. |
-| `--verbose`, `-v` | wyłączone | Pokazuje postęp budowania stron i szczegóły kroków. |
+| `--verbose`, `-v` | wyłączone | Pasek postępu (jak w `render`), rodzaj każdego kroku i komunikaty o pomijaniu. |
 
 Wartość `--timeout` jest używana identycznie do poleceń `compile` i `render` i dotyczy
 wszystkich akcji przeglądarki podczas generowania przewodnika.

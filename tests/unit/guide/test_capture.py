@@ -156,6 +156,58 @@ async def test_numeric_wait_still_calls_wait_seconds(tmp_path):
     assert pages == []
 
 
+async def test_verbose_reports_progress_for_every_step(tmp_path, monkeypatch, capsys):
+    """`-v` ma pokazywać, że coś się dzieje — pasek plus rodzaj każdego kroku.
+
+    Wcześniej `verbose` sterowało wyłącznie komunikatami o pomijaniu, więc
+    zdrowy scenariusz nie wypisywał ani linijki aż do końca budowania PDF-a.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[Step(say="Zaczynamy."), Step(click="przycisk zapisu"), Step(wait=0.0)],
+    )
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    await capture_pages(
+        scenario,
+        _compiled([None, action, None]),
+        FakePage(),
+        FakeRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+        verbose=True,
+    )
+    out = capsys.readouterr()
+    assert "[1/3] text" in out.out
+    assert "[2/3] action" in out.out
+    assert "[3/3] wait" in out.out
+    assert "guide" in out.err  # pasek tqdm idzie na stderr
+
+
+async def test_quiet_run_prints_nothing(tmp_path, monkeypatch, capsys):
+    """Bez `-v` ani pasek, ani opis kroku nie mogą zaśmiecić wyjścia."""
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
+    action = CachedAction(
+        action="click", target=_target(), expect="none", fingerprint=_fp(command_kind="click")
+    )
+    await capture_pages(
+        scenario,
+        _compiled([action]),
+        FakePage(),
+        FakeRecorder(),
+        tmp_path / "shots",
+        timeout=15.0,
+    )
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err == ""
+
+
 async def test_mandatory_click_with_stale_identity_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "reuse_failure", _async_reason("identity_mismatch"))
     scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
