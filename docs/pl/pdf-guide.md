@@ -42,6 +42,9 @@ Zrzuty ekranu są nakładane adnotacjami:
 - **Czerwone koło** — Cel kliknięcia myszy.
 - **Czerwona ramka** — Tekst wpisany do pola (z `enterText` lub literalnym `teach` pisaniem).
 - **Glow** (miękki halo) — Stan hover na elemencie.
+- **Elipsa** — Zakreślenie z kroku `highlight`, w kolorze ustawionym w scenariuszu.
+  Zamiast okrężnego ruchu kursora, który widać w filmie, przewodnik pokazuje samą
+  gotową elipsę wokół wskazanego elementu lub obszaru.
 
 ## Tekst narracji: `say`, `teach` lub `caption`
 

@@ -74,6 +74,7 @@ steps:
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
 | `desktop` | No | object / navy background | Background colour for a `desktop` opener step; render-only and not part of the compile hash. |
 | `fade` | No | object / disabled | Opt-in fade to/from a flat colour at the two ends of the finished film, render-only. |
+| `highlight` | No | object / built-in defaults | Default look of a `highlight` step's mark; render-only and not part of the compile hash. |
 | `holdFrameForNarration` | No | boolean / `true` | Freeze the picture during narration instead of recording in real time, render-only. |
 | `holdFrameSettle` | No | number / `1.0` | Real seconds recorded before the frame freezes, render-only. |
 | `selects` | No | object / built-in shim defaults | DOM select shim that makes a native `<select>`'s option list visible on camera; only `mode` affects the compile hash. |
@@ -423,6 +424,28 @@ config:
 not exceed the film's length, or the render fails loudly rather than clip a fade
 into nothing.
 
+### `highlight`
+
+Defaults for every `highlight` step in the film; each step may override them field by
+field.
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `color` | `rgba(250,204,21,.85)` | Colour of the film's trail and of the PDF ellipse. |
+| `padding` | `8` | Margin (px) between the element and the ellipse. |
+| `loops` | `2` | Laps the cursor makes around the target (1–5). |
+| `hold` | `0.6` | Seconds the trail stays up after the last lap. |
+
+```yaml
+config:
+  highlight:
+    color: "#22c55e"
+    padding: 12
+```
+
+Not part of `config_hash` — the marks are drawn over an already-resolved target, so
+changing how they look never invalidates a compiled reference.
+
 ### `holdFrameForNarration` and `holdFrameSettle`
 
 Render-only pacing control, **on by default**, and outside the config hash like
@@ -539,6 +562,7 @@ page state and align one generated action slot with each source step.
 | `hover` | Yes | No |
 | `enterText` | Yes, `into` only | Only accompanying `say` |
 | `select` | Yes, `from` only | Only accompanying `say` |
+| `highlight` | Yes, `what` only | Only accompanying `say` |
 | `scroll` | No | Only accompanying `say` |
 | numeric `wait` | No | Only accompanying `say` |
 | conditional `wait` | Yes, `until` | Only accompanying `say` |
@@ -792,6 +816,44 @@ something unrelated on camera.
 
 Pair a `select` step with a `say` such as "from this list I choose …" to narrate
 the intent.
+
+### `highlight`
+
+```yaml
+- highlight: "the Save button"        # shorthand: the target alone
+
+- highlight:
+    what: "the results table"
+    padding: 12        # px around the element   (default config.highlight.padding)
+    loops: 3           # laps around the target  (default 2)
+    hold: 1.5          # s the trail stays up    (default 0.6)
+    color: "#22c55e"   # marker colour           (default config.highlight.color)
+  say: "This is where the search results appear."
+```
+
+Draw attention to a control or an area — the one command that points at an element
+**without touching the page**: no click, no hover, no DOM event. `what` is the semantic
+target instruction sent to the reasoner; an area (a table, a section, a form) is just a
+container element as far as the resolver is concerned, so you describe it exactly as
+you would a button.
+
+During `render` the cursor glides to the target, moves to the right edge of the ellipse
+circumscribed around it, and laps that ellipse `loops` times, leaving a growing marker
+trail behind it; after the last lap the trail stays up for `hold` seconds and fades. In
+the PDF guide the same element gets that ellipse drawn onto the screenshot, in the same
+colour. Lap pacing comes from the ellipse's perimeter at a constant cursor speed, so a
+large area is not lapped faster or slower than a small one.
+
+The ellipse is **circumscribed** around the element's box grown by `padding`, so it is
+noticeably larger than the element itself — the whole element sits inside it rather than
+having its corners clipped. If it would leave the frame it is fitted to it: radii are
+shortened first, then the centre is nudged inwards. That keeps the cursor on screen and
+keeps the ellipse from being clipped at the edge of the PDF page.
+
+The step has a target, so it accepts `optional: true` and works inside a `when` block.
+The visual knobs (`padding`, `loops`, `hold`, `color`) are not part of the step's
+fingerprint — restyling the mark does **not** require a re-`compile`. Film-wide defaults
+live in the `config.highlight` block.
 
 ### `scroll`
 
@@ -1081,11 +1143,12 @@ use explicit waits and verify the result.
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
 | `select.option` value alone | No — render-only |
+| `highlight` visual knobs (`padding`, `loops`, `hold`, `color`) and the whole `config.highlight` block | No — render-only |
 | `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | No — render-only |
 | `config.setup` (on a target) added, removed, or repointed | Yes — the setup path is folded into the target's compile hash |
 | `config.selects.mode` switched between `shim` and `native` | Yes — folded into the config hash, like `config.setup`, only when non-default |
 | Adding, removing, or reordering a `slide` or `desktop` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `highlight.what`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
 | Switching a step's command kind | Yes |
 | A frozen `text=` target that matches an `<option label="…">` or `<optgroup label="…">` string | Rarely — see below |
 

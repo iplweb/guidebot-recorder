@@ -109,6 +109,8 @@ def step_instruction(step: Step) -> str:
         return step.enter_text.into
     if kind == "select":
         return step.select.from_
+    if kind == "highlight":
+        return step.highlight_config().what
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok bez instrukcji do rozwiązania: {kind}")
@@ -136,6 +138,9 @@ def compiled_from(step: Step) -> str:
     instruction = step_instruction(step)
     if step.command_kind() == "select" and step.select.mode is not None:
         return f"{instruction} [mode: {step.select.mode}]"
+    # `highlight` needs no such suffix, and that is a decision rather than an
+    # omission: its knobs (`padding`/`loops`/`hold`/`color`) restyle the mark
+    # without moving it, so a restyle must not invalidate the frozen target.
     return instruction
 
 
@@ -143,9 +148,17 @@ def action_for(kind: str, resolved: ActionKind) -> ActionKind:
     """Map a command kind onto the action to perform."""
 
     if kind == "teach":
-        return resolved  # click / hover / type — inferred by the LLM
+        # click / hover / type — inferred by the LLM. `highlight` is not in the
+        # Reasoner's vocabulary (REASONER_ACTIONS), so seeing one here means that
+        # invariant broke somewhere; fail loudly rather than freeze a `highlight`
+        # onto a step that carries none of its knobs.
+        if resolved == "highlight":
+            raise ValueError("reasoner zwrócił `highlight` dla kroku `teach` — akcja niedozwolona")
+        return resolved
     if kind == "click":
         return "click"
+    if kind == "highlight":
+        return "highlight"
     if kind == "hover":
         return "hover"
     if kind == "enterText":

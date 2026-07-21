@@ -277,7 +277,10 @@ async def validate_compile_time(
     see :func:`_is_page_enhanced` for the one control class it does not.
     """
 
-    if action not in ("click", "hover", "type", "waitFor", "select"):
+    # `highlight` only draws over the element, so it stops at the checks every
+    # action shares (exists / unique / visible); the enabled, editable and
+    # native-<select> gates below are each keyed to an action that touches the page.
+    if action not in ("click", "hover", "type", "waitFor", "select", "highlight"):
         return ValidationFail("unsupported_action", f"Unsupported action kind: {action!r}.")
 
     try:

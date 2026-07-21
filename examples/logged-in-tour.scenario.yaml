@@ -30,3 +30,11 @@ steps:
   - teach: "Open the Reports section from the left-hand menu"
   - say: "From here you can review every report at a glance."
   - wait: { until: "the reports table", state: visible, timeout: 10 }
+  # Point at an area without touching it: the cursor laps an ellipse around the
+  # table in the film, and the PDF guide draws that ellipse onto the screenshot.
+  - highlight:
+      what: "the reports table"
+      padding: 12
+    say: "Every report you have access to is listed in this table."
+  - highlight: "the Export button"
+    say: "And this is where you download them."

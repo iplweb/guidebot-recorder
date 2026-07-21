@@ -12,10 +12,17 @@
   }
 
   const API_KEY = "__guidebot_cursor";
-  const API_VERSION = 1;
+  // Bumped when the API gains a method: an already-injected older build passes
+  // the guard below on name checks alone and would leave the page without it.
+  const API_VERSION = 2;
   const CURSOR_ID = "guidebot-cursor";
   const CURSOR_SELECTOR = "[data-guidebot-cursor]";
   const MAX_Z_INDEX = "2147483647";
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  // --- `encircle` (the `highlight` command) --------------------------------
+  const ENCIRCLE_STROKE_WIDTH = 5;
+  const ENCIRCLE_FADE_MS = 260;
 
   // --- Cursor appearance ---------------------------------------------------
   // Values come from the YAML `config.cursor` block (injected as a global by
@@ -46,7 +53,7 @@
   if (
     previous &&
     previous.__guidebotVersion === API_VERSION &&
-    ["ensure", "moveTo", "ripple", "highlight"].every(
+    ["ensure", "moveTo", "ripple", "highlight", "encircle"].every(
       (name) => typeof previous[name] === "function",
     )
   ) {
@@ -525,6 +532,144 @@
     return true;
   }
 
+  /**
+   * Lap an ellipse around a target, drawing a marker trail behind the cursor.
+   *
+   * This is what the `highlight` scenario command animates. It has nothing to do
+   * with the `highlight()` function below, which draws a one-off pulsing
+   * rectangle and survives only for API compatibility: the names collide, the
+   * features do not.
+   *
+   * The loop mirrors moveTo's on purpose: progress comes from the clock (a
+   * dropped frame must not desynchronize us from the duration Python treats as
+   * authoritative), the handle lives in `state.raf` so `cancelMove()` can preempt
+   * us, and a fallback timer settles the promise even when rAF stops firing in a
+   * backgrounded document — without it a recording would hang forever.
+   */
+  function encircle(cx, cy, rx, ry, options = {}) {
+    const centreX = Number(cx);
+    const centreY = Number(cy);
+    const radiusX = Number(rx);
+    const radiusY = Number(ry);
+    if (
+      ![centreX, centreY, radiusX, radiusY].every(Number.isFinite) ||
+      radiusX <= 0 ||
+      radiusY <= 0
+    ) {
+      throw new TypeError("encircle needs a finite centre and positive radii");
+    }
+    const laps = Math.max(1, Math.round(Number(options.loops) || 1));
+    const msPerLap = Math.max(1, Number(options.msPerLap) || 900);
+    const holdMs = Math.max(0, Number(options.holdMs) || 0);
+    const color = options.color || CURSOR_GLOW;
+
+    cancelMove();
+    const cursor = ensure();
+    const root = mountRoot();
+    // The lap starts and ends at 3 o'clock — where an SVG ellipse path also
+    // starts — so the trail unrolls exactly under the cursor.
+    const entryX = centreX + radiusX;
+    state.x = entryX;
+    state.y = centreY;
+    if (!cursor || !root) {
+      scheduleMount();
+      return Promise.resolve();
+    }
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("aria-hidden", "true");
+    setImportant(svg, "position", "fixed");
+    setImportant(svg, "left", "0px");
+    setImportant(svg, "top", "0px");
+    setImportant(svg, "width", "100%");
+    setImportant(svg, "height", "100%");
+    setImportant(svg, "overflow", "visible");
+    setImportant(svg, "pointer-events", "none");
+    setImportant(svg, "z-index", "2147483645");
+
+    const trail = document.createElementNS(SVG_NS, "ellipse");
+    trail.setAttribute("data-guidebot-encircle", "");
+    trail.setAttribute("cx", centreX);
+    trail.setAttribute("cy", centreY);
+    trail.setAttribute("rx", radiusX);
+    trail.setAttribute("ry", radiusY);
+    trail.setAttribute("fill", "none");
+    trail.setAttribute("stroke", color);
+    trail.setAttribute("stroke-width", ENCIRCLE_STROKE_WIDTH);
+    trail.setAttribute("stroke-linecap", "round");
+    svg.appendChild(trail);
+    root.appendChild(svg);
+
+    const perimeter =
+      typeof trail.getTotalLength === "function"
+        ? trail.getTotalLength()
+        : Math.PI * (radiusX + radiusY);
+    trail.style.strokeDasharray = `${perimeter}`;
+    trail.style.strokeDashoffset = `${perimeter}`;
+
+    setImportant(cursor, "transition", "none");
+    const spinMs = laps * msPerLap;
+
+    return new Promise((resolve) => {
+      let start = null;
+      let fallbackTimer = 0;
+
+      const settle = () => {
+        window.clearTimeout(fallbackTimer);
+        state.raf = null;
+        state.finishMove = null;
+        const fade = svg.animate([{ opacity: 1 }, { opacity: 0 }], {
+          duration: ENCIRCLE_FADE_MS,
+          easing: "ease-out",
+          fill: "forwards",
+        });
+        removeAfterAnimation(svg, fade, ENCIRCLE_FADE_MS + 100);
+        // Resolve only once the trail has faded, so the next step never opens on
+        // a frame that still carries this one's mark.
+        window.setTimeout(resolve, ENCIRCLE_FADE_MS);
+      };
+      // `cancelMove` releases a superseded animation through this hook; without
+      // it a newer move would leave this promise pending forever.
+      state.finishMove = settle;
+
+      const land = () => {
+        setImportant(cursor, "left", `${entryX}px`);
+        setImportant(cursor, "top", `${centreY}px`);
+        trail.style.strokeDashoffset = "0";
+        settle();
+      };
+
+      const step = (timestamp) => {
+        if (start === null) {
+          start = timestamp;
+        }
+        const elapsed = timestamp - start;
+        if (elapsed >= spinMs + holdMs) {
+          land(); // the final frame puts the cursor exactly back on the entry point
+          return;
+        }
+        // Only the spin phase advances the angle; during the hold the cursor
+        // rests at the entry point and the trail stands whole.
+        const spun = Math.min(elapsed, spinMs);
+        const angle = (spun / msPerLap) * 2 * Math.PI;
+        setImportant(cursor, "left", `${centreX + radiusX * Math.cos(angle)}px`);
+        setImportant(cursor, "top", `${centreY + radiusY * Math.sin(angle)}px`);
+        // The first lap draws the trail; later laps trace over what is there.
+        trail.style.strokeDashoffset = `${perimeter * (1 - Math.min(1, spun / msPerLap))}`;
+        state.raf = window.requestAnimationFrame(step);
+      };
+
+      fallbackTimer = window.setTimeout(() => {
+        if (state.raf !== null) {
+          window.cancelAnimationFrame(state.raf);
+          state.raf = null;
+        }
+        land();
+      }, spinMs + holdMs + 50);
+      state.raf = window.requestAnimationFrame(step);
+    });
+  }
+
   function highlight(x, y, width, height) {
     const values = [x, y, width, height].map(Number);
     if (!values.every(Number.isFinite) || values[2] < 0 || values[3] < 0) {
@@ -580,6 +725,7 @@
     moveTo,
     ripple,
     highlight,
+    encircle,
     hide,
     show,
     get position() {

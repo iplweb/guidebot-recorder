@@ -108,6 +108,8 @@ def _short(step: Step, limit: int = 60) -> str:
         return f"desktop: {step.desktop.icon}"
     if step.enter_text is not None:
         return f"→ {step.enter_text.into}"
+    if step.highlight is not None:
+        return f"◯ {step.highlight.what}"
     if step.wait is not None:
         return step.wait.until if isinstance(step.wait, WaitUntil) else f"{step.wait}s"
     return ""
@@ -851,6 +853,11 @@ async def _compile_step(
             # `config.selects` block whose widget never settled — so both arrive
             # through the banner, with `plik:linia` and the fragment.
             raise RuntimeError(step_message(str(exc))) from exc
+    elif action == "highlight":
+        # Nothing to perform: the command only marks the target, which compile has
+        # already resolved and frozen. Spelled out rather than left to fall off the
+        # end of the chain, so the no-op reads as a decision, not an omission.
+        pass
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

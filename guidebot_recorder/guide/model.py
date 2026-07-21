@@ -13,7 +13,7 @@ from guidebot_recorder.models.scenario import Step
 class Annotation:
     """One overlay mark, in screenshot pixels. Only the fields for `kind` are set."""
 
-    kind: Literal["arrow", "click", "typed", "hover", "selected"]
+    kind: Literal["arrow", "click", "typed", "hover", "selected", "highlight"]
     # arrow: prev cursor -> target center
     x1: float | None = None
     y1: float | None = None
@@ -28,6 +28,11 @@ class Annotation:
     y: float | None = None
     w: float | None = None
     h: float | None = None
+    # highlight: ellipse around the target box (radii, plus its own colour —
+    # the marker colour is per step, so it cannot live in the stylesheet)
+    rx: float | None = None
+    ry: float | None = None
+    color: str | None = None
 
 
 @dataclass
