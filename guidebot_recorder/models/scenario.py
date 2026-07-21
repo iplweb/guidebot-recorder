@@ -6,12 +6,30 @@ CompiledScenario (``*.compiled.yaml``), not inline on the step.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from guidebot_recorder.models.action import Expect, WaitState
 from guidebot_recorder.models.config import Config
+
+if TYPE_CHECKING:  # tylko dla typów — import w runtime zapętliłby się przez `scenario/__init__`
+    from guidebot_recorder.scenario.source import ScenarioSource, StepLocation
+
+
+class StepPathError(ValueError):
+    """Błąd walidacji, który sam wie, którego kroku dotyczy.
+
+    ``path`` to ścieżka **pozycyjna** w liście ``steps:`` — ``(3,)`` dla kroku
+    top-level, ``(3, 1)`` dla drugiego dziecka bloku ``when:`` z pozycji 3.
+    Walidatory poziomu ``Scenario`` mają ``loc == ()``, więc bez tego pola nie
+    dałoby się przypisać ich komunikatu do konkretnej linii pliku.
+    """
+
+    def __init__(self, message: str, path: tuple[int, ...]) -> None:
+        super().__init__(message)
+        self.path = path
+
 
 #: "primary" commands (an action/step); `say` may accompany one as narration
 PRIMARY_COMMANDS = (
@@ -275,6 +293,9 @@ class FlatStep(NamedTuple):
     branch: int | None
     #: True for the synthetic gate step that opens a branch
     is_gate: bool
+    #: where the step sits in the source YAML; None when the scenario was built
+    #: in code (no source to point at) — diagnostics degrade to a bare number
+    location: StepLocation | None = None
 
 
 class Scenario(BaseModel):
@@ -282,11 +303,27 @@ class Scenario(BaseModel):
     config: Config
     steps: list[Step | WhenBlock]
 
+    #: mapa źródłowego YAML-a, doczepiana przez ``load_scenario``; ``PrivateAttr``,
+    #: więc schemat, ``extra="forbid"`` i serializacja zostają bez zmian
+    _source: ScenarioSource | None = PrivateAttr(default=None)
+
+    @property
+    def source(self) -> ScenarioSource | None:
+        """Mapa źródła, jeśli scenariusz powstał z pliku."""
+
+        return self._source
+
+    def attach_source(self, source: ScenarioSource | None) -> None:
+        """Doczep mapę źródła — po walidacji, bo ``model_validate`` jej nie przyjmie."""
+
+        self._source = source
+
     def flat_steps(self) -> list[FlatStep]:
         """Flatten blocks into a linear list positionally aligned with compiled actions.
 
         Each ``WhenBlock`` contributes its gate step followed by its children, so
-        the whole list can be indexed 1:1 by ``CompiledScenario.actions``.
+        the whole list can be indexed 1:1 by ``CompiledScenario.actions`` — and,
+        when a source is attached, by ``ScenarioSource.steps``.
         """
 
         flat: list[FlatStep] = []
@@ -298,7 +335,12 @@ class Scenario(BaseModel):
                 )
             else:
                 flat.append(FlatStep(step=entry, branch=None, is_gate=False))
-        return flat
+        if self._source is None:
+            return flat
+        return [
+            entry._replace(location=self._source.location(index))
+            for index, entry in enumerate(flat)
+        ]
 
     @model_validator(mode="after")
     def _complete_audio_translations(self) -> Scenario:

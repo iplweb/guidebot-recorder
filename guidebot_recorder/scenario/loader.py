@@ -1,7 +1,10 @@
 """Load a scenario YAML into a validated ``Scenario`` (with ``${ENV}`` expanded).
 
 The source file is read-only: resolved actions are written to a separate
-``*.compiled.yaml`` (see ``scenario.compiled``), so no round-trip handle is kept.
+``*.compiled.yaml`` (see ``scenario.compiled``), so nothing is ever written back
+here. A round-trip parse is kept all the same — read-only, in
+:class:`~guidebot_recorder.scenario.source.ScenarioSource` — solely to tell
+diagnostics which line of the file a step lives on.
 ``${ENV}`` substitution (§3.2) is applied only while building the model; a missing
 variable raises ``KeyError``.
 """
@@ -18,6 +21,7 @@ from ruamel.yaml import YAML
 
 from guidebot_recorder.models.scenario import Scenario
 from guidebot_recorder.scenario.env import referenced_env_names, substitute_scenario_values
+from guidebot_recorder.scenario.source import build_source
 
 
 class CompiledSidecarError(ValueError):
@@ -109,11 +113,18 @@ def load_scenario(path: Path | str, env: Mapping[str, str] | None = None) -> Sce
     """Load and validate the source scenario at ``path`` (``env`` defaults to os.environ)."""
     if env is None:
         env = os.environ
-    raw = _read_raw(Path(path))
-    if _looks_like_compiled_sidecar(raw, Path(path)):
-        raise CompiledSidecarError(_sidecar_message(Path(path)))
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    raw = _parse_source(text)
+    if _looks_like_compiled_sidecar(raw, path):
+        raise CompiledSidecarError(_sidecar_message(path))
     substituted = substitute_scenario_values(raw, env)
-    return Scenario.model_validate(substituted)
+    # zbudowane z surowego tekstu, sprzed podstawienia ${ENV}: w snippecie
+    # diagnostyki widać `${HASŁO}`, nigdy samego hasła
+    source = build_source(path, text)
+    scenario = Scenario.model_validate(substituted)
+    scenario.attach_source(source)
+    return scenario
 
 
 def scenario_env_references(
