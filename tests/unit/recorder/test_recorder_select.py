@@ -949,3 +949,56 @@ async def test_select_still_treats_a_missing_widget_as_nothing_to_wait_for(page)
     await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
 
     assert await page.locator("select").input_value() == "tabela"
+
+
+# --- a select the page adds mid-run ----------------------------------------
+
+
+#: A form that grows a criteria row on demand, the shape every "add another
+#: filter" page has. The new row's ``<select>`` exists only after the click, so
+#: it is classified by a *later* pass than the one ``ready`` reports.
+_GROWING_FORM = (
+    "<body style='margin:0'>"
+    "<button id='add' style='width:200px;height:30px'>Dodaj pole</button>"
+    "<div id='rows'></div>"
+    "<script>"
+    "document.getElementById('add').addEventListener('click', () => {"
+    "  const s = document.createElement('select');"
+    "  s.setAttribute('aria-label', 'Pole');"
+    "  s.style.width = '220px';"
+    "  s.innerHTML = '<option>Tytuł pracy</option><option>Zakres lat</option>';"
+    "  document.getElementById('rows').appendChild(s);"
+    "});"
+    "</script></body>"
+)
+
+
+async def test_a_select_added_mid_run_is_driven_through_the_shim(page):
+    """The readiness barrier must cover the pass a *mutation* owes, not just the first.
+
+    `ready` resolves once, at the first classification pass, and never re-arms.
+    A select the page appends mid-run is therefore unshimmed for a whole settle
+    window while every barrier in compile and render reports "ready" — so a
+    `select:` step landing inside that window found a bare `<select>`, could not
+    unfurl a DOM list for it, and failed with "nakładka jej nie objęła".
+
+    Recorded against the real symptom: a criteria row added by an "add field"
+    button, then chosen from in the very next step.
+    """
+
+    overlay = Overlay()
+    await page.set_content(_GROWING_FORM)
+    await overlay.install(page)
+    # Long enough that the pass the click owes is still pending when the next
+    # step starts — the production default is 1000 ms.
+    await _install_selects(page, settleMs=400)
+    await page.evaluate(_MOUSEDOWN_SPY)
+    rec = Recorder(page, overlay, open_hold_ms=10)
+
+    await rec.click(RoleTarget(role="button", name="Dodaj pole"))
+    await rec.select(RoleTarget(role="combobox", name="Pole"), "Zakres lat")
+
+    assert await page.locator("#rows select").input_value() == "Zakres lat"
+    # ...and it was chosen *on camera*: beat 2 clicked our option row, which
+    # only exists when the shim covered this select.
+    assert await _hits(page) == ["button", "select", "option:1"]
