@@ -41,7 +41,7 @@ from guidebot_recorder.models.action import (
 )
 from guidebot_recorder.models.compiled import CompiledAction, CompiledScenario
 from guidebot_recorder.models.config import config_hash, site_viewport
-from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil
+from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WaitUntil, select_mode
 from guidebot_recorder.models.target import (
     LabelTarget,
     RoleTarget,
@@ -55,11 +55,13 @@ from guidebot_recorder.recorder._debug import (
     redact_text,
     scenario_sensitive_values,
 )
-from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
     TargetAbsent,
+    TargetResolutionError,
+    compiled_from,
     heuristic_expect,
     resolve_step_target,
     step_state,
@@ -71,8 +73,14 @@ from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.scenario.source import ScenarioSource, StepLocation
+from guidebot_recorder.selects import Selects, SelectsNotReadyError, install_selects
 
-__all__ = ["compile_up_to_date", "heuristic_expect", "run_compile", "run_compile_in_browser"]
+__all__ = [
+    "compile_up_to_date",
+    "heuristic_expect",
+    "run_compile",
+    "run_compile_in_browser",
+]
 
 _POPUP_DETECTION_SECONDS = 1.0
 _POPUP_QUIESCENCE_SECONDS = 0.1
@@ -235,6 +243,11 @@ async def run_compile_in_browser(
         **({"storage_state": setup_state} if setup_state is not None else {}),
     )
     try:
+        # Registered before the first page exists, so every document compile ever
+        # sees is already shimmed. Compile has no overlays of its own, but it must
+        # resolve against the same DOM render drives — otherwise a `<select>` is
+        # frozen as the native control and replayed as the widget.
+        selects = await install_selects(context, cfg)
         page = await context.new_page()
         await run_compile(
             path,
@@ -245,6 +258,7 @@ async def run_compile_in_browser(
             force=force,
             pause_on_error=pause_on_error,
             verbose=verbose,
+            selects=selects,
         )
     finally:
         await context.close()
@@ -256,11 +270,28 @@ async def run_compile(
     reasoner: Reasoner,
     env: Mapping[str, str] | None = None,
     *,
+    selects: Selects | None,
     timeout: float = 30.0,
     force: bool = False,
     pause_on_error: bool = False,
     verbose: bool = False,
 ) -> None:
+    """Compile the scenario on an already-prepared page.
+
+    ``selects`` is the controller returned by
+    :func:`guidebot_recorder.selects.install_selects` for this page's context,
+    or ``None`` when no shim was installed (``mode: native``, or a caller
+    driving a bare context). It is passed in rather than rebuilt here because
+    only the caller that created the context knows whether the init script was
+    actually registered — waiting on a widget that was never injected would fail
+    every compile instead of catching a real problem.
+
+    Required rather than defaulted, deliberately. A caller that forgot it would
+    silently lose the readiness barrier and freeze targets against an unshimmed
+    DOM that render then drives shimmed — a divergence nothing would report.
+    Passing ``selects=None`` says "no shim here" out loud, at the call site.
+    """
+
     path = Path(path)
     scenario = load_scenario(path, env)
     sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
@@ -351,6 +382,21 @@ async def run_compile(
                 description = redact_text(_short(step), sensitive_values)
                 tqdm.write(f"[{index + 1}/{len(flat)}] {kind}: {description}")
             try:
+                if selects is not None and step.requires_target():
+                    # Readiness barrier: the resolver's page snapshot must be
+                    # taken against the shimmed DOM (the navigation that led here
+                    # has settled by now — it was an earlier step). Without it
+                    # compile can freeze a target the render, running with the
+                    # widget in place, no longer recognises.
+                    try:
+                        await selects.wait_ready(active_page)
+                    except SelectsNotReadyError as exc:
+                        # A wedged widget is a step-level failure like any other,
+                        # so it arrives with `plik:linia` and the YAML fragment
+                        # rather than beside them. The two fixes the message
+                        # names (`selects.settleMs`, `selects.mode: native`) are
+                        # both edits to this very file.
+                        raise RuntimeError(banner(entry, index, str(exc))) from exc
                 pages_before = tuple(context.pages)
                 observed_start = len(observed_pages)
                 click_observed_start: int | None = None
@@ -385,6 +431,9 @@ async def run_compile(
                     force=force,
                     verbose=verbose,
                     optional=entry.is_gate or step.optional,
+                    entry=entry,
+                    total=len(flat),
+                    sensitive=sensitive_values,
                 )
                 action_page_closed_in_window = action_page.is_closed()
 
@@ -505,7 +554,7 @@ def _pending_for(step: Step, chash: str) -> PendingAction:
     return PendingAction(
         fingerprint=Fingerprint(
             command_kind=step.command_kind(),
-            compiled_from=_instruction(step),
+            compiled_from=compiled_from(step),
             expect="none",
             config_hash=chash,
             state=step_state(step),
@@ -551,7 +600,7 @@ def _fingerprint_matches(fp: Fingerprint, step: Step, chash: str) -> bool:
     return (
         fp.compiler_version == COMPILER_VERSION
         and fp.command_kind == step.command_kind()
-        and fp.compiled_from == _instruction(step)
+        and fp.compiled_from == compiled_from(step)
         and fp.config_hash == chash
         and fp.state == step_state(step)
     )
@@ -663,7 +712,31 @@ async def _compile_step(
     force: bool,
     verbose: bool,
     optional: bool = False,
+    entry: FlatStep | None = None,
+    total: int = 0,
+    sensitive: Iterable[str] = (),
 ) -> CompiledAction | None:
+    """Resolve and perform one step, returning the action to freeze (or ``None``).
+
+    ``entry`` (plus ``total`` and ``sensitive``) serves diagnostics only: error
+    messages point at `plik:linia` and quote the YAML fragment. All three are
+    keyword-only with defaults — the positional arguments are untouched, and
+    without them the banner degrades to a bare step number, exactly as
+    ``_render_step`` does on the render side.
+    """
+
+    def step_message(message: str) -> str:
+        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
+
+        return step_banner(
+            index=index,
+            total=total,
+            location=entry.location if entry is not None else None,
+            source=scenario.source,
+            message=message,
+            sensitive=sensitive,
+        )
+
     if kind == "say":
         return None
     if kind == "slide":
@@ -711,10 +784,25 @@ async def _compile_step(
         if verbose:
             tqdm.write("   ↳ reuse (cache)")
     else:
-        resolved = await resolve_step_target(page, step, kind, reasoner)
+        try:
+            resolved = await resolve_step_target(page, step, kind, reasoner)
+        except TargetResolutionError as exc:
+            # Every resolver verdict lands here, and every one of them names
+            # something the author must edit in the scenario: an option the
+            # `<select>` does not offer, a dropdown the page hides with nothing
+            # visible in its place, an ambiguous description. The resolver has
+            # no business knowing about source maps, so the banner is applied at
+            # the dispatch site — and applied to *all* verdicts, so a `select:`
+            # step and a `click:` step in the same file are diagnosed alike.
+            #
+            # Deliberately the named verdict type, not ``RuntimeError``: an
+            # injected reasoner raises through this same frame (``RaisingReasoner``
+            # signals ``SetupNeedsCompile``, itself a ``RuntimeError``), and
+            # rewrapping that would turn control flow into a step diagnosis.
+            raise RuntimeError(step_message(str(exc))) from exc
         if isinstance(resolved, TargetAbsent):
             if not optional:
-                raise RuntimeError(resolved.error_message)
+                raise RuntimeError(step_message(resolved.error_message))
             return _pending_for(step, chash)
         assert isinstance(resolved, ResolvedTarget)
         action, target, input_text = resolved.action, resolved.target, resolved.input_text
@@ -747,8 +835,20 @@ async def _compile_step(
         await recorder.enter_text(target, text)
     elif action == "select":
         if step.select is None:
-            raise RuntimeError("brak opcji dla akcji select")
-        await recorder.select(target, step.select.option)
+            raise RuntimeError(step_message("brak opcji dla akcji select"))
+        try:
+            await recorder.select(
+                target,
+                step.select.option,
+                native=select_mode(step, scenario.config) == "native",
+            )
+        except (SelectDriveError, SelectsNotReadyError) as exc:
+            # Compile probes drivability so an undriveable widget surfaces here,
+            # before a multi-minute render is paid for. Both failures point at
+            # the same YAML: the step whose dropdown could not be driven, or the
+            # `config.selects` block whose widget never settled — so both arrive
+            # through the banner, with `plik:linia` and the fragment.
+            raise RuntimeError(step_message(str(exc))) from exc
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:
@@ -772,7 +872,7 @@ async def _compile_step(
             input_text=input_text,
             fingerprint=Fingerprint(
                 command_kind=kind,
-                compiled_from=_instruction(step),
+                compiled_from=compiled_from(step),
                 expect=expect,
                 config_hash=chash,
                 state=state,

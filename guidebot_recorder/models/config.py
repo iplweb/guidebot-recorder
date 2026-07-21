@@ -261,6 +261,39 @@ class PopupConfig(BaseModel):
         return self.effective_transition in ("float", "slide")
 
 
+class SelectsConfig(BaseModel):
+    """Settings for the DOM select shim that makes dropdown lists visible on camera.
+
+    Purely visual for cosmetic fields — like :class:`CursorConfig`, these never
+    affect the compiled targets, so only ``mode`` is part of :func:`config_hash`
+    and only when it differs from the default. Changing ``settle_ms``,
+    ``max_visible_options``, or ``open_hold_ms`` does not require a recompile.
+    Every field has a sensible default; omit the whole ``selects:`` block to keep
+    the built-in shim behaviour.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # Global escape hatch: "shim" (default) replaces native selects with DOM overlays
+    # so their option lists are visible on camera; "native" falls back to the
+    # collapsed control when the shim cannot drive an enhanced widget — the cursor
+    # still travels to it, but the list never unfurls and the value changes at once.
+    mode: Literal["shim", "native"] = "shim"
+    # Milliseconds to wait after page load before classifying raw vs enhanced selects.
+    # The page's own initialization (select2, Chosen, Tom Select) has this much time
+    # to hide/enhance its original <select> before the shim classifies it.
+    # ``0`` switches the window off: the pass is then scheduled on the next task
+    # rather than after a delay. Correct only for a site that enhances nothing,
+    # where waiting can do no good; anywhere else it reopens the race the window
+    # exists to prevent.
+    settle_ms: int = Field(default=1000, ge=0, alias="settleMs")
+    # Number of options visible in the list at once before scrolling within it.
+    max_visible_options: int = Field(default=8, ge=1, alias="maxVisibleOptions")
+    # Milliseconds to hold the unfurled list open for the viewer to read it,
+    # before the cursor moves to the chosen option.
+    open_hold_ms: int = Field(default=350, ge=1, alias="openHoldMs")
+
+
 class VerifyLoggedIn(BaseModel):
     """Post-setup login check: the recorded session is considered authenticated
     when ``contains_text`` is present on the page (optionally after visiting
@@ -307,6 +340,7 @@ class Config(BaseModel):
     desktop: DesktopConfig = Field(default_factory=DesktopConfig)
     fade: FadeConfig = Field(default_factory=FadeConfig)
     popup: PopupConfig = Field(default_factory=PopupConfig)
+    selects: SelectsConfig = Field(default_factory=SelectsConfig)
 
     # --- Render pacing (render-only; deliberately absent from config_hash) ---
     # Holding a still frame instead of waiting out the voice-over. The narration
@@ -383,6 +417,12 @@ def config_hash(cfg: Config) -> str:
     viewport — the page renders inside an iframe of height ``H - chrome.height`` —
     which changes the compiled references. The cosmetic and typing/interaction
     chrome fields do not affect layout and are deliberately left out.
+
+    The select shim's ``mode`` is included when it differs from the default "shim":
+    changing it to "native" changes what the resolver drives, so existing scenarios
+    must keep their current hash to avoid forced recompilation. Cosmetic fields
+    (``settle_ms``, ``max_visible_options``, ``open_hold_ms``) stay out of the
+    projection, consistent with other cosmetic chrome and cursor fields.
     """
     projection = {
         "v": CONFIG_HASH_VERSION,
@@ -397,5 +437,10 @@ def config_hash(cfg: Config) -> str:
     # and `max_age_hours` are run-time gating only and never enter the projection.
     if cfg.setup is not None:
         projection["setup"] = cfg.setup
+    # Selects mode affects resolution and compilation only when it differs from
+    # the default "shim", so it is included like setup: only non-default values
+    # change the hash, keeping legacy scenarios stable.
+    if cfg.selects.mode != "shim":
+        projection["selects_mode"] = cfg.selects.mode
     payload = json.dumps(projection, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

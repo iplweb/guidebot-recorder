@@ -178,4 +178,6 @@ niewrażliwych; sekrety zawsze przekazuj przez `enterText` i ENV.
 | Nazwa źródła, liczba kroków, compiler v1 | Mocny preflight odrzuca sidecar. |
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Zmienia liczbę kroków — wymaga compile. |
 | `say`, `translations`, alternatywne audio, `cursor` (łącznie z `cursor.click`), `chrome`, `typing`, `sound`, `intro` | Render-only. |
+| `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | Render-only; kosmetyczne dostrojenie nakładki. |
+| `config.selects.mode` (globalnie) przełączone `shim`/`native`, albo `select.mode` na kroku | Zmienia config hash albo fingerprint kroku — wymaga compile. |
 | DOM, dane, cookies lub zmieniony `navigate` | Użyj `compile --force`; szybkie sprawdzenie nie otwiera strony. |

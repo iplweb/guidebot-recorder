@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Zamówienie</title>
+    <style>
+      html, body { min-height: 100%; margin: 0; background: rgb(230, 210, 20); }
+      body { color: black; font: 20px sans-serif; padding: 32px; box-sizing: border-box; }
+      label { display: block; font-weight: bold; margin-bottom: 6px; }
+      select { font: inherit; width: 260px; }
+    </style>
+  </head>
+  <body>
+    <h1>Zamówienie</h1>
+    <label for="dostawa">Sposób dostawy</label>
+    <!-- A raw <select> in a popup window: cursor and shim list share one
+         document here, unlike the main window where the cursor lives in the
+         shell above the site iframe. -->
+    <select id="dostawa" data-testid="dostawa">
+      <option>Odbiór osobisty</option>
+      <option>Paczkomat</option>
+      <option>Kurier</option>
+    </select>
+  </body>
+</html>

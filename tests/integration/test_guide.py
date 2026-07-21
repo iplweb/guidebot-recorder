@@ -152,7 +152,10 @@ async def test_guide_produces_pdf_with_expected_pages(tmp_path):
             # --- compile (offline reasoner, no LLM) ---
             page = await browser.new_page()
             reasoner = MockReasoner()
-            await run_compile(path, page, reasoner)
+            # The guide's own context installs no select shim, and this
+            # fixture has no `select:` step; `selects=None` is the call
+            # site saying so out loud, as `run_compile` requires.
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             # --- guide ---
@@ -179,7 +182,7 @@ async def test_guide_produces_pdf_with_chrome_shell_enabled(tmp_path):
         try:
             page = await browser.new_page()
             reasoner = MockReasoner()
-            await run_compile(path, page, reasoner)
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             out = tmp_path / "guide-chrome.pdf"

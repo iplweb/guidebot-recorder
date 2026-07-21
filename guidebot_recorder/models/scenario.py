@@ -73,16 +73,22 @@ class Select(BaseModel):
     """Choose an option from a native ``<select>`` dropdown.
 
     ``from_`` (written ``from`` in YAML) is the semantic target of the dropdown;
-    ``option`` is the visible label of the option to pick. The option list of a
-    native select is drawn by the OS and cannot be shown by any browser-automation
-    tool, so render animates the cursor to the control and steps its value to the
-    chosen option with arrow keys — the value visibly changes even though the list
-    never unfurls. ``option`` is shown, never spoken, and is not env-substituted.
+    ``option`` is the visible label of the option to pick. The shim (default ``mode``)
+    makes the option list visible and DOM-based: the cursor travels to the control,
+    the list unfurls downward, the cursor travels to the chosen option, and it is
+    clicked — all visible on camera. The per-step ``mode`` override falls back to
+    "native" if a page's enhanced widget cannot be driven: the cursor still
+    travels to the control, but the list never unfurls — the value changes at
+    once, the instant the cursor arrives.
+
+    ``option`` is shown, never spoken, and is not env-substituted. The ``mode``
+    (optional) defaults to ``config.selects.mode`` when unset.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     from_: str = Field(alias="from")
     option: str
+    mode: Literal["shim", "native"] | None = None
 
 
 class Scroll(BaseModel):
@@ -374,6 +380,47 @@ class Scenario(BaseModel):
                 _validate_translations(entry, (index,), expected)
         return self
 
+    @model_validator(mode="after")
+    def _step_shim_mode_needs_a_global_shim(self) -> Scenario:
+        """A step cannot opt *into* a shim the scenario never installs.
+
+        ``config.selects.mode: native`` is not a per-step default a step may
+        override in either direction — it decides whether the widget script is
+        injected into the browser context at all (``install_selects`` returns
+        ``None`` for it). Underneath it there is no shim to drive: the step
+        would reach a page with a raw ``<select>``, no DOM option list, and an
+        association heuristic that finds some unrelated sibling to click on
+        camera before failing.
+
+        Rejecting the combination here means the author learns while the
+        scenario loads, rather than several minutes into an unattended render.
+
+        Raises :class:`StepPathError`, not a bare ``ValueError``, and carries no
+        ``krok {label}:`` prefix of its own: this validator lives on
+        ``Scenario`` (``loc == ()``), so the positional path is the only thing
+        that lets diagnostics turn the rejection into `plik:linia` plus the
+        offending YAML fragment. A `select:` step that names the option but not
+        the line to edit would be a worse message than the one a `click:` step
+        in the same file already gets.
+        """
+
+        if self.config.selects.mode != "native":
+            return self
+        for index, entry in enumerate(self.steps):
+            children = entry.steps if isinstance(entry, WhenBlock) else [entry]
+            for child_index, child in enumerate(children):
+                if child.select is None or child.select.mode != "shim":
+                    continue
+                path = (index, child_index) if isinstance(entry, WhenBlock) else (index,)
+                raise StepPathError(
+                    "`select.mode: shim` przy `config.selects.mode: native` "
+                    "— nakładka nie jest wtedy w ogóle wstrzykiwana, więc nie ma czego "
+                    "rozwinąć. Usuń `mode: shim` z kroku albo włącz nakładkę globalnie "
+                    "(`config.selects.mode: shim`) i wyłącz ją per krok przez `mode: native`",
+                    path,
+                )
+        return self
+
 
 def _validate_translations(step: Step, path: tuple[int, ...], expected: set[str]) -> None:
     """Sprawdź tłumaczenia kroku spod ścieżki pozycyjnej ``path`` w ``steps:``.
@@ -398,3 +445,20 @@ def _validate_translations(step: Step, path: tuple[int, ...], expected: set[str]
     if unknown:
         languages = ", ".join(sorted(unknown))
         raise StepPathError(f"niezdefiniowane tłumaczenia: {languages}", path)
+
+
+def select_mode(step: Step, cfg: Config) -> str:
+    """The effective select mode for one step (spec §5).
+
+    A per-step ``mode`` is the escape hatch for one stubborn widget in an
+    otherwise fine scenario, so it wins over ``config.selects.mode``; unset
+    (``None``) inherits the global setting.
+
+    Lives with the two models it reads rather than with either phase that
+    dispatches on it: it is a pure lookup over ``Step`` and ``Config``, and
+    homing it in ``compile.py`` made ``render.py`` import the compiler for it.
+    """
+
+    if step.select is not None and step.select.mode is not None:
+        return step.select.mode
+    return cfg.selects.mode

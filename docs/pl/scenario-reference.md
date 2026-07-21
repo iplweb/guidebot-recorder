@@ -54,6 +54,7 @@ steps:
 | `intro` | Nie | Opcjonalna plansza tytułowa na start filmu; wyłącznie podczas renderu. |
 | `holdFrameForNarration` | Nie | Zamraża obraz na czas narracji zamiast nagrywać w czasie rzeczywistym; wyłącznie podczas renderu. |
 | `holdFrameSettle` | Nie | Sekundy realnego czasu nagrane przed zamrożeniem klatki; wyłącznie podczas renderu. |
+| `selects` | Nie | Nakładka DOM zamieniająca natywny `<select>` na widżet, którego lista jest widoczna na filmie; do config hasha wchodzi tylko `mode`. |
 
 ### `baseUrl`
 
@@ -385,6 +386,34 @@ scenariusza z tym domyślnym ustawieniem nie odtworzy pikseli filmu nagranego pr
 funkcją — tylko jego długość i tempo. Użyj `guidebot render --no-hold-frame`, aby
 nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference.md).
 
+### `selects`
+
+Ustawienia nakładki DOM na natywne selecty, używanej przez krok
+[`select`](#select). Wszystkie pola są opcjonalne; pominięcie całego bloku
+`selects:` zachowuje wbudowane zachowanie nakładki.
+
+```yaml
+selects:
+  mode: shim            # shim (domyślnie) | native
+  settleMs: 1000
+  maxVisibleOptions: 8
+  openHoldMs: 350
+```
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `mode` | `shim` | Globalna furtka. `shim` zamienia surowe `<select>` na nakładkę DOM, więc ich listy są widoczne na filmie; `native` wraca wszędzie do zwiniętej kontrolki — kursor nadal do niej dojeżdża i klika, ale lista nigdy się nie rozwija, a wartość zmienia się od razu. Furtka na poziomie kroku `select.mode: native` wyłącza nakładkę dla jednej kontrolki przy globalnym `shim`; odwrotnie się nie da, bo `native` nie wstrzykuje żadnego skryptu nakładki, do którego krok mógłby wrócić — taki krok zostaje odrzucony przy wczytywaniu scenariusza. |
+| `settleMs` | `1000` | Milisekundy odczekiwane po załadowaniu strony, zanim każdy `<select>` zostanie sklasyfikowany jako surowy albo już ulepszony przez stronę. Daje własnej inicjalizacji strony (select2/Tom Select/Chosen) czas na ukrycie lub podmianę oryginalnej kontrolki, zanim nakładka zdecyduje, czy jej dotknąć. `0` wyłącza to okno — sensowne tylko na stronie, która niczego nie ulepsza i gdzie czekanie nic nie daje. |
+| `maxVisibleOptions` | `8` | Liczba opcji widocznych naraz w rozwiniętej liście, zanim zacznie się przewijać wewnętrznie. |
+| `openHoldMs` | `350` | Milisekundy, przez które rozwinięta lista pozostaje otwarta, żeby widz zdążył ją przeczytać, zanim kursor ruszy do wybranej opcji. |
+
+Do skompilowanego wyniku wpływa tylko `mode`: zmiana na `native` zmienia to, co
+steruje resolver, więc — podobnie jak `config.setup` — wchodzi do config hasha
+tylko wtedy, gdy różni się od domyślnej wartości, i wymusza rekompilację (patrz
+[macierz przebudowy](#macierz-przebudowy)). `settleMs`, `maxVisibleOptions` i
+`openHoldMs` to kosmetyczne dostrojenie renderu, jak `cursor` czy `popup` — ich
+zmiana nigdy nie wymaga rekompilacji.
+
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
@@ -451,29 +480,142 @@ bieżącą wartość. Guidebot nie maskuje pola w filmie ani logach aplikacji.
   say: "Z listy rodzaj raportu wybieram format tabelaryczny."
 ```
 
-Wybór opcji z natywnej listy `<select>`. `from` to semantyczny opis celu wysyłany do
-reasonera i musi wskazać element `<select>` — trafienie w inną kontrolkę (własny
-widżet `role="combobox"`, przycisk) to błąd walidacji `not_select`. `option` to
-widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie** podlega
-podstawianiu zmiennych środowiskowych.
+Wybór opcji z listy rozwijanej. `from` to semantyczny opis celu wysyłany do
+reasonera i musi wskazać natywny element `<select>` — trafienie w inną kontrolkę
+(własny widżet `role="combobox"`, przycisk) to błąd walidacji `not_select`. `option`
+to widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie**
+podlega podstawianiu zmiennych środowiskowych.
 
 Walidacja sprawdza także, czy wskazany `<select>` **w ogóle ma** żądaną opcję — jeśli
 nie, zgłasza `option_missing` i wymienia etykiety, które ten element faktycznie
 oferuje. To zabezpieczenie semantyczne dla list bez nazwy dostępnej, które resolver
 może namierzyć wyłącznie pozycyjnie (`combobox nth=N`): numeracja przesuwa się wraz ze
 stanem DOM, więc bez tej kontroli zły-ale-prawdopodobny `<select>` przeszedłby
-walidację, a dopiero wykonanie przewróciłoby kompilację timeoutem. Porównanie
-normalizuje białe znaki, a w drugim podejściu ignoruje wielkość liter — dokładnie tak
-jak wykonanie — więc różnica w formatowaniu etykiety nie odrzuci poprawnego celu.
+walidację, a pomyłka wyszłaby dopiero później — jako timeout kompilacji albo jako
+render klikający na filmie nie tę kontrolkę. Porównanie normalizuje białe znaki i jest
+następnie **wrażliwe na wielkość liter**: dokładnie ta sama reguła, którą stosuje każda
+ścieżka wykonania (patrz niżej), więc walidacja nigdy nie odrzuca kontrolki, którą
+Guidebot umiałby obsłużyć, i nigdy nie przepuszcza takiej, której by nie umiał.
+
+Kontrola dotyczy dokładnie tych kontrolek, których własne elementy `<option>` Guidebot
+faktycznie przeszukuje przy renderze — `<select>` z nakładką oraz natywnie widocznej
+listy (`multiple` / `size="2"`). **`<select>`, który strona już przejęła własnym
+widżetem, jest z niej wyłączony**: taki widżet Guidebot obsługuje przez listę DOM samej
+strony, nigdy przez opcje ukrytego oryginału, a lista select2 zasilana AJAX-em zupełnie
+normalnie nie ma żadnych opcji, dopóki użytkownik jej nie otworzy — odrzucenie jej
+oznaczałoby odmowę obsługi kontrolki, którą Guidebot obsługuje bez problemu.
+`<select>` bez opcji, którego strona *nie* przejęła, nadal jest odrzucany, z
+komunikatem mówiącym, że nie ma z czego wybierać.
 
 Listę opcji natywnego `<select>` rysuje system operacyjny, więc żadne narzędzie do
 automatyzacji przeglądarki — w tym Playwright — nie rozwinie jej ani nie zrzuci na
-ekran. Dlatego podczas `render` kursor dojeżdża do kontrolki, pokazuje kliknięcie i
-*przełącza* wartość zwiniętej listy do `option` strzałkami, więc wartość widocznie się
-zmienia, choć lista się nie otwiera (skok o więcej niż dwanaście pozycji ustawiany jest
-od razu, by animacja nie trwała zbyt długo). Podczas `compile` wartość ustawiana jest
-wprost. Tak czy inaczej element kończy na `option`, więc kolejne kroki i render są
-zgodne.
+ekran. Żeby mimo to pokazać wybór na filmie, Guidebot wstrzykuje nakładkę DOM
+(`config.selects`, opisana niżej), która zamienia surową kontrolkę na widżet z listą
+naprawdę rozwijaną w dół, w DOM-ie. Podczas `render` kursor dojeżdża do kontrolki i
+klika ją, lista się rozwija, kursor dojeżdża do wybranego wiersza i klika go — dwa
+widoczne gesty zamiast niewidocznej zmiany wartości. Podczas `compile` wartość
+ustawiana jest wprost, bez animacji — kompilacja ma być szybka, nie efektowna. Tak
+czy inaczej element kończy na `option`, więc kolejne kroki i render są zgodne.
+
+**Widżety, które strona sama już ulepszyła, są celowo pozostawiane bez zmian.**
+Jeśli aplikacja docelowa podmienia swój `<select>` na własny dropdown — select2,
+Tom Select, Chosen albo cokolwiek o tym samym kształcie (ukryty lub niewidoczny
+oryginalny `<select>` plus sąsiadujący widżet) — Guidebot go nie nakłada: lista
+takiego widżetu jest już w DOM-ie i już nagrywa się poprawnie. Ta sama choreografia
+steruje wtedy bezpośrednio widoczną kontrolką powiązaną z ukrytym selectem
+(znalezioną po jej `aria-controls`/`aria-owns`, powiązaniu zwrotnym
+`aria-labelledby`/`aria-describedby`, a w ostateczności po najbliższym widocznym
+rodzeństwie), a potem wierszem opcji, który pojawia się po jej otwarciu.
+
+**`<select multiple>` i `<select size="2">` nie potrzebują nakładki i jej nie
+dostają.** Taka kontrolka rysuje listę opcji w samej stronie, a nie jako popup
+systemu, więc nie ma czego podmieniać — a skoro jej wiersze są widoczne od
+początku, nie ma też czego rozwijać. Choreografia to jeden gest: kursor dojeżdża
+wprost do `<option>` i klika go, wcześniej przewijając listę do tego wiersza,
+jeśli jest poniżej widocznego obszaru. Kontrolka zachowuje przy tym swój natywny
+wygląd.
+
+Jak zawsze przy `select`, wybierana jest **jedna** opcja: kliknięcie odznacza
+wszystkie pozostałe, dokładnie tak samo jak bezpośrednie ustawienie wartości. Nie
+da się wybrać wielu opcji w jednym kroku.
+
+`option` porównywane jest z widoczną etykietą opcji po zwinięciu białych znaków, a
+dalej **z uwzględnieniem wielkości liter** — ta sama reguła dla każdego kształtu
+kontrolki, więc jeden scenariusz nie rozwiąże się inaczej na selekcie z nakładką,
+a inaczej na widżecie, który strona ulepszyła sama.
+
+Jeśli nie ma czego kliknąć — brak widocznej kontrolki powiązanej z już ulepszonym
+selectem, select widoczny, ale bez listy opcji, którą Guidebot potrafiłby otworzyć,
+brak nakładki w tym kontekście w ogóle, albo brak wiersza pasującego do `option` po
+otwarciu listy — przebieg kończy się **błędem**, zamiast po cichu ustawić wartość.
+Komunikat błędu mówi, o którą z tych sytuacji chodzi, i nazywa klasę markerową, jeśli
+to ona jest przyczyną.
+
+`compile` sprawdza ulepszony widżet również z góry, ale jego test odpowiada na
+węższe pytanie niż „czy da się tym sterować": pyta, czy z ukrytym selectem da się
+powiązać *jakąkolwiek* widoczną kontrolkę, a nie czy znaleziona kontrolka jest tą
+właściwą. Wyłapuje więc przypadek **braku widocznej kontrolki** — ukryty oryginał
+w stylu Tom Selecta bez swojego widżetu nie przejdzie kompilacji, zamiast wysypać
+się kilka minut w render. Nie wyłapuje natomiast przypadku **niewłaściwej
+kontrolki**: ostatnim krokiem heurystyki powiązania jest „najbliższe następne
+rodzeństwo z niezerowym pudełkiem", więc select, którego prawdziwy widżet leży
+gdzie indziej w dokumencie, może zostać skojarzony z przypadkowym sąsiadem.
+`compile` i tak przejdzie — wartość ustawia przez `select_option`, nigdy przez
+widżet — a błąd wyjdzie dopiero w renderze: kursor kliknie ten obcy element na
+filmie, poczeka na wiersz opcji, który nigdy się nie pojawi, i krok się wywali.
+Jeśli krok `select` kompiluje się, ale wywala w połowie renderu z komunikatem, że
+opcja się nie pojawiła, lekarstwem jest `aria-controls` (albo `aria-owns`) na
+`<select>` wskazujące jego prawdziwy widżet — to pierwszy i najsilniejszy sygnał
+heurystyki.
+
+**Kliknięcie, które w nic nie trafiło, też kończy się błędem.** Po kliknięciu
+wiersza Guidebot odczytuje `<select>` z powrotem i sprawdza, czy naprawdę pokazuje
+`option`; jeśli nie — krok kończy się błędem, a nie sukcesem. Dotyczy to sytuacji,
+w których wiersz *jest* i kliknięcie go nic nie daje: opcja `disabled` albo widżet,
+któremu towarzyszy „toast" lub obszar live powtarzający tę samą etykietę. Bez tego
+odczytu taki przebieg kończyłby się na zielono i dawał film, na którym lista
+widocznie się nie zmienia.
+
+Dla widżetu, którego nakładka naprawdę nie potrafi obsłużyć — np. listy
+doszukującej opcje przez sieć w miarę pisania — użyj furtki na poziomie kroku,
+**`mode: native`**. Lista nigdy się nie rozwija: kursor nadal dojeżdża do zwiniętej
+kontrolki i ją klika, a wartość zmienia się od razu, w chwili gdy kursor dojeżdża —
+nie ma żadnej pośredniej animacji przełączania do obejrzenia, tylko dojazd i zmiana.
+
+Wcześniejsze wersje animowały tę zmianę, wciskając `ArrowDown`/`ArrowUp` na
+zwiniętej kontrolce. Zniknęło to dlatego, że jest **zależne od systemu**, a nie
+dlatego, że strzałki są bezużyteczne: zmierzone na przypiętym w tym projekcie
+Playwrighcie na macOS, headless i headed — ustawienie fokusu na natywnym
+`<select>` i dwukrotne `ArrowDown` zostawia `selectedIndex` na `0` i nie wywołuje
+żadnego `change`, bo macOS przypisuje tym klawiszom na zwiniętej liście otwarcie
+popupu systemowego. Na Chromium linuksowym i windowsowym te same wciśnięcia
+przestawiają wartość i wywołują `change`. Jeden scenariusz dawałby więc jeden film
+na Macu, a inny na linuksowym CI — z tego samego skompilowanego artefaktu. Dlatego
+`mode: native` zachowuje się dziś wszędzie tak samo: dojazd, ripple, wartość.
+
+`mode` ma też formę globalną, `config.selects.mode` (patrz sekcja `selects` niżej);
+wartość na poziomie kroku domyślnie ją dziedziczy i nadpisuje ją dla jednej upartej
+kontrolki w reszcie poprawnego scenariusza. Przy globalnym `shim` nadpisanie
+*zdejmuje* też nakładkę z tej jednej kontrolki przed jej obsłużeniem i nie zakłada
+jej ponownie do końca nagrania; pozostałe selecty na stronie zachowują swoją listę
+w DOM:
+
+```yaml
+- select:
+    from: "lista województw"
+    option: "Mazowieckie"
+    mode: native          # opcjonalne; domyślnie config.selects.mode
+```
+
+Nadpisanie działa **w jedną stronę**. `config.selects.mode: native` nie jest
+wartością domyślną, którą krok mógłby nadpisać w drugą stronę: decyduje o tym, czy
+skrypt nakładki w ogóle trafia do przeglądarki, więc pod nim nie ma nakładki, do
+której krok mógłby wrócić. Krok proszący o `mode: shim` przy globalnym `native`
+zostaje odrzucony już przy wczytywaniu scenariusza, z podaniem pliku, numeru linii
+i dosłownego fragmentu YAML (patrz
+[Jak czytać komunikat o kroku](troubleshooting.md#jak-czytac-komunikat-o-kroku)) —
+zamiast sypać się kilka minut w render, gdy kursor kliknął już na filmie coś
+niezwiązanego.
 
 ### `scroll`
 
@@ -490,8 +632,10 @@ podobnie jak liczbowy `wait`. `to` przyjmuje `up`, `down`, `top` lub `bottom`; s
 większość wysokości okna.
 
 Służy do wprowadzenia w kadr treści spod „linii zgięcia" — zwłaszcza treści, których
-resolver **nie** potrafi wskazać, jak podgląd w `<iframe>` czy lista opcji natywnego
-selecta. Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
+resolver **nie** potrafi wskazać, jak podgląd w `<iframe>`. (Lista opcji natywnego
+selecta należała kiedyś do tej wyliczanki, ale już nie: nakładka rysuje ją w DOM-ie,
+więc `select` steruje nią bezpośrednio.)
+Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
 nakładką (render) przewijanie jest animowane; podczas `compile` skacze wprost. Ponieważ
 nie rozwiązuje żadnego elementu, `scroll` nie wymaga `compile` i nie przyjmuje `optional`.
 
@@ -732,13 +876,34 @@ render jak zwykle.
 | `verifyUserLoggedIn`, `maxAgeHours` (na setupie) | Nie — render-only, poza config hashem |
 | Istniejący tekst narracji `say`/`teach`, `translations` | Nie — render-only |
 | Sama wartość `enterText.text` | Nie — render-only |
+| Sama wartość `select.option` | Nie — render-only |
+| `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | Nie — render-only |
 | `config.setup` (na celu) dodane, usunięte lub przepięte | Tak — ścieżka `setup` wchodzi do config hasha celu |
+| `config.selects.mode` przełączone między `shim` i `native` | Tak — wchodzi do config hasha, jak `config.setup`, tylko gdy różni się od domyślnej wartości |
 | Dodanie, usunięcie lub zmiana kolejności kroku `slide` | Tak |
-| Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `wait.until`/`state`) | Tak |
+| Instrukcja targetu kroku (zdanie `teach`, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) lub własne `select.mode` kroku | Tak |
 | Zmiana rodzaju komendy kroku | Tak |
+| Zamrożony cel `text=` pasujący do napisu z `<option label="…">` albo `<optgroup label="…">` | Rzadko — patrz niżej |
 
 Pełną listę, łącznie z `viewport`/`locale`/`tts.lang` i driftem aplikacji, znajdziesz
 w [Plikach scenariusza](scenario-files.md#co-uniewaznia-sidecar).
+
+**Jeden wąski przypadek, w którym artefakt skompilowany przed nakładką na selecty
+wymaga jednak ponownej kompilacji.** Nakładka rysuje listę opcji — i etykietę
+samej zwiniętej kontrolki — jako prawdziwy tekst DOM na poziomie `<body>`. Dla
+*treści tekstowej* opcji nic to nie zmienia: ten sam napis był już w DOM-ie,
+wewnątrz `<select>`, więc żaden cel nie zacznie przez to pasować dwa razy.
+Wyjątkiem jest **atrybut** `label`: `<option label="Krótko">` renderuje się przez
+atrybut, a nie przez swój tekst, a nagłówki `<optgroup label="…">` wyprowadzają
+swój atrybut na ekran jako tekst, którego wcześniej w DOM-ie nie było. Krok
+zamrożony jako cel `text=`, którego napis akurat równa się takiemu atrybutowi,
+może teraz pasować w dwóch miejscach, oblać sprawdzenie ponownego użycia z
+powodem `not_unique` i wymagać jednorazowego `guidebot compile`. Nic poza tym nie
+jest narażone: cele `role=` są bezpieczne, bo każda nakładka jest `aria-hidden` i
+nie istnieje w drzewie dostępności, a cele `testid=` i `label=` — bo nakładki nie
+mają ani `data-testid`, ani powiązanej etykiety formularza. Ponowne `guidebot
+compile` załatwia sprawę: krok zamraża się wtedy względem DOM-u, który render
+naprawdę zobaczy.
 
 ## `translations`
 

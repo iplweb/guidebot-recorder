@@ -246,8 +246,10 @@ Write `$${NAME}` when the literal output must be `${NAME}`.
 | Any `cursor` field, including `cursor.click` | Render only. |
 | Any `chrome` field or `navigate.type` only | Render only; no target or sidecar rebuild. |
 | Any `typing`, `sound`, or `intro` field | Render only. |
+| `config.selects.settleMs`, `maxVisibleOptions`, or `openHoldMs` | Render only; cosmetic shim tuning. |
 | Target instruction in `teach`/`click`/`hover`/`into`/`until` | Compile. |
 | `viewport`, `locale`, or `tts.lang` | Compile; the target config hash changes. |
+| `config.selects.mode` (global) switched between `shim`/`native`, or a step's `select.mode` | Compile; the config hash or the step's own fingerprint changes. |
 | Application DOM/content drift | `compile --force`. |
 | Navigation URL or `baseUrl` | `compile --force`; neither describes a target fingerprint. |
 | Step kind/order/addition/removal, including adding/removing/reordering a `slide` step | Compile; use `--force` if route/application state also changed. |

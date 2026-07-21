@@ -74,6 +74,7 @@ steps:
 | `intro` | No | object / disabled | Opt-in intro title card shown before step 1, render-only. |
 | `holdFrameForNarration` | No | boolean / `true` | Freeze the picture during narration instead of recording in real time, render-only. |
 | `holdFrameSettle` | No | number / `1.0` | Real seconds recorded before the frame freezes, render-only. |
+| `selects` | No | object / built-in shim defaults | DOM select shim that makes a native `<select>`'s option list visible on camera; only `mode` affects the compile hash. |
 
 ### `viewport`
 
@@ -438,6 +439,33 @@ has no address bar — only the compositor frame is drawn.
     space around the pop-up content. Forcing the pop-up to fill the viewport is a
     planned improvement.
 
+### `selects`
+
+Settings for the DOM select shim used by the [`select`](#select) step. All fields
+are optional; omit the whole `selects:` block to keep the built-in shim behavior.
+
+```yaml
+selects:
+  mode: shim            # shim (default) | native
+  settleMs: 1000
+  maxVisibleOptions: 8
+  openHoldMs: 350
+```
+
+| YAML field | Default | Meaning |
+|---|---:|---|
+| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the collapsed control — the cursor still travels to it and clicks, but the list never unfurls and the value changes at once. A per-step `select.mode: native` opts one control out of a global `shim`; the reverse is not possible, because `native` injects no shim script for a step to opt back into, and a step that asks for it is rejected when the scenario loads. |
+| `settleMs` | `1000` | Milliseconds to wait after page load before classifying each `<select>` as raw or already enhanced. Gives the page's own select2/Tom Select/Chosen initialization time to hide or replace the original control before the shim decides whether to touch it. `0` switches the window off — correct only on a site that enhances nothing, where waiting cannot help. |
+| `maxVisibleOptions` | `8` | Number of options shown in the unfurled list at once before it scrolls internally. |
+| `openHoldMs` | `350` | Milliseconds the unfurled list stays open for the viewer to read before the cursor moves to the chosen option. |
+
+Only `mode` affects what gets compiled: changing it to `native` changes what the
+resolver drives, so — like `config.setup` — it participates in the config hash only
+when it differs from the default, and forces a recompile (see the
+[recompile matrix](#recompile-matrix)). `settleMs`, `maxVisibleOptions`, and
+`openHoldMs` are cosmetic render-time tuning, like `cursor` or `popup`: changing
+them never requires a recompile.
+
 ## `steps`
 
 `steps` is an ordered list. A step may contain:
@@ -577,30 +605,145 @@ show the value in the recording; Guidebot does not add masking.
   say: "From the report type list I choose the table format."
 ```
 
-Choose an option from a native `<select>` dropdown. `from` is a semantic target
-instruction sent to the reasoner and must resolve to a native `<select>` element —
-resolving to a non-select control (a custom `role="combobox"` widget, a button) is a
-`not_select` validation error. `option` is the visible label of the option to pick;
-it is shown, never spoken, and is **not** environment-substituted.
+Choose an option from a dropdown. `from` is a semantic target instruction sent to
+the reasoner and must resolve to a native `<select>` element — resolving to a
+non-select control (a custom `role="combobox"` widget, a button) is a `not_select`
+validation error. `option` is the visible label of the option to pick; it is shown,
+never spoken, and is **not** environment-substituted.
 
 Validation also checks that the resolved `<select>` actually **offers** the requested
 option; if it does not, the target is rejected with `option_missing`, and the message
 lists the labels the element really has. This is the semantic safety net for dropdowns
 with no accessible name, which the resolver can only address positionally
 (`combobox nth=N`): that index shifts with the state of the DOM, so without the check a
-wrong-but-plausible `<select>` would pass validation and only execution would fail the
-compile, with a timeout. The comparison normalises whitespace and, on a second pass,
-ignores case — exactly as execution does — so a differently formatted label never
-rejects a correct target.
+wrong-but-plausible `<select>` would pass validation and the mistake would only surface
+later — as a compile-time timeout, or as a render that clicks the wrong control on
+camera. The comparison collapses whitespace and is then case-sensitive: exactly the
+rule every execution path applies (see below), so validation never refuses a control
+Guidebot could have driven, and never blesses one it could not.
 
-A native select's option list is drawn by the operating system, so no
-browser-automation tool — Playwright included — can unfurl or screenshot it. During
-`render` the cursor therefore glides to the control, shows the click ripple, and
-*steps* the collapsed control's value to `option` with arrow keys, so the value
-visibly changes even though the list never opens (a jump of more than twelve options
-is set directly to keep the animation short). During `compile` the value is set
-directly. Either way the element ends on `option`, so later steps and the render
-agree. Pair it with a `say` such as "from this list I choose …" to narrate the intent.
+The check applies to exactly the controls whose own `<option>` elements are what
+Guidebot will search at render time — a shimmed `<select>` and a natively-visible
+listbox (`multiple` / `size="2"`). **A `<select>` the page has already enhanced is
+exempt**, because Guidebot drives such a widget through the page's own DOM list and
+never through the hidden original's options: a select2 dropdown backed by AJAX
+legitimately carries no options at all until the user opens it, and rejecting it
+would refuse a control Guidebot can drive perfectly well. A `<select>` that carries
+no options *and* is not enhanced is still rejected, with a message saying there is
+nothing to choose from.
+
+A native `<select>`'s option list is drawn by the operating system, so no
+browser-automation tool — Playwright included — can unfurl or screenshot it. To make
+the choice visible anyway, Guidebot injects a DOM shim (`config.selects`, described
+below) that replaces the raw control with an overlay whose list genuinely opens
+downward in the page. During `render` the cursor glides to the control and clicks
+it, the list unfurls, the cursor glides to the chosen row, and clicks it — two
+visible beats instead of an invisible value change. During `compile` the value is
+set directly with no animation, since compilation is meant to be fast, not pretty.
+Either way the element ends on `option`, so later steps and the render agree.
+
+**Widgets the page has already enhanced are deliberately left alone.** If the
+target application replaces its `<select>` with its own dropdown — select2, Tom
+Select, Chosen, or anything shaped the same way (a hidden or invisible original
+`<select>` plus a sibling widget) — Guidebot does not shim it: that widget's list
+is already DOM and already records correctly. The same two-beat choreography drives
+it directly instead — the visible control associated with the hidden select (found
+by its `aria-controls`/`aria-owns`, an `aria-labelledby`/`aria-describedby`
+back-reference, or, failing both, the nearest visible sibling), then the option row
+that appears once it opens.
+
+**A `<select multiple>` or `<select size="2">` needs no shim and gets none.** It
+already draws its option list in the page rather than as an OS popup, so there is
+nothing to replace — and because its rows are laid out on screen from the start,
+there is also no list to unfurl. The choreography is a single beat: the cursor
+glides straight to the `<option>` and clicks it, scrolling the listbox to it first
+if it sits below the fold. The control keeps its own native appearance throughout.
+
+As always for `select`, this picks **one** option: clicking it deselects whatever
+else was selected, exactly as setting the value directly does. There is no way to
+choose several options in one step.
+
+`option` is matched against the option's visible label with whitespace collapsed,
+and is then **case-sensitive** — the same rule on every shape of control, so one
+scenario cannot resolve one way on a shimmed select and another on a widget the
+page enhanced itself.
+
+If nothing can be clicked — no visible control associated with an already-enhanced
+select, a select that is on screen but carries no option list Guidebot can open,
+no shim installed in that context at all, or no row matching `option` after
+opening the list — the run **fails** rather than silently setting the value; a
+widget the shim cannot drive is not one Guidebot will pretend to have shown. The
+error message says which of those situations it is in, naming the marker class
+where one is the cause.
+
+`compile` probes an enhanced widget up front as well, but the probe answers a
+narrower question than "is this drivable": it asks whether *any* visible control
+can be associated with the hidden select, not whether the one it found is the
+right one. So it does catch the **no visible control** case — a Tom Select-style
+hidden original whose widget is missing fails at compile, not several minutes
+into a render. It does **not** catch the **wrong control** case: the last step of
+the association heuristic is "the nearest following sibling with a box", so a
+select whose real widget lives elsewhere in the document can be matched to an
+unrelated neighbouring element. Compile still passes — it sets the value with
+`select_option`, never through the widget — and the render is where the mistake
+shows: the cursor clicks that unrelated element on camera, waits for an option
+row that never appears, and the step fails there. If a `select` step compiles but
+fails partway through a render with "the option did not appear", an
+`aria-controls` (or `aria-owns`) on the `<select>` naming its real widget is the
+fix: that is the heuristic's first and strongest signal.
+
+**A click that lands on nothing fails too.** After clicking the row, Guidebot
+reads the `<select>` back and checks that it really shows `option`; if it does
+not, the step fails instead of reporting success. That covers the cases where
+there *is* a row to click and clicking it achieves nothing — a `disabled` option,
+or a widget whose list is accompanied by a toast or live region repeating the same
+label. Without the read-back such a run would finish green and produce a video in
+which the dropdown visibly never changes.
+
+For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
+loads its options over the network, for instance — use the per-step **`mode:
+native`** escape hatch. The list never unfurls: the cursor still glides to the
+collapsed control and clicks it, and the value changes at once, the moment the
+cursor arrives — there is no intermediate stepping animation to watch, only the
+travel and the change.
+
+Earlier versions animated that change by pressing `ArrowDown`/`ArrowUp` on the
+collapsed control. That is gone because it is **platform-dependent**, not because
+arrow keys are useless: measured with this project's pinned Playwright on macOS,
+headless and headed, focusing a native `<select>` and pressing `ArrowDown` twice
+leaves `selectedIndex` at `0` and fires no `change` — macOS binds those keys on a
+closed dropdown to opening the OS popup. On Linux and Windows Chromium they do
+step the value and do fire `change`. One scenario would therefore have produced
+one film on a Mac and a different one on a Linux CI runner, from the same
+compiled artifact — so `mode: native` now behaves identically everywhere: travel,
+ripple, value.
+
+`mode` also has a global form, `config.selects.mode` (see
+the `selects` config block below); the per-step value defaults to it and overrides
+it for one stubborn control in an otherwise fine scenario. Under a global `shim`
+the override also *removes* the shim from that one control before driving it, and
+keeps it off for the rest of the recording; every other select on the page keeps
+its DOM list:
+
+```yaml
+- select:
+    from: "the province dropdown"
+    option: "Mazowieckie"
+    mode: native          # optional; defaults to config.selects.mode
+```
+
+The override is **one-way**. `config.selects.mode: native` is not a default a step
+can override in the other direction: it decides whether the shim script is
+injected into the browser at all, so underneath it there is no shim for a step to
+opt back into. A step that asks for `mode: shim` while the global mode is `native`
+is rejected when the scenario loads, with the file, the line number and the
+offending YAML fragment (see
+[Reading a step message](troubleshooting.md#reading-a-step-message)) — rather than
+failing several minutes into a render, after the cursor has already clicked
+something unrelated on camera.
+
+Pair a `select` step with a `say` such as "from this list I choose …" to narrate
+the intent.
 
 ### `scroll`
 
@@ -617,7 +760,9 @@ for `top`/`bottom`; without it, `down`/`up` moves by most of a viewport.
 
 Its purpose is to bring below-the-fold content into view so the recording shows it —
 in particular content the resolver **cannot** target, such as a live-preview
-`<iframe>` or a native select's option list. The cursor still cannot enter an iframe,
+`<iframe>`. (A native select's option list used to belong on that list and no
+longer does: the shim renders it into the DOM, so `select` drives it directly.)
+The cursor still cannot enter an iframe,
 but the scroll brings the iframe into frame. With an overlay (render) the scroll is
 an animated glide; during `compile` it jumps directly. Because it resolves no
 element, `scroll` needs no `compile` for its own sake and takes no `optional`.
@@ -847,13 +992,32 @@ use explicit waits and verify the result.
 | Existing `say`/`teach` narration text, `translations` | No — render-only |
 | `enterText.text` value alone | No — render-only |
 | `select.option` value alone | No — render-only |
+| `config.selects.settleMs`, `maxVisibleOptions`, `openHoldMs` | No — render-only |
 | `config.setup` (on a target) added, removed, or repointed | Yes — the setup path is folded into the target's compile hash |
+| `config.selects.mode` switched between `shim` and `native` | Yes — folded into the config hash, like `config.setup`, only when non-default |
 | Adding, removing, or reordering a `slide` step | Yes |
-| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) | Yes |
+| A target step's instruction (`teach` sentence, `click`/`hover`, `enterText.into`, `select.from`, `wait.until`/`state`) or a step's own `select.mode` | Yes |
 | Switching a step's command kind | Yes |
+| A frozen `text=` target that matches an `<option label="…">` or `<optgroup label="…">` string | Rarely — see below |
 
 See [Scenario files](scenario-files.md#when-render-is-enough) for the complete list,
 including `viewport`/`locale`/`tts.lang` and application drift.
+
+**One narrow case where an artifact compiled before the select shim can need a
+recompile.** The shim draws the option list — and the collapsed control's own
+label — as real DOM text at `<body>` level. For an option's *text content* that
+changes nothing: the same string was already in the DOM, inside the `<select>`,
+so no target can start matching twice because of it. The exception is the `label`
+**attribute**: `<option label="Short">` is rendered by its attribute rather than
+its text, and `<optgroup label="…">` headings put their attribute on screen as
+text that was never DOM text before. A
+step frozen as a `text=` target whose string happens to equal one of those
+attributes can now match in two places, fail its reuse check with `not_unique`,
+and need `guidebot compile` once. Nothing else is exposed: `role=` targets are
+unaffected because every shim overlay is `aria-hidden` and invisible to the
+accessibility tree, and `testid=` and `label=` targets are unaffected because the
+overlays carry neither a test id nor a form label. Re-running `guidebot compile`
+resolves it; the step then freezes against the DOM the render will actually see.
 
 ## Environment substitution
 

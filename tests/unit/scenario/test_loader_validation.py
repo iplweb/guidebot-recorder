@@ -309,3 +309,64 @@ def test_validation_error_stays_a_value_error():
     """Istniejące `pytest.raises(ValueError, ...)` w testach loadera mają przechodzić."""
 
     assert issubclass(ScenarioValidationError, ValueError)
+
+
+def test_select_shim_mode_under_a_global_native_points_at_its_own_line(tmp_path):
+    """Odrzucenie `select.mode: shim` przy `config.selects.mode: native`.
+
+    Walidator żyje na poziomie `Scenario` (`loc == ()`), więc bez
+    `StepPathError.path` banner nie miałby czego wskazać — a krok `select:`
+    dostałby gorszą diagnostykę niż krok `click:` w tym samym pliku.
+    """
+
+    message, path = _error(
+        tmp_path,
+        """\
+    config:
+      title: t
+      viewport: {width: 1, height: 1}
+      tts: {provider: edge, voice: v, lang: pl-PL}
+      selects: {mode: native}
+    steps:
+      - say: "Pierwszy."
+      - select:
+          from: "lista województw"
+          option: "Mazowieckie"
+          mode: shim
+""",
+    )
+
+    assert _banners(message) == 1
+    assert f"{path}:8" in message  # linia kroku `- select:`
+    assert "krok 2/2" in message
+    assert "mode: shim" in message  # dosłowny fragment YAML
+    assert "config.selects.mode: native" in message
+
+
+def test_select_shim_mode_inside_a_when_block_points_at_the_child(tmp_path):
+    """Dziecko bloku `when:`, nie sam blok — ścieżka `(i, j)` musi trafić głębiej."""
+
+    message, path = _error(
+        tmp_path,
+        """\
+    config:
+      title: t
+      viewport: {width: 1, height: 1}
+      tts: {provider: edge, voice: v, lang: pl-PL}
+      selects: {mode: native}
+    steps:
+      - say: "Pierwszy."
+      - when: "baner zgody"
+        steps:
+          - say: "Drugi."
+          - select:
+              from: "lista województw"
+              option: "Mazowieckie"
+              mode: shim
+""",
+    )
+
+    assert _banners(message) == 1
+    assert f"{path}:11" in message  # linia dziecka, nie linia bloku (8)
+    assert "krok 4/4" in message  # say + bramka + 2 dzieci → 4. krok wykonania
+    assert "mode: shim" in message

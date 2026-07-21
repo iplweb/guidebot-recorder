@@ -42,6 +42,7 @@ from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.resolver.page_context import Candidate
 from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.selects import install_selects
 
 __all__ = [
     "RaisingReasoner",
@@ -250,6 +251,10 @@ async def replay_setup(
         locale=cfg.locale,
     )
     try:
+        # This context drives scenario steps through ``run_compile``, so a setup
+        # scenario containing a `select:` step must behave exactly like a target
+        # one — same widget, same frozen targets.
+        selects = await install_selects(context, cfg)
         page = await context.new_page()
         try:
             await run_compile(
@@ -259,6 +264,7 @@ async def replay_setup(
                 env,
                 timeout=timeout,
                 force=False,
+                selects=selects,
             )
         except SetupNeedsCompile:
             raise
@@ -307,6 +313,8 @@ async def check_logged_in(
         viewport=viewport,
     )
     try:
+        # No select shim here on purpose: this probe drives no scenario steps and
+        # is never filmed, so there is nothing for the widget to make visible.
         page = await context.new_page()
         await page.goto(goto_url)
         try:
@@ -490,6 +498,8 @@ async def _manual_finish(
         viewport={"width": site_width, "height": site_height},
     )
     try:
+        # No select shim here on purpose: a human drives this browser by hand and
+        # must get the real, native controls — not a DOM stand-in for the camera.
         page = await context.new_page()
         await page.goto(setup_cfg.base_url)
         prompt("Finish logging in in the browser window, then press Enter...")

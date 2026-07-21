@@ -50,6 +50,21 @@ MAX_REPROMPT = 2
 ABSENT_REASONS: frozenset[ErrorReason] = frozenset({"no_action", "no_handle"})
 
 
+class TargetResolutionError(RuntimeError):
+    """A verdict of :func:`resolve_step_target` itself: the step cannot be resolved.
+
+    Named rather than a bare ``RuntimeError`` so a caller can tell this apart
+    from whatever an injected ``Reasoner`` raises through the same frame —
+    :class:`~guidebot_recorder.recorder.session.SetupNeedsCompile` is a
+    ``RuntimeError`` too, and it is control flow, not a verdict. Compile wraps
+    only verdicts in a `plik:linia` banner; anything else must pass through with
+    its own type intact.
+
+    Subclasses ``RuntimeError``, so every existing ``except RuntimeError`` and
+    ``pytest.raises(RuntimeError)`` keeps working.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedTarget:
     """A validated target, ready to act on and to freeze into a ``CachedAction``."""
@@ -77,7 +92,11 @@ class TargetAbsent:
 
 
 def step_instruction(step: Step) -> str:
-    """The natural-language text the Reasoner resolves for this step."""
+    """The natural-language text the Reasoner resolves for this step.
+
+    The author's own sentence and nothing else — see :func:`compiled_from` for
+    the fingerprint, which is a different question with a different answer.
+    """
 
     kind = step.command_kind()
     if kind == "teach":
@@ -93,6 +112,31 @@ def step_instruction(step: Step) -> str:
     if kind == "wait" and isinstance(step.wait, WaitUntil):
         return step.wait.until
     raise ValueError(f"krok bez instrukcji do rozwiązania: {kind}")
+
+
+def compiled_from(step: Step) -> str:
+    """The step content a frozen action is fingerprinted against.
+
+    Everything the compiler resolved *from* has to be in here, or editing it
+    leaves a stale sidecar looking current. That is more than the sentence the
+    reasoner sees: a ``select:`` step also carries a per-step ``mode``, and
+    deleting ``mode: native`` from one used to leave ``compile_up_to_date()``
+    true — no browser opened, the drivability probe never ran, and the render
+    drove a widget nothing had checked.
+
+    Kept apart from :func:`step_instruction` on purpose, even though the two
+    differ by one line. ``step_instruction`` is the prompt the Reasoner resolves
+    against; folding a YAML keyword into that would hand the LLM ``mode:
+    native`` as though it were part of the author's description of the control.
+    The suffix is appended only when the step actually sets a mode, so every
+    fingerprint frozen before this existed stays valid and no scenario needs a
+    recompile for the change itself.
+    """
+
+    instruction = step_instruction(step)
+    if step.command_kind() == "select" and step.select.mode is not None:
+        return f"{instruction} [mode: {step.select.mode}]"
+    return instruction
 
 
 def action_for(kind: str, resolved: ActionKind) -> ActionKind:
@@ -151,9 +195,11 @@ async def resolve_step_target(
 
     Returns :class:`TargetAbsent` only for the narrow verdicts in
     :data:`ABSENT_REASONS`; every other failure — an ambiguous description, an
-    invented ``inputText``, a sensitive field, a target that never validates —
-    raises ``RuntimeError``, because those are authoring or resolver bugs rather
-    than a missing element.
+    invented ``inputText``, a sensitive field, a target that never validates,
+    a ``<select>`` without the wanted option — raises
+    :class:`TargetResolutionError`, because those are authoring or resolver bugs
+    rather than a missing element. Whatever the injected ``Reasoner`` itself
+    raises passes through unchanged and keeps its own type.
     """
 
     instruction = step_instruction(step)
@@ -167,7 +213,7 @@ async def resolve_step_target(
         if isinstance(result, ReasonerError):
             if result.reason in ABSENT_REASONS:
                 return TargetAbsent(reason=result.reason, message=result.message)
-            raise RuntimeError(f"reasoner: {result.reason}: {result.message}")
+            raise TargetResolutionError(f"reasoner: {result.reason}: {result.message}")
         assert isinstance(result, ReasonerResult)
 
         action = action_for(kind, result.action)
@@ -202,6 +248,18 @@ async def resolve_step_target(
                     target, validation = relaxed, relaxed_validation
             if not isinstance(validation, ValidationOk):
                 last_rejection = validation
+                if action == "select" and validation.reason == "not_visible":
+                    # Not a reasoner miss to be re-prompted away silently: the
+                    # page has no control a viewer could see for this select, so
+                    # the choice cannot be filmed at all. Re-prompting may still
+                    # find a *different* select, so the loop continues — but if
+                    # it does not, the run must say which situation this is
+                    # rather than "could not validate the target".
+                    resolution_error = (
+                        f"nie znaleziono widocznej kontrolki dla listy {instruction!r} "
+                        "— strona ukryła <select> i nic widocznego go nie zastępuje, "
+                        "więc nie da się pokazać wyboru na filmie"
+                    )
                 continue
         if infers_text and await is_sensitive_type_target(validation.locator):
             resolution_error = (
@@ -226,11 +284,11 @@ async def resolve_step_target(
         )
 
     if resolution_error is not None:
-        raise RuntimeError(f"{resolution_error} po {MAX_REPROMPT} próbach")
+        raise TargetResolutionError(f"{resolution_error} po {MAX_REPROMPT} próbach")
     message = f"nie udało się zwalidować namiaru dla: {instruction!r}"
     if last_rejection is not None:
         # Without this the author only learns *that* every candidate was refused.
         # The reason — an absent option, a non-select, an ambiguous name — is the
         # one piece of information that says what to fix in the scenario.
         message += f" (ostatnie odrzucenie: {last_rejection.message})"
-    raise RuntimeError(message)
+    raise TargetResolutionError(message)

@@ -18,6 +18,8 @@ from guidebot_recorder.models.target import (
     TextTarget,
 )
 from guidebot_recorder.resolver.identity_capture import capture_identity
+from guidebot_recorder.resolver.widget import user_visible_control
+from guidebot_recorder.selects.visibility import select_shape
 
 ValidationReason: TypeAlias = Literal[
     "not_found",
@@ -149,12 +151,43 @@ async def _is_native_select(locator: Locator) -> bool:
     return await locator.evaluate("element => element.tagName.toLowerCase() === 'select'")
 
 
+async def _is_page_enhanced(locator: Locator) -> bool:
+    """Whether the page has taken this ``<select>`` over with a widget of its own.
+
+    Decides whether the ``option_missing`` check below has anything to say about
+    the element, and it has to be asked of all three control classes the select
+    shim distinguishes:
+
+    * a **shimmed** select and a **natively-visible listbox** (``multiple`` /
+      ``size > 1``) are both driven straight off ``select.options`` — by the
+      shim's ``optionIndexFor`` and by ``_OPTION_INDEX_JS`` respectively — so
+      their option list *is* the thing execution will search, and an absent label
+      is a real, checkable defect. Neither is "enhanced", so both get checked.
+    * a select the page **enhanced itself** (select2, Tom Select, Chosen) is
+      driven through the widget's own DOM list: beat 2 clicks the node that
+      appeared after opening whose text equals the label, never an ``<option>``
+      of the hidden original. Its ``options`` are therefore not evidence about
+      the target at all, and for an AJAX-backed widget they are legitimately
+      empty or partial until the user opens it. Checking them would reject a
+      control this branch can genuinely drive, so it is not checked.
+
+    The question is answered by the one shared predicate
+    (:func:`guidebot_recorder.selects.select_shape`), never re-stated here — the
+    same source ``selects.js`` classifies with and the recorder drives with.
+    """
+
+    return (await select_shape(locator))["enhanced"]
+
+
 async def _select_option_labels(locator: Locator) -> list[str]:
     """The matched ``<select>``'s visible option labels, whitespace-normalised.
 
-    Deliberately the same projection ``Recorder._step_option_visibly`` builds
-    before it steps the control — ``option.label`` falling back to the text, with
-    runs of whitespace collapsed — so validation and execution read the same list.
+    Deliberately the same projection every execution path builds — ``option.label``
+    falling back to the option's text, with runs of whitespace collapsed. That is
+    ``optionLabel`` in ``selects.js`` (the shim), ``_OPTION_INDEX_JS`` in
+    ``recorder.py`` (the natively-visible listbox) and Playwright's
+    ``select_option(label=…)`` (compile's direct path and ``mode: native``), which
+    are one rule by construction — so validation and execution read the same list.
     """
 
     return await locator.evaluate(
@@ -168,16 +201,24 @@ async def _select_option_labels(locator: Locator) -> list[str]:
 
 
 def _offers_option(labels: list[str], option: str) -> bool:
-    """Whether ``option`` names one of ``labels`` under execution's matching rules.
+    """Whether ``option`` names one of ``labels`` under execution's matching rule.
 
-    Execution tries the normalised label first and then falls back to a
-    case-insensitive comparison, so validation has to accept both. It must never
-    be the stricter of the two: rejecting a target the recorder would have
-    handled just fine would send the resolver chasing a different element.
+    Whitespace is collapsed on both sides and the comparison is then **exact** —
+    the single label→index rule of the select-shim design (§7), shared by
+    ``optionIndexFor`` (the shim), ``_OPTION_INDEX_JS`` (the listbox path) and
+    Playwright's ``select_option(label=…)``.
+
+    Matching validation to that rule is the whole point. A looser comparison here
+    would be the more dangerous mistake of the two: a label differing only in case
+    would sail through validation, be frozen as the resolved target, and then fail
+    during playback — which is exactly the late failure this check exists to
+    eliminate. Stricter is not an option either, since it would send the resolver
+    chasing a different element than the one it could have driven; the rules are
+    the same rule, and ``test_validate_option_rule_matches_execution`` pins them
+    to each other so they cannot drift apart again.
     """
 
-    wanted = " ".join(option.split())
-    return wanted in labels or wanted.lower() in {label.lower() for label in labels}
+    return " ".join(option.split()) in labels
 
 
 def _option_missing_message(option: str, labels: list[str]) -> str:
@@ -232,6 +273,8 @@ async def validate_compile_time(
     re-prompt can act on; omit it and only the element itself is checked. It has
     to stay optional because ``reuse_is_valid`` validates a ``CachedAction``,
     which carries no option label — the wanted option lives in the scenario step.
+    The check applies exactly where ``select.options`` is what execution searches;
+    see :func:`_is_page_enhanced` for the one control class it does not.
     """
 
     if action not in ("click", "hover", "type", "waitFor", "select"):
@@ -247,7 +290,20 @@ async def validate_compile_time(
                 "not_unique", f"The target locator matched {count} elements; expected 1."
             )
 
-        if not await locator.is_visible():
+        if action == "select":
+            # A page may hide the real <select> and render its own dropdown
+            # (select2 clips it to 1x1 px — already "visible" by Playwright's
+            # rule below; Tom Select sets display:none, which is not). What
+            # matters for `select` is whether the viewer sees *some* control
+            # for it, not whether this exact element is on screen.
+            control = await user_visible_control(locator)
+            if control is None:
+                return ValidationFail("not_visible", "The matched element is not visible.")
+            # Only its existence was the question; the handle would otherwise
+            # pin the element for the life of the context (see the ownership
+            # note on `associated_control`).
+            await control.dispose()
+        elif not await locator.is_visible():
             return ValidationFail("not_visible", "The matched element is not visible.")
 
         if action == "type" and not await _is_type_compatible(locator):
@@ -270,7 +326,7 @@ async def validate_compile_time(
         # positionally (combobox nth=N), and that index drifts with the DOM. The
         # wanted option is the semantic check that catches the drift — without it
         # a wrong-but-plausible dropdown only fails later, as a 15s timeout.
-        if action == "select" and option is not None:
+        if action == "select" and option is not None and not await _is_page_enhanced(locator):
             labels = await _select_option_labels(locator)
             if not _offers_option(labels, option):
                 return ValidationFail("option_missing", _option_missing_message(option, labels))

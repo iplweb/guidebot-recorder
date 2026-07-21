@@ -338,7 +338,7 @@ async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
 
         compile_page = await browser.new_page()
         reasoner = PopupReasoner()
-        await run_compile(path, compile_page, reasoner)
+        await run_compile(path, compile_page, reasoner, selects=None)
         await compile_page.context.close()
 
         compiled = load_compiled(compiled_path(path))
@@ -353,7 +353,7 @@ async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
         # Reuse still executes the opening click, follows the popup and validates
         # popup-only identities without asking the Reasoner again.
         reuse_page = await browser.new_page()
-        await run_compile(path, reuse_page, NoCallsReasoner())
+        await run_compile(path, reuse_page, NoCallsReasoner(), selects=None)
         await reuse_page.context.close()
 
         out = tmp_path / "popup.mp4"
@@ -406,7 +406,7 @@ async def test_floating_popup_renders_as_inset_over_visible_main(tmp_path: Path)
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "floating-popup.mp4"
@@ -455,7 +455,7 @@ async def test_slide_popup_renders_full_frame_over_switched_window(tmp_path: Pat
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "slide-popup.mp4"
@@ -497,7 +497,7 @@ async def test_popup_left_open_stays_visible_through_video_end(tmp_path: Path) -
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "open-popup.mp4"
@@ -541,7 +541,7 @@ async def test_floating_popup_frame_is_cropped_to_the_requested_window(tmp_path:
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "small-window-popup.mp4"
@@ -597,7 +597,7 @@ async def test_featureless_popup_is_cropped_to_its_content(tmp_path: Path) -> No
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "featureless-popup.mp4"
@@ -642,7 +642,7 @@ async def test_full_bleed_featureless_popup_renders_uncropped(tmp_path: Path) ->
         browser = await playwright.chromium.launch(headless=True)
 
         compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner())
+        await run_compile(path, compile_page, PopupReasoner(), selects=None)
         await compile_page.context.close()
 
         out = tmp_path / "full-bleed-popup.mp4"

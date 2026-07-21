@@ -4,7 +4,7 @@ import pytest
 from playwright.async_api import async_playwright
 
 from guidebot_recorder.models.scenario import EnterText, Select, Step, WaitUntil
-from guidebot_recorder.models.target import RoleTarget
+from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.resolver.reasoner import ReasonerError, ReasonerResult
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
@@ -192,6 +192,55 @@ async def test_exhausted_reprompts_report_why_the_last_candidate_was_rejected(pa
     message = str(excinfo.value)
     assert "nie udało się zwalidować" in message
     assert "matched no elements" in message
+
+
+async def test_select_step_option_rejection_is_reported_and_is_case_sensitive(page):
+    """An option differing only in case is refused, and the message says so.
+
+    Two rules meet here and neither may be relaxed into the other: the label
+    comparison is exact (the one rule every execution path applies), and a
+    rejection is *reported*, so the author reads which labels the element really
+    offers instead of a bare "could not validate the target".
+    """
+
+    await page.set_content(_TWO_SELECTS)
+    step = Step(select=Select(from_="lista charakteru formalnego", option="artykuł W CZASOPISMIE"))
+    reasoner = StubReasoner(
+        ReasonerResult(action="select", target=RoleTarget(role="combobox", name="", nth=1))
+    )
+
+    with pytest.raises(RuntimeError, match="ostatnie odrzucenie") as excinfo:
+        await resolve_step_target(page, step, "select", reasoner)
+
+    message = str(excinfo.value)
+    assert "artykuł W CZASOPISMIE" in message  # what the scenario asked for
+    assert "Artykuł w czasopismie" in message  # what the element really offers
+
+
+async def test_select_step_without_a_visible_control_keeps_its_own_diagnosis(page):
+    """The "nothing filmable here" message outranks the generic rejection report.
+
+    Both were added independently — one on this branch, one upstream — and both
+    now fire for the same candidate. The specific one has to win: "the page hid
+    the <select> and nothing stands in for it" tells the author what to change,
+    where "the target could not be validated (last rejection: not visible)" does
+    not.
+    """
+
+    # `display: none` keeps the select out of the accessibility tree, so the
+    # reasoner could only ever have reached it structurally.
+    await page.set_content(
+        '<select data-testid="woj" style="display:none"><option>Mazowieckie</option></select>'
+    )
+    step = Step(select=Select(from_="lista województw", option="Mazowieckie"))
+    reasoner = StubReasoner(ReasonerResult(action="select", target=TestidTarget(testid="woj")))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await resolve_step_target(page, step, "select", reasoner)
+
+    message = str(excinfo.value)
+    assert "nie znaleziono widocznej kontrolki" in message
+    assert "ostatnie odrzucenie" not in message
 
 
 async def test_hidden_wait_captures_no_identity(page):
