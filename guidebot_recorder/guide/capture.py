@@ -226,8 +226,13 @@ async def capture_pages(
                     continue  # optional branch never compiled -> skip page
                 raise RuntimeError(banner(fs, index, "nierozwiązana akcja obowiązkowa"))
             act = action.action
+            # The one caller that can answer "which option?" — the label lives in
+            # the scenario step, never in the sidecar. Handing it over is what lets
+            # validation reject a dropdown that lost the option, instead of leaving
+            # the miss to `select_option`'s 15s timeout.
+            wanted_option = step.select.option if act == "select" and step.select else None
             if not step.optional and act != "waitFor":
-                reason = await reuse_failure(recorder.frame, action)
+                reason = await reuse_failure(recorder.frame, action, option=wanted_option)
                 if reason is not None:
                     raise GuideError(banner(fs, index, _REUSE_REASON_PL.get(reason, reason)))
             try:
@@ -248,15 +253,29 @@ async def capture_pages(
                 shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER typing
             elif act == "select":
                 if step.select is None:
+                    # Plain `compile`, not `--force`: editing the step changed its
+                    # command_kind, so the fingerprint already fails to match and the
+                    # entry is re-resolved on its own. `--force` would pointlessly
+                    # re-freeze every other step in the scenario.
                     raise GuideError(
                         banner(
                             fs,
                             index,
                             "sidecar mówi `select`, a krok scenariusza nim nie jest "
-                            "— uruchom `compile --force`",
+                            "— uruchom `compile`",
                         )
                     )
-                await res.locator.select_option(label=step.select.option)
+                try:
+                    await res.locator.select_option(label=step.select.option)
+                except PlaywrightError:
+                    # `optional` has to cover choosing the option, not just finding
+                    # the control: an optional step skips reuse validation, so a
+                    # vanished option shows up here — and only here.
+                    if step.optional:
+                        if verbose:
+                            tqdm.write(banner(fs, index, "pomijam: brak żądanej opcji"))
+                        continue
+                    raise
                 shot, size = await _screenshot(page, shots_dir, index)  # frame AFTER selecting
             else:
                 shot, size = await _screenshot(page, shots_dir, index)  # frame BEFORE click/hover

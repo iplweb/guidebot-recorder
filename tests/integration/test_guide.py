@@ -229,7 +229,7 @@ async def test_guide_handles_select_and_scroll(tmp_path):
             # --- compile (offline reasoner, no LLM) ---
             page = await browser.new_page()
             reasoner = SelectScrollMockReasoner()
-            await run_compile(path, page, reasoner)
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             # --- guide ---
@@ -277,7 +277,7 @@ async def test_guide_select_actually_executes_and_unlocks_next_step(tmp_path):
             # --- compile (offline reasoner, no LLM) ---
             page = await browser.new_page()
             reasoner = SelectRevealMockReasoner()
-            await run_compile(path, page, reasoner)
+            await run_compile(path, page, reasoner, selects=None)
             await page.context.close()
 
             # --- guide ---
@@ -330,7 +330,7 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
             # --- compile (offline reasoner, no LLM) ---
             compile_page = await browser.new_page()
             reasoner = SelectScrollMockReasoner()
-            await run_compile(path, compile_page, reasoner)
+            await run_compile(path, compile_page, reasoner, selects=None)
             await compile_page.context.close()
 
             # --- guide's own context/overlay/Recorder recipe, driven directly ---
@@ -370,3 +370,81 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
     assert select_page.kind == "step"
     assert select_page.screenshot is not None
     assert any(annotation.kind == "selected" for annotation in select_page.annotations)
+
+
+async def test_option_that_vanished_after_compile_fails_as_a_sentence_not_a_timeout(tmp_path):
+    """The `guide` half of `option_missing`, end to end and against a real DOM.
+
+    Reproduces the real sequence: `compile` freezes a `select` while the wanted
+    option exists, the application then changes, and `guide` runs against a page
+    where that option is gone. The `<select>` itself is still there, visible and
+    unique, so every structural check passes — only the option list disagrees.
+
+    Pre-fix, `capture_pages` handed no option to `reuse_failure`, so nothing
+    caught the miss and `select_option(label=…)` ran into the page timeout,
+    raising a raw `PlaywrightError`. `cli.py` catches only `GuideError`, so the
+    user got an English Playwright traceback for what is an ordinary,
+    explainable situation.
+
+    Asserting on the exception *type* is the load-bearing part — a timeout is a
+    `PlaywrightError` and a diagnosed miss is a `GuideError` — which pins the
+    behaviour without timing the run, so it cannot go flaky under CI load.
+    """
+
+    from guidebot_recorder.guide.capture import capture_pages
+    from guidebot_recorder.guide.prolog import GuideError
+    from guidebot_recorder.overlay.overlay import Overlay
+    from guidebot_recorder.recorder.recorder import Recorder
+    from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
+    from guidebot_recorder.scenario.loader import load_scenario
+
+    # A copy of the fixture, so the page can be edited between compile and guide.
+    app = tmp_path / "app.html"
+    app.write_text(SELECT_SCROLL_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+    path = tmp_path / "vanished-option.scenario.yaml"
+    path.write_text(
+        DIRECT_CAPTURE_SCENARIO_TEMPLATE.format(url=app.resolve().as_uri()), encoding="utf-8"
+    )
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        try:
+            compile_page = await browser.new_page()
+            await run_compile(path, compile_page, SelectScrollMockReasoner(), selects=None)
+            await compile_page.context.close()
+
+            # The application changed: "Cały okres" is no longer on offer.
+            stripped = app.read_text(encoding="utf-8").replace(
+                '<option value="all">Cały okres</option>', ""
+            )
+            assert "Cały okres" not in stripped, "fixture markup drifted from this test"
+            app.write_text(stripped, encoding="utf-8")
+
+            scenario = load_scenario(path, None)
+            compiled = load_compiled(compiled_path(path))
+            cfg = scenario.config
+
+            context = await browser.new_context(
+                viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
+                locale=cfg.locale,
+            )
+            try:
+                overlay = Overlay(cfg.cursor, cfg.viewport)
+                await overlay.install_context(context)
+                page = await context.new_page()
+                page.set_default_timeout(10.0 * 1000)
+                recorder = Recorder(page, overlay, frame=None, type_delay_ms=None)
+
+                with pytest.raises(GuideError) as exc_info:
+                    await capture_pages(
+                        scenario, compiled, page, recorder, tmp_path / "shots", timeout=10.0
+                    )
+                # the control was never driven — the miss is caught before that
+                select_value = await page.locator("#range").input_value()
+            finally:
+                await context.close()
+        finally:
+            await browser.close()
+
+    assert "nie ma żądanej opcji" in str(exc_info.value)
+    assert select_value == "month", "the <select> must keep its default; nothing should drive it"
