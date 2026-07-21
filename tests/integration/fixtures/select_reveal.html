@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Filtry</title>
+  </head>
+  <body>
+    <h1>Filtry wyszukiwania</h1>
+    <p>
+      <label for="mode">Tryb wyszukiwania</label>
+      <select id="mode" data-testid="mode">
+        <option value="basic">Podstawowy</option>
+        <option value="advanced">Zaawansowany</option>
+      </select>
+    </p>
+    <p id="advanced-fields" style="display: none">
+      <label for="year-from">Rok od</label>
+      <input id="year-from" type="text" data-testid="year-from" />
+    </p>
+    <script>
+      document.getElementById("mode").addEventListener("change", (event) => {
+        document.getElementById("advanced-fields").style.display =
+          event.target.value === "advanced" ? "block" : "none";
+      });
+    </script>
+  </body>
+</html>

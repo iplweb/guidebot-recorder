@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Raport</title>
+    <style>
+      body { font-family: sans-serif; margin: 0; padding: 24px; }
+      .spacer { height: 1300px; }
+      #summary { padding: 24px; background: #eef; }
+    </style>
+  </head>
+  <body>
+    <h1>Raport</h1>
+    <p>
+      <label for="range">Zakres dat</label>
+      <select id="range" data-testid="range">
+        <option value="month">Ostatni miesiąc</option>
+        <option value="year">Ostatni rok</option>
+        <option value="all">Cały okres</option>
+      </select>
+    </p>
+    <div class="spacer"></div>
+    <section id="summary">
+      <h2>Podsumowanie</h2>
+      <p>To podsumowanie jest widoczne dopiero po przewinięciu strony w dół.</p>
+    </section>
+  </body>
+</html>

@@ -36,4 +36,8 @@ def annotations_for(
         anns.append(
             Annotation(kind="typed", x=box["x"], y=box["y"], w=box["width"], h=box["height"])
         )
+    elif action == "select" and box is not None:
+        anns.append(
+            Annotation(kind="selected", x=box["x"], y=box["y"], w=box["width"], h=box["height"])
+        )
     return anns

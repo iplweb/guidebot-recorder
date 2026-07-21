@@ -24,6 +24,7 @@ from guidebot_recorder.resolver.validate import (
     _select_option_labels,
     build_locator,
     is_sensitive_type_target,
+    reuse_failure,
     reuse_is_valid,
     validate_compile_time,
 )
@@ -581,3 +582,90 @@ async def test_wait_for_cache_without_state_is_invalid(page):
     identity = await capture_identity(await build_locator(page, target))
 
     assert await reuse_is_valid(page, _cached(target, identity, action="waitFor")) is False
+
+
+async def test_reuse_failure_returns_none_when_structural_checks_and_identity_match(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    target = RoleTarget(role="button", name="Zaloguj")
+    identity = await capture_identity(await build_locator(page, target))
+
+    assert await reuse_failure(page, _cached(target, identity)) is None
+
+
+async def test_reuse_failure_returns_identity_mismatch_when_captured_identity_differs(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    cached = _cached(
+        RoleTarget(role="button", name="Zaloguj"),
+        Identity(tag="a", ancestry_digest="not-the-current-digest"),
+    )
+
+    assert await reuse_failure(page, cached) == "identity_mismatch"
+
+
+async def test_reuse_failure_returns_not_found_when_target_missing_from_dom(page):
+    await page.set_content("<main></main>")
+    target = RoleTarget(role="button", name="Zaloguj")
+    identity = Identity(tag="button", ancestry_digest="whatever")
+
+    assert await reuse_failure(page, _cached(target, identity)) == "not_found"
+
+
+async def test_reuse_failure_returns_sensitive_target_for_teach_type_on_password_field(page):
+    await page.set_content('<label for="value">Access</label><input id="value" type="password">')
+    target = LabelTarget(label="Access")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = CachedAction(
+        action="type",
+        target=target,
+        identity=identity,
+        expect="none",
+        input_text="hunter2",
+        fingerprint=Fingerprint(
+            command_kind="teach",
+            compiled_from="enter hunter2 into the field",
+            expect="none",
+            config_hash="config",
+        ),
+    )
+
+    assert await reuse_failure(page, cached) == "sensitive_target"
+
+
+async def test_reuse_failure_hidden_wait_regression_returns_none_without_identity_check(page):
+    # Element present, visible, and unique (count() == 1) — the same DOM shape
+    # as test_wait_for_hidden_cache_without_identity_can_be_reused, but this
+    # test asserts on reuse_failure() directly instead of through the
+    # reuse_is_valid() boolean wrapper.
+    #
+    # The count() == 1 shape is what actually exercises the regression this
+    # test is named for: a buggy implementation that dropped the early
+    # ``return`` from the "hidden" branch and fell through to
+    # validate_compile_time() would find a visible, unique match
+    # (ValidationOk), then hit ``if cached.identity is None: return
+    # "identity_missing"`` in reuse_failure() — a hidden wait's cached entry
+    # never carries an identity by design. A DOM with count() == 0 would
+    # *not* prove this: validate_compile_time() returns
+    # ValidationFail("not_found", ...) before any identity check is reached,
+    # so a fall-through bug would surface as "not_found" instead, without
+    # ever exercising the identity_missing branch this test targets.
+    await page.set_content('<div data-testid="spinner">Ładowanie</div>')
+    cached = _cached(
+        ByTestidTarget(testid="spinner"),
+        None,
+        action="waitFor",
+        state="hidden",
+    )
+
+    assert await reuse_failure(page, cached) is None
+
+
+async def test_reuse_is_valid_still_returns_bool_not_reason(page):
+    await page.set_content("<main><button>Zaloguj</button></main>")
+    cached = _cached(
+        RoleTarget(role="button", name="Zaloguj"),
+        Identity(tag="a", ancestry_digest="not-the-current-digest"),
+    )
+
+    result = await reuse_is_valid(page, cached)
+
+    assert result is False

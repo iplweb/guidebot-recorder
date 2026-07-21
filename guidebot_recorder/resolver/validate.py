@@ -34,6 +34,23 @@ ValidationReason: TypeAlias = Literal[
     "dom_changed",
 ]
 
+#: Reasons a *frozen, previously resolved* action can no longer be reused.
+#: A superset of ``ValidationReason`` (the compile-time checks are reused as
+#: the first stage of reuse validation) plus reasons specific to the frozen
+#: identity/hidden-wait contract. Kept as a separate alias from
+#: ``ValidationReason`` because that type also drives the resolver's
+#: re-prompt vocabulary and must not grow reuse-only members.
+ReuseReason: TypeAlias = (
+    ValidationReason
+    | Literal[
+        "identity_mismatch",
+        "identity_missing",
+        "no_wait_state",
+        "wait_ambiguous",
+        "sensitive_target",
+    ]
+)
+
 #: how many option labels an ``option_missing`` message spells out before eliding
 _MAX_REPORTED_OPTIONS = 20
 
@@ -323,31 +340,55 @@ async def validate_compile_time(
         return ValidationFail("dom_changed", "The target changed while it was being validated.")
 
 
-async def reuse_is_valid(page: Page | Frame, cached: CachedAction) -> bool:
-    """Validate a cached target and its independent, frozen identity."""
+async def reuse_failure(page: Page | Frame, cached: CachedAction) -> ReuseReason | None:
+    """Return why a frozen, previously resolved action can no longer be reused.
+
+    ``None`` means the cached entry is safe to reuse as-is. Otherwise, the
+    returned reason is the first check that failed, in the same order as the
+    original ``reuse_is_valid`` boolean check performed them.
+    """
 
     try:
         if cached.action == "waitFor":
             if cached.state is None:
-                return False
+                return "no_wait_state"
             if cached.state == "hidden":
                 # A hidden wait intentionally has no identity at the point it
                 # succeeds. Zero matches already satisfies the condition; one
                 # match is safe to wait on; multiple matches are ambiguous.
+                # This is a *success* path, so it must return here and never
+                # fall through to the identity checks below: a hidden wait's
+                # cached entry never carries an identity by design (see
+                # ``models/action.py`` on ``CachedAction.identity``), so
+                # falling through would misreport every valid hidden-wait
+                # reuse as "identity_missing".
                 locator = await build_locator(page, cached.target)
-                return await locator.count() <= 1
+                return None if await locator.count() <= 1 else "wait_ambiguous"
 
         result = await validate_compile_time(page, cached.target, cached.action)
-        if isinstance(result, ValidationFail) or cached.identity is None:
-            return False
+        if isinstance(result, ValidationFail):
+            return result.reason
+        if cached.identity is None:
+            return "identity_missing"
         if (
             cached.action == "type"
             and cached.fingerprint.command_kind == "teach"
             and await is_sensitive_type_target(result.locator)
         ):
-            return False
+            return "sensitive_target"
         current_identity = await capture_identity(result.locator)
     except (PlaywrightError, ValueError):
         # The DOM may change between the locator checks and identity capture.
-        return False
-    return cached.identity.matches(current_identity)
+        return "dom_changed"
+    return None if cached.identity.matches(current_identity) else "identity_mismatch"
+
+
+async def reuse_is_valid(page: Page | Frame, cached: CachedAction) -> bool:
+    """Validate a cached target and its independent, frozen identity.
+
+    Thin boolean wrapper around :func:`reuse_failure`, kept for its existing
+    callers (``recorder/render.py`` and ``recorder/compile.py``), which only
+    need a yes/no answer and must not observe any behavior change.
+    """
+
+    return await reuse_failure(page, cached) is None
