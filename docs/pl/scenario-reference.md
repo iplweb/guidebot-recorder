@@ -532,10 +532,14 @@ podlega podstawianiu zmiennych środowiskowych.
 Walidacja sprawdza także, czy wskazany `<select>` **w ogóle ma** żądaną opcję — jeśli
 nie, zgłasza `option_missing` i wymienia etykiety, które ten element faktycznie
 oferuje. To zabezpieczenie semantyczne dla list bez nazwy dostępnej, które resolver
-może namierzyć wyłącznie pozycyjnie (`combobox nth=N`): numeracja przesuwa się wraz ze
-stanem DOM, więc bez tej kontroli zły-ale-prawdopodobny `<select>` przeszedłby
-walidację, a pomyłka wyszłaby dopiero później — jako timeout kompilacji albo jako
-render klikający na filmie nie tę kontrolkę. Porównanie normalizuje białe znaki i jest
+może namierzyć wyłącznie pozycyjnie (`combobox nth=N`). Ten indeks jest teraz mierzony
+przez kompilator na podstawie kandydata wskazanego przez model, a nie zgadywany, a jego
+przesunięcie po przebudowie strony zwykle wychodzi przy kolejnej kompilacji — zwykle,
+bo przebudowa przesuwająca jednorodnie cały zestaw bliźniaczego rodzeństwa zostawia samą
+pozycję bez zmian i przechodzi niezauważona. Zmierzony
+indeks wciąż wskazuje też jeden z kilku bliźniaczych `<select>`, więc bez tej kontroli opcji
+zły-ale-prawdopodobny przeszedłby walidację, a pomyłka wyszłaby dopiero później — jako
+timeout kompilacji albo jako render klikający na filmie nie tę kontrolkę. Porównanie normalizuje białe znaki i jest
 następnie **wrażliwe na wielkość liter**: dokładnie ta sama reguła, którą stosuje każda
 ścieżka wykonania (patrz niżej), więc walidacja nigdy nie odrzuca kontrolki, którą
 Guidebot umiałby obsłużyć, i nigdy nie przepuszcza takiej, której by nie umiał.
@@ -690,8 +694,11 @@ opisuje się tak samo jak przycisk.
     reasoner go nie zobaczy i krok skończy się błędem „nie ma takiego elementu".
     Wskazuj `<table>`, `<form>`, `<ul>`, `<figure>`, `<article>` albo `<section>`
     z `aria-label` (dopiero etykieta czyni z sekcji `region`). Nazwa dostępna
-    kontenera bardzo pomaga: bez niej reasoner umie go namierzyć tylko
-    pozycyjnie, a numeracja przesuwa się razem z DOM-em.
+    kontenera bardzo pomaga: bez niej Guidebot umie go przypiąć tylko przez pozycję —
+    to indeks zmierzony, nie zgadnięty, choć przebudowa DOM wciąż go przesuwa.
+    Kolejna kompilacja wykrywa większość takich przesunięć, ale nie takie, które
+    przesuwa jednorodnie cały zestaw bliźniaczego rodzeństwa; dopiero nazwa
+    dostępna usuwa kruchość, zamiast ją zgłaszać.
 
 Podczas `render` kursor dojeżdża do celu, przechodzi na prawy skraj elipsy opisanej na
 elemencie i okrąża ją `loops` razy, zostawiając za sobą narastający ślad zakreślacza;

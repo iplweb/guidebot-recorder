@@ -176,7 +176,10 @@ not render after a failed compile; finish a successful compile first, using
 Review a sidecar as generated code:
 
 - confirm the `source` name and number of action slots;
-- look for unexpectedly broad targets, `nth` use, or surprising scopes;
+- look for unexpectedly broad targets or surprising scopes; a positional `nth` in the
+  sidecar is now measured by the compiler (not guessed by the model), and each newly
+  frozen one prints a compile warning telling you when refining the description is worth
+  it;
 - check whether a changed target is expected after a UI change;
 - never insert secrets or hand-patch identities;
 - commit the source and sidecar in the same change.
