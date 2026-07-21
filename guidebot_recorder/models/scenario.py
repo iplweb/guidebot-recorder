@@ -57,8 +57,10 @@ class Select(BaseModel):
     ``option`` is the visible label of the option to pick. The shim (default ``mode``)
     makes the option list visible and DOM-based: the cursor travels to the control,
     the list unfurls downward, the cursor travels to the chosen option, and it is
-    clicked — all visible on camera. The per-step ``mode`` override allows falling
-    back to the "native" escape hatch if a page's enhanced widget cannot be driven.
+    clicked — all visible on camera. The per-step ``mode`` override falls back to
+    "native" if a page's enhanced widget cannot be driven: the cursor still
+    travels to the control, but the list never unfurls — the value changes at
+    once, the instant the cursor arrives.
 
     ``option`` is shown, never spoken, and is not env-substituted. The ``mode``
     (optional) defaults to ``config.selects.mode`` when unset.

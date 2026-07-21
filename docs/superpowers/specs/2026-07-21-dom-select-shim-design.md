@@ -219,10 +219,23 @@ Without an overlay — i.e. during `compile` — the existing direct path stays:
 `locator.select_option(label=…)` sets the value with no animation. Compilation
 is meant to be fast, not pretty.
 
-`mode: native` (global or per-step) keeps **today's arrow-key stepping** under an
-overlay — `_step_option_visibly` is retained, not deleted. An escape hatch must
-never be *less* visible than what shipped before this branch; falling back to a
-silent `select_option` would make the escape worse than the problem.
+`mode: native` (global or per-step) drops the arrow-key stepping entirely instead
+of retaining it: `_step_option_visibly` (`recorder.py:442-484` before this
+change) pressed `ArrowDown`/`ArrowUp` in a loop with a 140 ms pause and a `key`
+SFX per press, on the premise that this drives the collapsed native control
+visibly. Measured with the repo's own pinned Playwright, in both headless and
+headed Chromium: focusing a native `<select>` and pressing `ArrowDown` leaves
+`selectedIndex` unchanged and fires zero `change` events. Synthesized key events
+do not drive the native select widget at all — every press was a no-op, and the
+value only ever landed via the method's own final `select_option` guard. What a
+recording actually showed was the cursor arriving, then N × 140 ms of nothing
+while keyboard SFX played, then the value jumping — the sound track asserted
+typing that never happened. There was nothing here for an escape hatch to
+preserve. `mode: native` now does what the choreography's first beat already
+does honestly: the cursor travels to the control, ripples (SFX `click`), and the
+value is set directly, with no intervening animation and no `key` SFX. The list
+still never unfurls under `native` — that part of the trade-off is real, since
+the option list is exactly what an OS-drawn popup cannot show.
 
 Compile does, however, **probe drivability** of
 an enhanced widget (can the association heuristic resolve a visible control?)
@@ -293,8 +306,19 @@ would do so unobservably: the run would succeed, the file would look fine, and
 only a viewer would ever discover the step is unwatchable. This matches the
 codebase's fail-loud posture everywhere else in `render.py`. The cost of a hard
 failure is bounded by the two mitigations above: the per-step `mode: native`
-override — which restores the pre-branch arrow-key animation, not silence — and
-compile-time drivability probing.
+override — cursor travel to the control plus an immediate value change, not
+silence — and compile-time drivability probing.
+
+An earlier revision of this document argued that `mode: native` had to retain
+the pre-shim arrow-key stepping verbatim, on the principle that "an escape hatch
+must never be less visible than what shipped before." That principle assumed
+the arrow-key stepping was visible in the first place. Measured directly (see
+§4), it was not: no press ever moved `selectedIndex` or fired `change` on a
+native `<select>`, in either headless or headed Chromium. There was no visible
+behaviour for the escape hatch to preserve — only a sound effect asserting
+keystrokes that did nothing. The escape hatch keeps what was real (cursor
+travel, ripple, click SFX) and drops what was theatre (the stepping loop and its
+`key` SFX).
 
 ## Testing
 

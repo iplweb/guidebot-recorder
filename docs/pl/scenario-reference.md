@@ -402,7 +402,7 @@ selects:
 
 | Pole | Domyślnie | Znaczenie |
 |---|---:|---|
-| `mode` | `shim` | Globalna furtka. `shim` zamienia surowe `<select>` na nakładkę DOM, więc ich listy są widoczne na filmie; `native` wraca wszędzie do sprzed-nakładkowego przełączania wartości strzałkami. Furtka na poziomie kroku `select.mode` nadpisuje to dla jednej kontrolki. |
+| `mode` | `shim` | Globalna furtka. `shim` zamienia surowe `<select>` na nakładkę DOM, więc ich listy są widoczne na filmie; `native` wraca wszędzie do zwiniętej kontrolki — kursor nadal do niej dojeżdża i klika, ale lista nigdy się nie rozwija, a wartość zmienia się od razu. Furtka na poziomie kroku `select.mode` nadpisuje to dla jednej kontrolki. |
 | `settleMs` | `1000` | Milisekundy odczekiwane po załadowaniu strony, zanim każdy `<select>` zostanie sklasyfikowany jako surowy albo już ulepszony przez stronę. Daje własnej inicjalizacji strony (select2/Tom Select/Chosen) czas na ukrycie lub podmianę oryginalnej kontrolki, zanim nakładka zdecyduje, czy jej dotknąć. |
 | `maxVisibleOptions` | `8` | Liczba opcji widocznych naraz w rozwiniętej liście, zanim zacznie się przewijać wewnętrznie. |
 | `openHoldMs` | `350` | Milisekundy, przez które rozwinięta lista pozostaje otwarta, żeby widz zdążył ją przeczytać, zanim kursor ruszy do wybranej opcji. |
@@ -514,15 +514,15 @@ sterować, więc niesterowalny widżet wychodzi na jaw tam, a nie w połowie ren
 
 Dla widżetu, którego nakładka naprawdę nie potrafi obsłużyć — np. listy
 doszukującej opcje przez sieć w miarę pisania — użyj furtki na poziomie kroku,
-**`mode: native`**. Przywraca ona zachowanie sprzed nakładki: kursor nadal dojeżdża
-do kontrolki i klika ją, ale zwinięta wartość jest *przełączana* do `option`
-strzałkami zamiast otwierać listę (skok o więcej niż dwanaście pozycji ustawiany
-jest od razu, by animacja nie trwała zbyt długo). `mode` ma też formę globalną,
-`config.selects.mode` (patrz sekcja `selects` niżej); wartość na poziomie kroku
-domyślnie ją dziedziczy i nadpisuje ją dla jednej upartej kontrolki w reszcie
-poprawnego scenariusza. Przy globalnym `shim` nadpisanie *zdejmuje* też nakładkę
-z tej jednej kontrolki przed jej obsłużeniem i nie zakłada jej ponownie do końca
-nagrania; pozostałe selecty na stronie zachowują swoją listę w DOM:
+**`mode: native`**. Lista nigdy się nie rozwija: kursor nadal dojeżdża do zwiniętej
+kontrolki i ją klika, a wartość zmienia się od razu, w chwili gdy kursor dojeżdża —
+nie ma żadnej pośredniej animacji przełączania do obejrzenia, tylko dojazd i zmiana.
+`mode` ma też formę globalną, `config.selects.mode` (patrz sekcja `selects` niżej);
+wartość na poziomie kroku domyślnie ją dziedziczy i nadpisuje ją dla jednej upartej
+kontrolki w reszcie poprawnego scenariusza. Przy globalnym `shim` nadpisanie
+*zdejmuje* też nakładkę z tej jednej kontrolki przed jej obsłużeniem i nie zakłada
+jej ponownie do końca nagrania; pozostałe selecty na stronie zachowują swoją listę
+w DOM:
 
 ```yaml
 - select:

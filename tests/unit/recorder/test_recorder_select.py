@@ -185,42 +185,57 @@ _PLAIN_SELECT = (
 )
 
 
-async def test_native_with_overlay_still_steps_the_value_with_arrow_keys(page):
+_KEYDOWN_SPY = """() => {
+  window.__gbKeys = [];
+  document.addEventListener("keydown", (event) => { window.__gbKeys.push(event.key); }, true);
+}"""
+
+
+async def _keys(page: Page) -> list[str]:
+    return await page.evaluate("() => window.__gbKeys")
+
+
+async def test_native_with_overlay_sets_the_value_without_stepping(page):
+    """`mode: native` travels the cursor to the control and sets the value at once.
+
+    Measured with this repo's pinned Playwright (headless and headed): pressing
+    `ArrowDown` on a focused native `<select>` never moves `selectedIndex` and
+    never fires `change`. The old stepping loop was theatre — every press a
+    no-op, the value landing only via its own final `select_option` guard — so
+    there is nothing left to animate: no arrow presses, no `key` SFX.
+    """
     overlay = Overlay()
     await page.set_content(_PLAIN_SELECT)
     await overlay.install(page)
+    await page.evaluate(_KEYDOWN_SPY)
     events: list[str] = []
     rec = Recorder(page, overlay, on_sfx=events.append)
 
     await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX", native=True)
 
     assert await page.locator("select").input_value() == "BibTeX"
-    assert overlay.pos != (0.0, 0.0)
-    # ripple + one arrow key per step (lista → tabela → BibTeX), i.e. still animated
-    assert events == ["click", "key", "key"]
+    assert overlay.pos != (0.0, 0.0)  # cursor travelled to the control
+    assert events == ["click"]  # ripple only — no per-step "key" SFX
+    assert await _keys(page) == []  # no arrow keys were ever pressed
 
 
 async def test_native_under_a_global_shim_drives_a_genuinely_native_control(page):
     """The per-step escape hatch has to work where it is needed: under the shim.
 
-    A globally shimmed select swallows the arrow keys in its own capture-phase
-    `keydown` handler, so the stepping animation never plays and the value ends
-    up set by `_step_option_visibly`'s final `select_option` guard — silently,
-    which is the one thing the escape hatch must never be.
+    It unshims the select first (see `_pin_native`) so the cursor lands on the
+    real control rather than a widget that is about to disappear, then sets the
+    value directly — no arrow keys are involved at any point.
     """
     overlay = await _raw_page(page)
+    await page.evaluate(_KEYDOWN_SPY)
     events: list[str] = []
     rec = Recorder(page, overlay, on_sfx=events.append, open_hold_ms=10)
 
     await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX", native=True)
 
     assert await page.locator("select").input_value() == "BibTeX"
-    assert events == ["click", "key", "key"]
-    # The value alone proves nothing here — `_step_option_visibly` ends with a
-    # `select_option` guard that lands it either way (and headless Chromium does
-    # not step a native select on `press` at all). What separates the escape
-    # hatch from the bug is the *state the keys were sent into*: shimmed, they
-    # went to the widget's own handler and unfurled its list on camera.
+    assert events == ["click"]
+    assert await _keys(page) == []  # no arrow keys were ever pressed
     state = await page.evaluate(
         """() => ({
       shimmed: window.__guidebot_selects.isShimmed(document.querySelector('select')),
@@ -239,7 +254,7 @@ async def test_native_without_overlay_takes_the_direct_path(page):
     await rec.select(RoleTarget(role="combobox", name="Raport"), "BibTeX", native=True)
 
     assert await page.locator("select").input_value() == "BibTeX"
-    assert "key" not in events  # no arrow stepping without an overlay
+    assert events == ["click"]  # no arrow stepping without an overlay
 
 
 # --- a widget the page enhanced itself -------------------------------------

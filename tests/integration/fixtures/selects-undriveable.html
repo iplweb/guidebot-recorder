@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Lista bez widocznej kontrolki</title>
+    <style>
+      html, body { margin: 0; background: rgb(245, 246, 250); }
+      body { font: 15px/1.4 sans-serif; padding: 16px; color: #111; }
+      label { display: block; font-weight: bold; margin-bottom: 3px; }
+      /* The select2 hiding pattern, but the widget that should stand in for the
+         original was never rendered — the library failed to initialise, or it
+         loads its control over AJAX. Nothing visible represents this select, so
+         nothing can be clicked on camera. */
+      .clipped-original {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Formularz</h1>
+    <section>
+      <label for="sierota">Województwo</label>
+      <select id="sierota" data-testid="woj"
+              class="select2-hidden-accessible clipped-original" tabindex="-1">
+        <option>Lubelskie</option>
+        <option>Mazowieckie</option>
+      </select>
+    </section>
+  </body>
+</html>

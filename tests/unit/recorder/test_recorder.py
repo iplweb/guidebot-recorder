@@ -133,7 +133,7 @@ async def test_select_sets_value_in_compile_mode(page):
     assert await page.locator("select").input_value() == "tabela"
 
 
-async def test_select_native_steps_visibly_with_overlay_and_lands_on_option(page):
+async def test_select_native_sets_value_at_once_with_overlay(page):
     # `mode: native` — the two-beat DOM choreography lives in test_recorder_select.py
     overlay = Overlay()
     await page.set_content(_SELECT_HTML)
@@ -143,7 +143,7 @@ async def test_select_native_steps_visibly_with_overlay_and_lands_on_option(page
     await rec.select(RoleTarget(role="combobox", name="Report"), "BibTeX", native=True)
     assert await page.locator("select").input_value() == "BibTeX"
     assert overlay.pos != (0.0, 0.0)  # cursor glided to the control
-    assert events == ["click", "key", "key"]  # ripple + two arrow steps (lista→tabela→BibTeX)
+    assert events == ["click"]  # ripple only — the value is set at once, no stepping
 
 
 async def test_select_unknown_option_raises(page):

@@ -1354,7 +1354,8 @@ async def test_a_pinned_native_select_no_longer_swallows_keys_or_mousedown(page:
     """What the escape hatch is *for*: the browser's own control, back in charge.
 
     While shimmed, the widget's capture-phase handlers `preventDefault()` both —
-    which is exactly what silently ate the arrow keys of the `native` path.
+    which would otherwise stop the real, unshimmed control from ever seeing a
+    keydown or mousedown meant for it once `mode: native` hands it back.
     """
     await page.set_content(NESTED)
     await _inject(page)

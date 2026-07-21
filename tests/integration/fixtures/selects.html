@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <title>Formularz z listami rozwijanymi</title>
+    <style>
+      html, body { margin: 0; background: rgb(245, 246, 250); }
+      body { font: 15px/1.4 sans-serif; padding: 16px; color: #111; }
+      h1 { font-size: 20px; margin: 0 0 12px; }
+      section { margin: 0 0 14px; position: relative; }
+      label { display: block; font-weight: bold; margin-bottom: 3px; }
+      select { font: inherit; width: 220px; }
+
+      /* select2 clips the original <select> to a 1x1 px box and leaves it in the
+         document; Tom Select sets display:none on it. Both keep the original
+         exactly where it was and inject their own widget right after it. */
+      .clipped-original {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .hidden-original { display: none; }
+
+      .widget {
+        width: 220px;
+        box-sizing: border-box;
+        border: 1px solid #777;
+        background: #fff;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+      .widget-list {
+        position: fixed;
+        z-index: 900;
+        width: 220px;
+        box-sizing: border-box;
+        border: 1px solid #777;
+        background: #fff;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+      }
+      .widget-list > div { padding: 4px 8px; }
+      .widget-list > div:hover { background: #dce7ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Formularz zgłoszenia</h1>
+
+    <!-- 1. A raw <select>: nothing on the page enhanced it, so the shim owns it. -->
+    <section>
+      <label for="format">Format raportu</label>
+      <select id="format" data-testid="format">
+        <option>lista</option>
+        <option>tabela</option>
+        <option>BibTeX</option>
+      </select>
+    </section>
+
+    <!-- 2. The select2 pattern: original clipped to 1x1 px + marker class,
+         followed by the widget that opens a <body>-level list on click. -->
+    <section>
+      <label for="woj">Województwo</label>
+      <select id="woj" data-testid="woj"
+              class="select2-hidden-accessible clipped-original" tabindex="-1">
+        <option>Lubelskie</option>
+        <option>Mazowieckie</option>
+        <option>Śląskie</option>
+      </select>
+      <div class="widget" id="woj-widget" data-testid="woj-widget">Lubelskie</div>
+    </section>
+
+    <!-- 3. The Tom Select pattern: original display:none + marker class. -->
+    <section>
+      <label for="miasto">Miasto</label>
+      <select id="miasto" data-testid="miasto" class="tomselected hidden-original">
+        <option>Gdańsk</option>
+        <option>Lublin</option>
+        <option>Poznań</option>
+      </select>
+      <div class="widget" id="miasto-widget" data-testid="miasto-widget">Gdańsk</div>
+    </section>
+
+    <!-- 4. <select multiple> renders its own in-page listbox, so there is no OS
+         popup to replace and the shim leaves it alone (spec non-goal). -->
+    <section>
+      <label for="tagi">Tagi</label>
+      <select id="tagi" data-testid="tagi" multiple size="3">
+        <option>zwykłe</option>
+        <option>pilne</option>
+        <option>archiwalne</option>
+      </select>
+    </section>
+
+    <script>
+      // A page widget standing in for a hidden <select>, reproducing the pattern
+      // select2 / Tom Select / Chosen share: the list is built on click and
+      // appended to <body> (so no ancestor can clip it), each row carries exactly
+      // the option label as its text, and choosing a row writes the value back to
+      // the original <select> and fires `change`.
+      function wireWidget(selectId, widgetId) {
+        const select = document.getElementById(selectId);
+        const widget = document.getElementById(widgetId);
+        let list = null;
+
+        const close = () => {
+          if (list !== null) {
+            list.remove();
+            list = null;
+          }
+        };
+
+        widget.addEventListener('click', () => {
+          if (list !== null) {
+            close();
+            return;
+          }
+          const rect = widget.getBoundingClientRect();
+          list = document.createElement('div');
+          list.className = 'widget-list';
+          list.setAttribute('data-fake-list', selectId);
+          list.style.top = rect.bottom + 'px';
+          list.style.left = rect.left + 'px';
+          for (const option of select.options) {
+            const row = document.createElement('div');
+            row.setAttribute('data-fake-option', '');
+            row.textContent = option.textContent;
+            row.addEventListener('click', () => {
+              select.value = option.value;
+              widget.textContent = option.textContent;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              close();
+            });
+            list.appendChild(row);
+          }
+          document.body.appendChild(list);
+        });
+      }
+
+      wireWidget('woj', 'woj-widget');
+      wireWidget('miasto', 'miasto-widget');
+    </script>
+  </body>
+</html>

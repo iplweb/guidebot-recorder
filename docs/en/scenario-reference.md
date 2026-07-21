@@ -454,7 +454,7 @@ selects:
 
 | YAML field | Default | Meaning |
 |---|---:|---|
-| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the pre-shim arrow-key value stepping. A per-step `select.mode` overrides this for one control. |
+| `mode` | `shim` | Global escape hatch. `shim` replaces raw `<select>` elements with the DOM overlay so their option lists are visible on camera; `native` falls back everywhere to the collapsed control — the cursor still travels to it and clicks, but the list never unfurls and the value changes at once. A per-step `select.mode` overrides this for one control. |
 | `settleMs` | `1000` | Milliseconds to wait after page load before classifying each `<select>` as raw or already enhanced. Gives the page's own select2/Tom Select/Chosen initialization time to hide or replace the original control before the shim decides whether to touch it. |
 | `maxVisibleOptions` | `8` | Number of options shown in the unfurled list at once before it scrolls internally. |
 | `openHoldMs` | `350` | Milliseconds the unfurled list stays open for the viewer to read before the cursor moves to the chosen option. |
@@ -640,15 +640,15 @@ partway through a render.
 
 For a widget the shim genuinely cannot drive — a search-as-you-type dropdown that
 loads its options over the network, for instance — use the per-step **`mode:
-native`** escape hatch. It falls back to the pre-shim behaviour: the cursor still
-glides to the control and clicks it, but the collapsed value is *stepped* to
-`option` with arrow keys instead of opening a list (a jump of more than twelve
-options is set directly to keep the animation short). `mode` also has a global
-form, `config.selects.mode` (see the `selects` config block below); the per-step
-value defaults to it and overrides it for one stubborn control in an otherwise fine
-scenario. Under a global `shim` the override also *removes* the shim from that one
-control before driving it, and keeps it off for the rest of the recording; every
-other select on the page keeps its DOM list:
+native`** escape hatch. The list never unfurls: the cursor still glides to the
+collapsed control and clicks it, and the value changes at once, the moment the
+cursor arrives — there is no intermediate stepping animation to watch, only the
+travel and the change. `mode` also has a global form, `config.selects.mode` (see
+the `selects` config block below); the per-step value defaults to it and overrides
+it for one stubborn control in an otherwise fine scenario. Under a global `shim`
+the override also *removes* the shim from that one control before driving it, and
+keeps it off for the rest of the recording; every other select on the page keeps
+its DOM list:
 
 ```yaml
 - select:

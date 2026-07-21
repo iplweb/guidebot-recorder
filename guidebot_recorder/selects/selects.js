@@ -241,7 +241,8 @@
       return false;
     }
     // A step that asked for `mode: native` owns this control for the rest of the
-    // run; re-shimming it would swallow the arrow keys that step exists to show.
+    // run; re-shimming it would put the button and list back on top of it right
+    // as the recorder is about to set its value directly.
     if (select.hasAttribute(NATIVE_ATTRIBUTE)) {
       return false;
     }
@@ -1301,8 +1302,8 @@
      *
      * Under a global `shim` the select the step wants native is already shimmed,
      * so opting out has to undo the shim *and* stay undone: the marker is what
-     * `isShimmable` reads, so no later classification pass takes the control
-     * back while the recorder is stepping it with arrow keys.
+     * `isShimmable` reads, so no later classification pass reshims the control
+     * out from under the recorder before it sets the value directly.
      *
      * Deliberately one-way for the life of the document. A step is the only
      * caller, its choice is per-scenario and static, and a select that flipped

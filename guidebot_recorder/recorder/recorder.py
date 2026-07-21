@@ -65,11 +65,11 @@ _SHIM_STATE_JS = """(el) => {
 #:
 #: The per-step ``mode: native`` override exists for one stubborn widget in an
 #: otherwise shimmed scenario, so under a global ``shim`` the select it names is
-#: already shimmed: the widget's capture-phase ``keydown`` handler would swallow
-#: the arrow keys of :meth:`Recorder._step_option_visibly`, leaving the value to
-#: be set by its final ``select_option`` guard — invisibly, which is the one
-#: thing an escape hatch must never be. Absent (bare context, ``mode: native``
-#: globally) this is a no-op: there is no shim to undo.
+#: already shimmed: its button and DOM list sit visually on top of the real
+#: control, so the cursor's approach must land on the genuine, unshimmed select —
+#: otherwise the ripple would target a widget that is about to disappear out from
+#: under it. Absent (bare context, ``mode: native`` globally) this is a no-op:
+#: there is no shim to undo.
 _PIN_NATIVE_JS = """(el) => {
   const api = window.__guidebot_selects;
   if (api && api.pinNative) {
@@ -272,13 +272,14 @@ class Recorder:
             option: the visible label to choose.
             native: the ``mode: native`` escape hatch, already resolved by the
                 caller from the per-step override and ``config.selects.mode``.
-                Under an overlay it keeps the pre-shim behaviour: the value is
-                *stepped* with arrow keys on the collapsed control. An escape
-                hatch must never be less visible than what shipped before.
-                Under a global ``shim`` the select it names is already shimmed,
-                so both paths first hand that one control back to the browser
-                for the rest of the run (see :data:`_PIN_NATIVE_JS`) — otherwise
-                the hatch would be driving the very widget it opted out of.
+                The cursor travels to the collapsed control, ripples, and the
+                value is set directly — the option list itself is never shown,
+                because a native ``<select>`` draws it as an OS popup no
+                browser-automation tool can screenshot. Under a global ``shim``
+                the select it names is already shimmed, so this first hands
+                that one control back to the browser (see :data:`_PIN_NATIVE_JS`)
+                — otherwise the cursor would be landing on a widget the hatch
+                just opted out of.
 
         Without an overlay (compile) the value is set directly and nothing is
         animated — compilation is meant to be fast, not pretty — but the
@@ -308,12 +309,13 @@ class Recorder:
             return
         if native:
             locator = await build_locator(self.frame, target)
-            # Before the cursor sets off, not after: the arrow keys below reach
-            # the browser's own control only once the shim has let go of this
-            # select, and the shim button must be gone before it is on camera.
+            # Before the cursor sets off, not after: the shim's button and list
+            # must be gone before this control is on camera, or the ripple would
+            # land on a widget that vanishes out from under it.
             await self._pin_native(locator)
             await self._approach(locator, click_sound=True)
-            await self._step_option_visibly(locator, option)
+            visible = await locator.is_visible()
+            await locator.select_option(label=option, force=not visible)
             return
         await self._select_in_two_beats(target, option)
 
@@ -438,50 +440,6 @@ class Recorder:
         # scrolls an internally-scrolling widget list to it.
         await self._approach(row, click_sound=True)
         await row.click()
-
-    async def _step_option_visibly(self, locator: Locator, option: str) -> None:
-        """The ``mode: native`` escape hatch: step the value with arrow keys.
-
-        Retained verbatim from before the DOM shim. The collapsed control is all
-        the viewer gets — the OS-drawn list cannot be filmed — but the value
-        visibly walks to ``option`` instead of jumping, which is strictly more
-        than a silent ``select_option`` would show.
-        """
-
-        await locator.focus()
-        plan = await locator.evaluate(
-            """(el, wanted) => {
-                const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
-                const labels = Array.from(el.options, (o) => norm(o.label || o.textContent));
-                const want = norm(wanted);
-                let target = labels.indexOf(want);
-                if (target < 0) {
-                    const lower = want.toLowerCase();
-                    target = labels.findIndex((l) => l.toLowerCase() === lower);
-                }
-                return { target, current: el.selectedIndex };
-            }""",
-            option,
-        )
-        target_index = plan["target"]
-        if target_index < 0:
-            # Unknown label — let Playwright raise its clear "no option" error.
-            await locator.select_option(label=option)
-            return
-        steps = target_index - plan["current"]
-        # A far jump would drag on arrow-by-arrow; set it directly instead.
-        if abs(steps) > 12:
-            await locator.select_option(index=target_index)
-            return
-        key = "ArrowDown" if steps > 0 else "ArrowUp"
-        for _ in range(abs(steps)):
-            await locator.press(key)
-            if self._on_sfx is not None:
-                self._on_sfx("key")
-            await self.page.wait_for_timeout(140)
-        # Guarantee the final value even if a browser skipped a disabled option.
-        if await locator.evaluate("el => el.selectedIndex") != target_index:
-            await locator.select_option(index=target_index)
 
     async def scroll(self, spec: Scroll) -> None:
         """Scroll the site — a render-only visual with no agent target.

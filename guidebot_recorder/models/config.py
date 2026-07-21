@@ -275,8 +275,9 @@ class SelectsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     # Global escape hatch: "shim" (default) replaces native selects with DOM overlays
-    # so their option lists are visible on camera; "native" falls back to arrow-key
-    # stepping when the shim cannot drive an enhanced widget.
+    # so their option lists are visible on camera; "native" falls back to the
+    # collapsed control when the shim cannot drive an enhanced widget — the cursor
+    # still travels to it, but the list never unfurls and the value changes at once.
     mode: Literal["shim", "native"] = "shim"
     # Milliseconds to wait after page load before classifying raw vs enhanced selects.
     # The page's own initialization (select2, Chosen, Tom Select) has this much time
