@@ -340,12 +340,21 @@ async def validate_compile_time(
         return ValidationFail("dom_changed", "The target changed while it was being validated.")
 
 
-async def reuse_failure(page: Page | Frame, cached: CachedAction) -> ReuseReason | None:
+async def reuse_failure(
+    page: Page | Frame, cached: CachedAction, option: str | None = None
+) -> ReuseReason | None:
     """Return why a frozen, previously resolved action can no longer be reused.
 
     ``None`` means the cached entry is safe to reuse as-is. Otherwise, the
     returned reason is the first check that failed, in the same order as the
     original ``reuse_is_valid`` boolean check performed them.
+
+    ``option`` is the visible label a ``select`` step wants to choose, forwarded
+    to :func:`validate_compile_time`. A ``CachedAction`` cannot supply it — the
+    label lives in the scenario step, not the sidecar — so it stays optional for
+    the :func:`reuse_is_valid` callers, which have no step in hand. ``guide``
+    does, and passing it is what turns a 15s ``select_option`` timeout into an
+    ``option_missing`` the caller can put in a sentence.
     """
 
     try:
@@ -365,7 +374,7 @@ async def reuse_failure(page: Page | Frame, cached: CachedAction) -> ReuseReason
                 locator = await build_locator(page, cached.target)
                 return None if await locator.count() <= 1 else "wait_ambiguous"
 
-        result = await validate_compile_time(page, cached.target, cached.action)
+        result = await validate_compile_time(page, cached.target, cached.action, option=option)
         if isinstance(result, ValidationFail):
             return result.reason
         if cached.identity is None:

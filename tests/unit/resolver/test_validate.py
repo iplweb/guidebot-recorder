@@ -610,6 +610,63 @@ async def test_reuse_failure_returns_not_found_when_target_missing_from_dom(page
     assert await reuse_failure(page, _cached(target, identity)) == "not_found"
 
 
+async def test_reuse_failure_forwards_the_wanted_option_to_validation(page):
+    """A frozen `select` whose option vanished must fail here, cheaply.
+
+    `validate_compile_time` grew the `option` parameter so a plausible-but-wrong
+    dropdown is rejected by reading `select.options` instead of by a 15s
+    `select_option(label=…)` timeout. `reuse_failure` never passed it on, so the
+    only caller that *has* the label — `guide`, which reads it off the scenario
+    step — could not use the check at all: `option_missing` was unreachable.
+    """
+
+    await page.set_content(
+        '<select aria-label="Rodzaj raportu">'
+        "<option>Raport jednostki</option><option>Raport autora</option>"
+        "</select>"
+    )
+    target = RoleTarget(role="combobox", name="Rodzaj raportu")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = _cached(target, identity, action="select")
+
+    assert await reuse_failure(page, cached, option="Raport zbiorczy") == "option_missing"
+
+
+async def test_reuse_failure_without_an_option_keeps_ignoring_the_option_list(page):
+    """The `render`/`compile` callers reach this through `reuse_is_valid`, which
+    validates a `CachedAction` and so has no label to pass. Omitting the option
+    has to stay exactly as permissive as it was — the change is additive or it
+    silently breaks every non-guide reuse of a select.
+    """
+
+    await page.set_content(
+        '<select aria-label="Rodzaj raportu">'
+        "<option>Raport jednostki</option><option>Raport autora</option>"
+        "</select>"
+    )
+    target = RoleTarget(role="combobox", name="Rodzaj raportu")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = _cached(target, identity, action="select")
+
+    assert await reuse_failure(page, cached) is None
+    assert await reuse_is_valid(page, cached) is True
+
+
+async def test_reuse_failure_accepts_the_option_that_is_present(page):
+    """The forwarded option must not become a new way for a good target to fail."""
+
+    await page.set_content(
+        '<select aria-label="Rodzaj raportu">'
+        "<option>Raport jednostki</option><option>Raport autora</option>"
+        "</select>"
+    )
+    target = RoleTarget(role="combobox", name="Rodzaj raportu")
+    identity = await capture_identity(await build_locator(page, target))
+    cached = _cached(target, identity, action="select")
+
+    assert await reuse_failure(page, cached, option="Raport autora") is None
+
+
 async def test_reuse_failure_returns_sensitive_target_for_teach_type_on_password_field(page):
     await page.set_content('<label for="value">Access</label><input id="value" type="password">')
     target = LabelTarget(label="Access")
