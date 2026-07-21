@@ -90,8 +90,12 @@ def _short(step: Step, limit: int = 60) -> str:
         if value:
             text = str(value)
             return text if len(text) <= limit else text[: limit - 1] + "…"
+    if step.close_window is not None:
+        return "closeWindow"
     if step.slide is not None:
         return step.slide.title or step.slide.subtitle or "slide"
+    if step.desktop is not None:
+        return f"desktop: {step.desktop.icon}"
     if step.enter_text is not None:
         return f"→ {step.enter_text.into}"
     if step.wait is not None:
@@ -309,6 +313,8 @@ async def run_compile(
             await active_page.bring_to_front()
             recorder = Recorder(active_page, overlay=None)
             kind = step.command_kind()
+            if kind == "closeWindow" and active_page is main_page:
+                raise RuntimeError(f"krok {index}: closeWindow bez otwartego okna")
             if kind == "teach":
                 try:
                     validate_teach_instruction(_instruction(step))
@@ -398,7 +404,7 @@ async def run_compile(
                 if main_page.is_closed():
                     raise RuntimeError("główne okno zostało zamknięte podczas compile")
                 if active_page.is_closed():
-                    close_was_action_driven = (
+                    close_was_action_driven = kind == "closeWindow" or (
                         active_page is action_page
                         and action_page_closed_in_window
                         and isinstance(compiled_action, CachedAction)
@@ -598,6 +604,13 @@ async def _compile_step(
         return None
     if kind == "slide":
         return None
+    if kind == "desktop":
+        return None
+    if kind == "closeWindow":
+        # Closing the active page is the whole action; the caller's post-step
+        # lifecycle check reverts `active_page` to the main window.
+        await page.close()
+        return None
     if kind == "navigate":
         url = step.navigate_url()
         assert url is not None  # guaranteed by command_kind()
@@ -605,6 +618,9 @@ async def _compile_step(
         return None
     if kind == "wait" and not step.requires_target():
         await recorder.wait_seconds(float(step.wait))
+        return None
+    if kind == "scroll":
+        await recorder.scroll(step.scroll_config())
         return None
 
     # step that needs a target
@@ -665,6 +681,10 @@ async def _compile_step(
         if text is None:
             raise RuntimeError("brak tekstu dla akcji type")
         await recorder.enter_text(target, text)
+    elif action == "select":
+        if step.select is None:
+            raise RuntimeError("brak opcji dla akcji select")
+        await recorder.select(target, step.select.option)
     elif action == "waitFor":
         timeout = step.wait.timeout if isinstance(step.wait, WaitUntil) else 10.0
         try:

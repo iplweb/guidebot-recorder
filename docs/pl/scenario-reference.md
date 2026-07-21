@@ -254,6 +254,33 @@ biały start.
 
 Plansza powstaje z `config.title` oraz `intro.subtitle` i `intro.notes`.
 
+### `fade`
+
+Render-only, płynne wejście i wyjście gotowego filmu. Wyłączone domyślnie: włączenie
+wymusza przekodowanie obrazu w finalnym muksie (filtra nie da się nałożyć na
+kopiowany strumień), więc scenariusz, który o fade nie prosi, daje bajt w bajt to
+samo wyjście co dotąd.
+
+| Pole | Domyślnie | Znaczenie |
+|---|---:|---|
+| `enabled` | `false` | Włącza fade. |
+| `in` | `0.6` | Sekundy wejścia z koloru na starcie. |
+| `out` | `0.8` | Sekundy wyjścia w kolor na końcu. |
+| `color` | `black` | Kolor, z/do którego przechodzi obraz (nazwa lub `0xRRGGBB`). |
+| `audio` | `true` | Ścisza też lektora równolegle z obrazem. |
+
+`in` i `out` mogą być zerem — wtedy dana strona filmu nie ma przejścia. Suma obu nie
+może przekroczyć długości filmu. Nie wchodzi do `config_hash`, więc włączenie
+lub zmiana fade nie wymaga ponownego `compile`.
+
+```yaml
+config:
+  fade:
+    enabled: true
+    in: 0.6
+    out: 1.0
+```
+
 ### `holdFrameForNarration` i `holdFrameSettle`
 
 Sterowanie tempem renderu, wyłącznie podczas renderu, **domyślnie włączone**, i —
@@ -275,15 +302,15 @@ nagrywać w pełni na żywo, jak dawniej; patrz [Dokumentacja CLI](cli-reference
 ## Reguła kroku
 
 Krok ma najwyżej jedną komendę główną spośród `teach`, `navigate`, `click`, `hover`,
-`enterText`, `wait` i `slide`. `say` może być jedyną treścią kroku albo towarzyszyć
-jednej akcji. Pusty krok i dwie akcje główne są błędem.
+`enterText`, `select`, `scroll`, `wait`, `slide` i `closeWindow`. `say` może być jedyną treścią kroku albo
+towarzyszyć jednej akcji. Pusty krok i dwie akcje główne są błędem.
 
 Krok może dodatkowo nieść znacznik `optional: true`, a element listy `steps` może być
 blokiem `when` zamiast kroku — patrz [Gałęzie opcjonalne](#galezie-opcjonalne).
 
 Narracją domyślną jest `say`, a gdy go nie ma — `teach`. Same `click`, `hover`,
-`enterText`, `navigate`, `wait` i `slide` nie są czytane — tekst planszy `slide` jest
-wyświetlany, nie wypowiadany.
+`enterText`, `navigate`, `wait`, `slide` i `closeWindow` nie są czytane — tekst planszy
+`slide` jest wyświetlany, nie wypowiadany.
 
 ### `say`
 
@@ -328,6 +355,50 @@ Rodzaj akcji jest stały, a reasoner rozwiązuje tylko semantyczny target.
 
 Do reasonera trafia `into`, nie `text`. Playwright używa `fill`, czyli zastępuje
 bieżącą wartość. Guidebot nie maskuje pola w filmie ani logach aplikacji.
+
+### `select`
+
+```yaml
+- select:
+    from: "lista rozwijana Rodzaj raportu"
+    option: "tabela"
+  say: "Z listy rodzaj raportu wybieram format tabelaryczny."
+```
+
+Wybór opcji z natywnej listy `<select>`. `from` to semantyczny opis celu wysyłany do
+reasonera i musi wskazać element `<select>` — trafienie w inną kontrolkę (własny
+widżet `role="combobox"`, przycisk) to błąd walidacji `not_select`. `option` to
+widoczna etykieta wybieranej opcji; jest pokazywana, nigdy czytana i **nie** podlega
+podstawianiu zmiennych środowiskowych.
+
+Listę opcji natywnego `<select>` rysuje system operacyjny, więc żadne narzędzie do
+automatyzacji przeglądarki — w tym Playwright — nie rozwinie jej ani nie zrzuci na
+ekran. Dlatego podczas `render` kursor dojeżdża do kontrolki, pokazuje kliknięcie i
+*przełącza* wartość zwiniętej listy do `option` strzałkami, więc wartość widocznie się
+zmienia, choć lista się nie otwiera (skok o więcej niż dwanaście pozycji ustawiany jest
+od razu, by animacja nie trwała zbyt długo). Podczas `compile` wartość ustawiana jest
+wprost. Tak czy inaczej element kończy na `option`, więc kolejne kroki i render są
+zgodne.
+
+### `scroll`
+
+```yaml
+- scroll: down                    # up | down | top | bottom
+- scroll: { to: down, amount: 300 }   # forma obiektowa; amount w pikselach
+  say: "Przewijam w dół, aby pokazać podgląd wyników."
+```
+
+Przewinięcie strony — wizualny krok tylko na etapie `render`, bez celu dla agenta,
+podobnie jak liczbowy `wait`. `to` przyjmuje `up`, `down`, `top` lub `bottom`; skrót
+`scroll: down` działa dla wszystkich czterech. `amount` (piksele) reguluje przewinięcie
+`up`/`down` i jest ignorowane dla `top`/`bottom`; bez niego `down`/`up` przewija o
+większość wysokości okna.
+
+Służy do wprowadzenia w kadr treści spod „linii zgięcia" — zwłaszcza treści, których
+resolver **nie** potrafi wskazać, jak podgląd w `<iframe>` czy lista opcji natywnego
+selecta. Kursor nadal nie wejdzie do iframe, ale przewinięcie wprowadza go w kadr. Z
+nakładką (render) przewijanie jest animowane; podczas `compile` skacze wprost. Ponieważ
+nie rozwiązuje żadnego elementu, `scroll` nie wymaga `compile` i nie przyjmuje `optional`.
 
 ### `navigate`
 
@@ -382,8 +453,67 @@ planszę *po* wypowiedzi, dodaj drugą, cichą planszę `slide` (ten sam tekst, 
 bez `say`).
 
 Dodanie, usunięcie lub zmiana kolejności kroku `slide` zmienia liczbę kroków, więc
-jako jedyny rodzaj kroku **wymaga `guidebot compile`**; render sprawdza liczbę
-kroków przed startem i kończy się błędem przy nieaktualnym sidecarze.
+**wymaga `guidebot compile`**; render sprawdza liczbę kroków przed startem i kończy się
+błędem przy nieaktualnym sidecarze. To samo dotyczy `closeWindow` (patrz niżej).
+
+### `closeWindow`
+
+```yaml
+- teach: "Klikamy odnośnik, który otwiera się w nowej karcie"
+- say: "Przeczytaliśmy zawartość, wracamy."
+- closeWindow: true
+```
+
+Zamyka **aktywne** okno i wraca do tego, które je otworzyło. Przyjmuje wyłącznie
+wartość `true`; `closeWindow: false` jest błędem walidacji, nie cichym brakiem
+działania. Bez otwartego okna krok kończy się błędem.
+
+Nowe okno powstaje samo, gdy kliknięcie na stronie je otworzy — przez `window.open`
+albo link `target="_blank"`. Guidebot rozpoznaje je po `opener()`, więc link
+z `rel="noopener"` (który zeruje `opener()`) **nie** zostanie rozpoznany jako
+otwierający okno. Okno wypełniające cały kadr (np. karta `target="_blank"`, która nie
+poprosiła o rozmiar) jest pokazywane pełnoekranowo z własnym paskiem adresu; mniejsze
+okno `window.open` zachowuje pływającą prezentację. Sam scenariusz nie otwiera okna —
+nie ma komendy „otwórz okno".
+
+Jak `slide`, `closeWindow` zmienia liczbę kroków, więc **wymaga `guidebot compile`**.
+Pełny przykład: [`examples/newwindow/`](https://github.com/iplweb/guidebot-recorder/tree/main/examples/newwindow).
+
+### `desktop`
+
+```yaml
+- desktop:
+    icon: chrome                     # opcjonalne; wbudowana nazwa lub ścieżka do pliku
+    label: Przeglądarka internetowa  # opcjonalne; podpis pod ikoną
+    hold: 1.0                        # opcjonalne; sekundy zatrzymania na otwartym oknie
+  say: "Otwieramy przeglądarkę."     # opcjonalna narracja
+```
+
+Symulowany „pulpit" otwierający film: kursor podjeżdża po łuku do ikony
+przeglądarki, klika dwa razy, a z ikony wyrasta okno, które odsłania pasek
+przeglądarki. Wizualny jak `slide` — kompiluje się do niczego, więc
+**wymaga `guidebot compile`** wyłącznie dlatego, że dodaje/przesuwa krok (render
+sprawdza liczbę kroków). Zwykle jest pierwszym krokiem; kolejny `navigate` wpisuje
+adres w odsłonięty pasek.
+
+Kolor tła pulpitu jest ustawieniem filmu, nie krokiem — `config.desktop.color`
+(domyślnie granatowy `#1f3a63`), więc każdy krok `desktop` w filmie ma to samo tło.
+
+`icon` przyjmuje **wbudowaną nazwę** albo **ścieżkę do własnego pliku**
+(`.svg/.png/.jpg/.gif/.webp`; ścieżki względne liczone od katalogu scenariusza).
+Wbudowane ikony to celowo **rodzajowe, własnoręcznie narysowane** grafiki — nie
+prawdziwe logotypy przeglądarek (to znaki towarowe, a pakiet jest
+redystrybuowalny); nazwa mówi tylko, którą przeglądarkę ikona przywołuje:
+
+| Nazwa | Rysunek |
+|---|---|
+| `chrome`, `browser` | kolorowy pierścień z niebieskim środkiem |
+| `firefox`, `flame` | płomień |
+| `iexplore`, `edge`, `legacy` | niebieskie „e" |
+| `globe` | prosty globus |
+
+Aby użyć prawdziwego logo, wskaż `icon` na własny plik — wtedy nic nie jest
+dystrybuowane z pakietem.
 
 ### `expect`
 
