@@ -1871,6 +1871,36 @@ async def test_a_throwing_pass_still_releases_settled(page: Page) -> None:
     assert outcome == "settled"
 
 
+async def test_the_observer_survives_a_document_rewrite(page: Page) -> None:
+    """`document.open()` swaps `documentElement` out from under the observer.
+
+    A MutationObserver holds the node it was given, so one bound to
+    `documentElement` is left watching a detached tree the moment a page (or
+    `setContent`) rewrites the document — and the shim goes deaf for good:
+    nothing re-arms the debounce, so every select added afterwards stays bare
+    and no barrier can wait for a pass that will never be scheduled.
+
+    Measured before the fix: the select below was still unshimmed after 2 s with
+    a 50 ms settle window, and only an explicit `refresh()` revived it.
+    """
+    await page.set_content("<body style='margin:0'><div id='x'>x</div></body>")
+    await _inject(page, {"settleMs": 50})
+
+    await page.evaluate(
+        """() => {
+      document.open();
+      document.write("<body style='margin:0'></body>");
+      document.close();
+    }"""
+    )
+    await page.evaluate(_APPEND_SELECT)
+
+    await page.wait_for_function(
+        "() => window.__guidebot_selects.isShimmed(document.getElementById('late'))",
+        timeout=5000,
+    )
+
+
 async def test_native_mode_offers_settled_as_a_resolved_barrier(page: Page) -> None:
     """`mode: native` classifies nothing, so no pass can ever be owed."""
     await page.set_content(NESTED)

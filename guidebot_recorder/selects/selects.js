@@ -1244,8 +1244,19 @@
     observer.observe(root, OBSERVER_OPTIONS);
   }
 
+  /**
+   * Watch the `document`, not `documentElement`.
+   *
+   * A MutationObserver holds the *node* it was given, and `document.open()` —
+   * which is what `document.write()` and Playwright's `setContent` run on —
+   * replaces `documentElement` outright. Bound to that element, the observer is
+   * left watching a detached tree and never reports another mutation: the shim
+   * stops classifying for the life of the document, so every select the page
+   * adds from then on stays bare. `document` itself is never replaced, and
+   * `subtree: true` reaches everything under whichever root is current.
+   */
   function startObserving() {
-    observeRoot(document.documentElement);
+    observeRoot(document);
   }
 
   // --- Public API ------------------------------------------------------------
