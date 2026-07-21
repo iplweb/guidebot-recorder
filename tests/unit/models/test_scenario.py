@@ -148,6 +148,34 @@ def test_slide_is_mutually_exclusive_with_other_primaries():
         Step(slide=Slide(title="T"), click="ok")
 
 
+# Task 1: Select mode override tests
+def test_select_accepts_mode_shim():
+    sel = Select.model_validate({"from": "list", "option": "tabela", "mode": "shim"})
+    assert sel.mode == "shim"
+
+
+def test_select_accepts_mode_native():
+    sel = Select.model_validate({"from": "list", "option": "tabela", "mode": "native"})
+    assert sel.mode == "native"
+
+
+def test_select_mode_defaults_to_none():
+    sel = Select.model_validate({"from": "list", "option": "tabela"})
+    assert sel.mode is None
+
+
+def test_select_rejects_invalid_mode():
+    with pytest.raises(ValidationError):
+        Select.model_validate({"from": "list", "option": "tabela", "mode": "invalid"})
+
+
+def test_select_mode_in_step():
+    s = Step.model_validate(
+        {"select": {"from": "list", "option": "tabela", "mode": "native"}, "say": "wybieram"}
+    )
+    assert s.select.mode == "native"
+
+
 def test_slide_rejects_unknown_keys():
     with pytest.raises(ValidationError):
         Slide(title="x", bogus=1)

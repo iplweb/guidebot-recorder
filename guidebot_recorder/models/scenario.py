@@ -54,16 +54,20 @@ class Select(BaseModel):
     """Choose an option from a native ``<select>`` dropdown.
 
     ``from_`` (written ``from`` in YAML) is the semantic target of the dropdown;
-    ``option`` is the visible label of the option to pick. The option list of a
-    native select is drawn by the OS and cannot be shown by any browser-automation
-    tool, so render animates the cursor to the control and steps its value to the
-    chosen option with arrow keys — the value visibly changes even though the list
-    never unfurls. ``option`` is shown, never spoken, and is not env-substituted.
+    ``option`` is the visible label of the option to pick. The shim (default ``mode``)
+    makes the option list visible and DOM-based: the cursor travels to the control,
+    the list unfurls downward, the cursor travels to the chosen option, and it is
+    clicked — all visible on camera. The per-step ``mode`` override allows falling
+    back to the "native" escape hatch if a page's enhanced widget cannot be driven.
+
+    ``option`` is shown, never spoken, and is not env-substituted. The ``mode``
+    (optional) defaults to ``config.selects.mode`` when unset.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     from_: str = Field(alias="from")
     option: str
+    mode: Literal["shim", "native"] | None = None
 
 
 class Scroll(BaseModel):
