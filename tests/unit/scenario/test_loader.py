@@ -4,7 +4,14 @@ import pytest
 
 import guidebot_recorder.scenario.loader as loader_module
 from guidebot_recorder.models.scenario import Scenario
-from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
+from guidebot_recorder.scenario.loader import (
+    CompiledSidecarError,
+    guard_source_scenario,
+    load_scenario,
+    scenario_env_references,
+)
+
+COMPILED_SIDECAR_YAML = "compiler_version: 2\nsource: flow.scenario.yaml\nactions: []\n"
 
 SCENARIO_YAML = """\
 config:
@@ -45,6 +52,33 @@ def test_env_substituted_in_value_fields(tmp_path):
 def test_missing_env_raises(tmp_path):
     with pytest.raises(KeyError):
         load_scenario(_write(tmp_path), env={})
+
+
+def test_load_scenario_rejects_compiled_sidecar_by_name(tmp_path):
+    p = tmp_path / "flow.compiled.yaml"
+    p.write_text(COMPILED_SIDECAR_YAML, encoding="utf-8")
+    with pytest.raises(CompiledSidecarError, match="scenariusz"):
+        load_scenario(p, env=ENV)
+
+
+def test_load_scenario_rejects_sidecar_shape_regardless_of_name(tmp_path):
+    p = tmp_path / "flow.yaml"  # not a .compiled.yaml name — detected by shape
+    p.write_text(COMPILED_SIDECAR_YAML, encoding="utf-8")
+    with pytest.raises(CompiledSidecarError):
+        load_scenario(p, env=ENV)
+
+
+def test_guard_source_scenario_raises_before_env_substitution(tmp_path):
+    # A sidecar has no ${ENV}; the guard must fire even with an empty env,
+    # i.e. before any missing-variable error could mask it.
+    p = tmp_path / "flow.compiled.yaml"
+    p.write_text(COMPILED_SIDECAR_YAML, encoding="utf-8")
+    with pytest.raises(CompiledSidecarError):
+        guard_source_scenario(p)
+
+
+def test_guard_source_scenario_accepts_real_scenario(tmp_path):
+    guard_source_scenario(_write(tmp_path))  # does not raise
 
 
 def test_env_defaults_to_os_environ(tmp_path, monkeypatch):
