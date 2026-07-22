@@ -125,16 +125,28 @@ def test_load_render_set_redacts_secret_from_non_validation_load_failure(
 ) -> None:
     """Wyjątek spoza ``ScenarioValidationError`` gubi treść, zostaje sama nazwa typu.
 
-    To druga — dotąd niepokryta testem — gałąź `try`/`except` wokół
-    ``load_scenario``. Siostrzany test powyżej pilnuje gałęzi
-    ``ScenarioValidationError`` (banner, bezpieczny w całości); tutaj chodzi
-    o wszystko inne, co może wypaść z wczytywania *po* podstawieniu ``${ENV}``:
-    surowy ``pydantic.ValidationError`` z ``input_value=…``, ``OSError`` ze
-    ścieżką, cokolwiek. Redakcja stoi na dwóch szczegółach, które łatwo zgubić
-    przy przenoszeniu tej gałęzi do helpera: komunikat składa się wyłącznie
-    z ``type(exc).__name__`` (nigdy ``str(exc)``), a ``raise ... from None``
-    ucina łańcuch, żeby oryginał nie wypłynął w tracebacku do logów.
-    Gdyby którykolwiek zniknął, sekret trafiłby do wyjścia i nic by nie padło.
+    To druga gałąź `try`/`except` wokół ``load_scenario`` — obrona w głąb, a nie
+    łatka na żywy wyciek. Dziś **żadna znana ścieżka** nie dochodzi tu z sekretem
+    w treści: jedyne wywołanie pydantica w ``load_scenario``
+    (``Scenario.model_validate``) siedzi w ``try``, z którego wychodzi już
+    ``ScenarioValidationError`` z bannerem sprzed substytucji (``loader.py:158``,
+    ``raise ... from None``) — i to pilnuje siostrzany test powyżej — a
+    ``substitute_scenario_values`` podnosi najwyżej ``KeyError`` z *nazwą*
+    brakującej zmiennej, nigdy z jej wartością. Zostają wyjątki znające co
+    najwyżej ścieżkę pliku (``OSError``, błąd parsera), więc realnie nie ma tu
+    dziś czego redagować.
+
+    Gałąź jest mimo to przypięta testem z dwóch powodów. Po pierwsze refaktor
+    przenosi ją do helpera, a przenoszony kod łatwo po drodze okroić. Po drugie
+    redakcja stoi na dwóch szczegółach, które znikają cicho: komunikat składa się
+    wyłącznie z ``type(exc).__name__`` (nigdy ``str(exc)``), a
+    ``raise ... from None`` ucina łańcuch, żeby oryginał nie wypłynął
+    w tracebacku do logów — stąd asercje na ``__suppress_context__`` i na
+    sformatowanym tracebacku, bo sam ``str(exc)`` obu tych regresji nie wykryje.
+    Gdyby któryś zniknął, a przyszła zmiana ``load_scenario`` dołożyła ścieżkę
+    podnoszącą wyjątek z wartością już po podstawieniu ``${ENV}``, sekret
+    trafiłby do wyjścia i nic by nie padło. Fake poniżej udaje dokładnie taką
+    hipotetyczną ścieżkę.
     """
 
     secret = "sentinel-password-that-must-not-leak"
@@ -142,8 +154,8 @@ def test_load_render_set_redacts_secret_from_non_validation_load_failure(
     def _fail_after_substitution(
         scenario_path: Path, env: Mapping[str, str] | None = None
     ) -> NoReturn:
-        # Udajemy wyjątek, który — jak `pydantic.ValidationError` — niesie
-        # w treści wartość już po podstawieniu ${ENV}, a nie samą nazwę klucza.
+        # Udajemy wyjątek, który niósłby w treści wartość już po podstawieniu
+        # ${ENV}, a nie samą nazwę klucza — dziś takiego nikt nie podnosi.
         assert env is not None
         raise RuntimeError(f"input_value={env['PASSWORD']!r}")
 
@@ -151,6 +163,9 @@ def test_load_render_set_redacts_secret_from_non_validation_load_failure(
         "guidebot_recorder.scenario.render_set.load_scenario",
         _fail_after_substitution,
     )
+    # Ten plik nigdy nie zostanie odczytany — `load_scenario` jest podmienione
+    # w całości, więc żadnej substytucji ${ENV} tu nie ma; liczy się wyłącznie to,
+    # że `env` z sekretem dociera do wywołania (sprawdza to `assert` w fake'u).
     (tmp_path / "en.scenario.yaml").write_text(
         _scenario("en-US").replace(
             '- say: "Narration in en-US"',

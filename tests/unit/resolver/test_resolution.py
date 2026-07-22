@@ -441,29 +441,50 @@ async def test_relaxed_exact_variant_that_resolves_uniquely_is_the_one_frozen(pa
 async def test_failed_relaxed_retry_reports_the_original_rejection_not_the_relaxed_one(page):
     """Characterization: the other direction — a relaxed retry that also fails is discarded.
 
-    Both variants are refused here, and for different reasons: the exact name
-    matches no element at all (`not_found`), the relaxed one matches the select
-    but it does not offer the wanted option (`option_missing`). Today's loop
-    keeps the *first* rejection (`elif rejection is None`), so the author reads
-    why the target the reasoner actually answered with was refused — not why a
-    variant this code invented behind the reasoner's back was.
+    Two things are enforced, and the first is what makes the second mean
+    anything:
 
-    Every existing test that walks both variants does so with a target whose two
+    1. the relaxed variant really is produced for this answer and really does
+       reach the option check — asserted by a *positive control*, the same page
+       and the same answer with the option the element does offer, which only
+       resolves through relaxation (the exact name matches nothing);
+    2. with the option it does *not* offer, both variants are refused for
+       different reasons — exact `not_found`, relaxed `option_missing` — and the
+       error reports the *first*: why the target the reasoner actually answered
+       with was refused, not why a variant this code invented behind the
+       reasoner's back was.
+
+    The control is not decoration. The strict rejection this test asserts on is
+    the same string whether or not the relaxed variant is tried, so without the
+    control the whole test stayed green with `variants.append(relaxed)` deleted —
+    it pinned the precedence but not that there were two variants to order.
+
+    Every other test that walks both variants does so with a target whose two
     rejections carry the identical message ("matched no elements"), so the
-    precedence itself is executed but never observed: swapping it would keep the
-    whole suite green. Pinned here because the upcoming extraction of the retry
-    into a helper has to carry the precedence out with it, and the error message
-    is the only place it is ever visible.
+    precedence itself is executed but never observed there: swapping it would
+    keep the whole suite green. Pinned here because the upcoming extraction of
+    the retry into a helper has to carry the precedence out with it, and the
+    error message is the only place it is ever visible.
     """
 
     await page.set_content(_LONG_NAMED_SELECT)
-    step = Step(select=Select(from_="lista województw", option="Śląskie"))
-    reasoner = StubReasoner(
-        ReasonerResult(action="select", target=RoleTarget(role="combobox", name="Lista"))
+    # `exact=True` by default, and "Lista" ≠ "Lista województw": the strict
+    # variant matches nothing, the relaxed one matches the select.
+    answered = ReasonerResult(action="select", target=RoleTarget(role="combobox", name="Lista"))
+
+    control = await resolve_step_target(
+        page,
+        Step(select=Select(from_="lista województw", option="Mazowieckie")),
+        "select",
+        StubReasoner(answered),
     )
+    assert isinstance(control, ResolvedTarget)
+    assert control.target == RoleTarget(role="combobox", name="Lista", exact=False)
+
+    step = Step(select=Select(from_="lista województw", option="Śląskie"))
 
     with pytest.raises(TargetResolutionError) as excinfo:
-        await resolve_step_target(page, step, "select", reasoner)
+        await resolve_step_target(page, step, "select", StubReasoner(answered))
 
     message = str(excinfo.value)
     assert "matched no elements" in message  # the rejection of the target as answered
