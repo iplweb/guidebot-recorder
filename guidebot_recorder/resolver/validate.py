@@ -185,7 +185,7 @@ async def _select_option_labels(locator: Locator) -> list[str]:
     Deliberately the same projection every execution path builds — ``option.label``
     falling back to the option's text, with runs of whitespace collapsed. That is
     ``optionLabel`` in ``selects.js`` (the shim), ``_OPTION_INDEX_JS`` in
-    ``recorder.py`` (the natively-visible listbox) and Playwright's
+    ``recorder/select/_js.py`` (the natively-visible listbox) and Playwright's
     ``select_option(label=…)`` (compile's direct path and ``mode: native``), which
     are one rule by construction — so validation and execution read the same list.
     """

@@ -73,18 +73,18 @@ def test_every_consumer_reads_the_same_already_enhanced_predicate() -> None:
     invisible until the day the two answers differ.
     """
 
-    from guidebot_recorder.recorder import recorder as recorder_module
+    from guidebot_recorder.recorder.select import _js as recorder_js
     from guidebot_recorder.resolver import widget as widget_module
 
     widget_body = files("guidebot_recorder.selects").joinpath("selects.js").read_text("utf-8")
 
-    assert SELECT_SHAPE_JS in recorder_module._SHIM_STATE_JS
+    assert SELECT_SHAPE_JS in recorder_js._SHIM_STATE_JS
     assert widget_module.select_shape is select_shape
     assert SELECT_SHAPE_GLOBAL in widget_body
 
     # The marker-class list and the 8x8 floor are the rule itself: if either
     # appears anywhere but in `visibility.js`, the copy is already back.
-    for source in (widget_body, recorder_module._SHIM_STATE_JS.replace(SELECT_SHAPE_JS, "")):
+    for source in (widget_body, recorder_js._SHIM_STATE_JS.replace(SELECT_SHAPE_JS, "")):
         assert "select2-hidden-accessible" not in source
         assert "rect.width < 8" not in source
 

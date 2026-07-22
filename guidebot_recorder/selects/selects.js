@@ -323,7 +323,7 @@
       "white-space": "nowrap",
       overflow: "hidden",
       // The real <select> stays Playwright's hit target: a click aimed at it
-      // must never be intercepted by the shim (Recorder.click, recorder.py:94).
+      // must never be intercepted by the shim (Recorder.click, recorder/recorder.py).
       "pointer-events": "none",
       "z-index": BUTTON_Z_INDEX,
     });

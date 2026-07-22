@@ -6,7 +6,7 @@ consumers read it and no consumer restates it:
 * ``selects.js``'s ``isEnhanced`` — through the ``__guidebot_select_shape``
   global that :class:`guidebot_recorder.selects.selects.Selects` installs ahead
   of the widget body;
-* ``recorder.py``'s ``_SHIM_STATE_JS`` — by embedding :data:`SELECT_SHAPE_JS`
+* ``recorder/select/_js.py``'s ``_SHIM_STATE_JS`` — by embedding :data:`SELECT_SHAPE_JS`
   into its own classification pass;
 * ``resolver/widget.py``'s ``user_visible_control`` — through
   :func:`select_shape`.

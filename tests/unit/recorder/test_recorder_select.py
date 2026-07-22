@@ -23,13 +23,20 @@ from playwright.async_api import Page, async_playwright
 
 from guidebot_recorder.models.target import RoleTarget, TestidTarget
 from guidebot_recorder.overlay.overlay import Overlay
-from guidebot_recorder.recorder import recorder as recorder_module
 from guidebot_recorder.recorder.recorder import (
     OPTION_MISSING,
     UNDRIVABLE,
     Recorder,
     SelectDriveError,
 )
+
+# The two timeouts are patched below to keep this file fast, and each is patched
+# on the module whose globals the waiting code reads at call time. Naming the
+# wrong module (or importing the constants by name) would rebind something
+# nobody consults: the tests would still pass and simply take five, or fifteen,
+# seconds longer — see `test_recorder_seams.py`, which makes that a failure.
+from guidebot_recorder.recorder.select import driver as select_driver
+from guidebot_recorder.recorder.select import probe as select_probe
 from guidebot_recorder.selects import SelectsNotReadyError
 from guidebot_recorder.selects.visibility import shape_prelude
 
@@ -569,7 +576,7 @@ async def test_a_listbox_click_that_selects_nothing_is_not_reported_as_success(p
 
 
 async def test_beat_two_without_a_matching_node_raises_naming_the_option(page, monkeypatch):
-    monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
+    monkeypatch.setattr(select_driver, "OPTION_WAIT_MS", 400)
     overlay = Overlay()
     await page.set_content(_enhanced(["Alfa", "Beta"], ["Alfa"]))
     await overlay.install(page)
@@ -915,7 +922,7 @@ async def test_a_visible_select_with_no_shim_in_the_context_blames_the_missing_s
     option, and it burned the whole option wait to get there.
     """
 
-    monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
+    monkeypatch.setattr(select_driver, "OPTION_WAIT_MS", 400)
     overlay = Overlay()
     await page.set_content(
         "<body style='margin:0'><select id='s' data-testid='s' style='width:220px'>"
@@ -1003,7 +1010,7 @@ async def test_select_gives_up_on_a_page_whose_readiness_never_settles(page, mon
     diagnosis, not silence.
     """
 
-    monkeypatch.setattr(recorder_module, "READY_WAIT_MS", 300)
+    monkeypatch.setattr(select_probe, "READY_WAIT_MS", 300)
     await page.set_content(_RAW_SELECT)
     # A widget that never finishes its first classification pass.
     await page.evaluate(
@@ -1292,7 +1299,7 @@ async def test_a_widget_that_never_draws_the_row_is_not_option_missing(page, mon
     and simply did not happen.
     """
 
-    monkeypatch.setattr(recorder_module, "OPTION_WAIT_MS", 400)
+    monkeypatch.setattr(select_driver, "OPTION_WAIT_MS", 400)
     overlay = Overlay()
     await page.set_content(_enhanced(["Alfa", "Beta"], ["Alfa"]))
     await overlay.install(page)
@@ -1418,8 +1425,9 @@ async def test_a_disabled_option_in_a_listbox_is_not_option_missing(page):
 
     It used to check only "is the label there?" and then click the row, which a
     disabled `<option>` silently refuses — caught one beat later by
-    `_confirm_selected`, and named by a message about the cursor missing rather
-    than about the option being locked. Routing it through `_require_option`
+    `probe.confirm_selected`, and named by a message about the cursor missing
+    rather than about the option being locked. Routing it through
+    `probe.require_option`
     gives it the same verdict, the same wording and the same `reason` the other
     three paths carry.
     """
@@ -1468,7 +1476,7 @@ async def test_a_hidden_listbox_is_not_option_missing(page):
     assert excinfo.value.reason == UNDRIVABLE
 
 
-async def test_one_guard_answers_can_this_option_be_chosen(page):
+async def test_one_guard_answers_can_this_option_be_chosen(page, monkeypatch):
     """Both refusals come from a single call, so they cannot drift apart.
 
     The merge that produced this file had two candidate fast-fails for the two
@@ -1476,20 +1484,25 @@ async def test_one_guard_answers_can_this_option_be_chosen(page):
     `disabled`" — each with its own JS and its own label-matching loop. Two
     definitions of the same question is how this module previously grew four
     disagreeing answers to "is this select enhanced?". Pinned here: one
-    `_require_option` per drive, and it settles both cases.
+    `probe.require_option` per drive, and it settles both cases.
+
+    The spy replaces the function on `select.probe` rather than on the recorder,
+    because that is the module whose globals the driver reads when it makes the
+    call — patching anywhere else would leave the real guard running and count
+    nothing.
     """
 
     calls: list[str] = []
     await page.set_content(_DISABLED_OPTION_SELECT)
     await _install_selects(page)
     rec = Recorder(page, overlay=None)  # compile path
-    original = rec._require_option
+    original = select_probe.require_option
 
     async def _spy(locator, option):
         calls.append(option)
         return await original(locator, option)
 
-    rec._require_option = _spy  # type: ignore[method-assign]
+    monkeypatch.setattr(select_probe, "require_option", _spy)
 
     with pytest.raises(SelectDriveError) as disabled:
         await rec.select(RoleTarget(role="combobox", name="Raport"), "tabela")
