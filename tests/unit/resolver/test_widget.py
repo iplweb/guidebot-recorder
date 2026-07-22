@@ -236,7 +236,7 @@ async def test_user_visible_control_does_not_call_a_1px_clipped_select_the_contr
 
     Playwright calls that visible; the shim calls it enhanced. Answering step 1
     in Playwright's terms let validation accept the clipped `<select>` as "the
-    control the viewer sees" while `_probe_drivable`, reading the shim's own
+    control the viewer sees" while `select.probe.probe_drivable`, reading the shim's own
     rule, rejected the very same page.
     """
 

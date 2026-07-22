@@ -41,8 +41,8 @@ READY_MARGIN = 5.0
 # page-side `Error` surfaces in English and as the wrong exception type,
 # contradicting the method's documented `Raises:`.
 #
-# ``READY_TIMEOUT_MARKER`` is public because ``recorder.py`` runs the same race
-# for its own, unrouted read of ``ready`` (see ``_SELECTS_READY_JS`` there) and
+# ``READY_TIMEOUT_MARKER`` is public because ``recorder/select/_js.py`` runs the
+# same race for its own, unrouted read of ``ready`` (``_SELECTS_READY_JS``) and
 # has to recognise the same rejection; a second spelling of the string is how
 # the two would drift into one of them hanging again.
 READY_TIMEOUT_MARKER = "guidebot selects ready timeout"

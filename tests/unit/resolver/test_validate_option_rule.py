@@ -1,7 +1,7 @@
 """Reguła etykiety opcji z walidacji JEST regułą etykiety z wykonania.
 
 Jeden test, własny plik — bo jako jedyny w całym zestawie walidacji sięga poza
-własny pakiet: importuje `_OPTION_INDEX_JS` z `guidebot_recorder.recorder.recorder`,
+własny pakiet: importuje `_OPTION_INDEX_JS` z `guidebot_recorder.recorder.select._js`,
 żeby porównać werdykty walidatora (resolver) i ścieżki wykonania (recorder) na
 tym samym korpusie. To celowe przecięcie granicy pakietu, nie przypadek —
 gdyby zniknęło, trzy niezależne implementacje jednej reguły znów mogłyby się
@@ -18,7 +18,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 
-from guidebot_recorder.recorder.recorder import _OPTION_INDEX_JS
+from guidebot_recorder.recorder.select._js import _OPTION_INDEX_JS
 from guidebot_recorder.resolver.validate import (
     _offers_option,
     _select_option_labels,
