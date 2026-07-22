@@ -87,6 +87,54 @@ async def test_compile_fills_cached_action(tmp_path, page):
     assert reasoner.calls == 1
 
 
+async def test_expect_is_read_from_the_urls_bracketing_the_action(tmp_path, page):
+    """`expect` is the *difference* between the URL before and after the action.
+
+    Both readings have to stay on their own side of the click: `heuristic_expect`
+    compares them and calls any change a navigation, so a `url_before` sampled
+    after the action (or a `url_after` sampled before it) makes the two equal and
+    freezes `expect: none` for a step that navigates. Render then skips the load
+    wait and photographs the old document. Nothing else in this file notices —
+    every other scenario here clicks a button that leaves the URL alone, which is
+    exactly the shape that survives the mistake.
+    """
+
+    path = tmp_path / "nawigacja.scenario.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """\
+            config:
+              title: Nawigacja
+              viewport: {width: 800, height: 600}
+              tts: {provider: edge, voice: v, lang: pl-PL}
+            steps:
+              # `about:blank`, not a fragment: Chromium treats a data: document
+              # as opaque and a same-document hash click leaves `page.url` alone,
+              # which is the one thing this test needs to change.
+              - navigate: "data:text/html,<a href=about:blank>Dalej</a>"
+              - teach: "kliknij Dalej"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    class LinkReasoner:
+        async def resolve(self, instruction, candidates):
+            return ReasonerResult(
+                action="click",
+                target=RoleTarget(role="link", name="Dalej", exact=True),
+            )
+
+    await run_compile(path, page, LinkReasoner(), selects=None)
+
+    ca = load_compiled(compiled_path(path)).actions[1]
+    assert ca is not None
+    assert ca.expect == "navigation"
+    # The fingerprint carries the same verdict, and `_can_reuse` cross-checks the
+    # two — a wrong `expect` frozen consistently would still be reused forever.
+    assert ca.fingerprint.expect == "navigation"
+
+
 async def test_recompile_reuses_cache_without_reasoner(tmp_path, page):
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
