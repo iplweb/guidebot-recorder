@@ -304,13 +304,15 @@ async def run_render(
         await install_framing(context, shell_origin=SHELL_URL)
 
     # --- Slide card state -----------------------------------------------------
-    # `card_active`/`active_card` track whether a slide card currently owns the
-    # screen (painted either by a `slide` step or the auto-intro below). When no
-    # card is ever painted (no `slide` steps, `intro.enabled=False`), these stay
-    # False/None for the whole render and every helper below is a pure pass-
-    # through to today's `_ensure_visuals` — i.e. byte-identical back-compat.
-    card_active = False
-    active_card: Card | None = None
+    # `card` is the slide card that currently owns the screen (painted either by a
+    # `slide` step or the auto-intro below), or None when the page itself is on
+    # screen. One variable, not a `(bool, payload)` pair: the two halves were
+    # written together at every site and the code asserted they agreed, so the
+    # only thing a pair could express was a desync. When no card is ever painted
+    # (no `slide` steps, `intro.enabled=False`) it stays None for the whole render
+    # and every helper below is a pure pass-through to today's `_ensure_visuals` —
+    # i.e. byte-identical back-compat.
+    card: Card | None = None
 
     async def _chrome_hide(pg: Page) -> None:
         if chrome is not None:
@@ -336,8 +338,8 @@ async def run_render(
         and re-assert the hidden cursor/chrome layers.
         """
         await _assert_card_alive(pg)
-        assert active_card is not None  # guaranteed by the card_active invariant
-        await slide.ensure(pg, active_card)
+        assert card is not None  # only ever called on the card-active path
+        await slide.ensure(pg, card)
         await overlay.hide(pg)
         await _chrome_hide(pg)
 
@@ -394,15 +396,14 @@ async def run_render(
     elif not cfg.intro.enabled:
         await page.set_content("<style>html,body{margin:0;background:white}</style>")
     if cfg.intro.enabled:
-        active_card = {
+        card = {
             "title": cfg.title,
             "subtitle": cfg.intro.subtitle,
             "notes": cfg.intro.notes,
         }
-        await slide.show(page, active_card)
+        await slide.show(page, card)
         await overlay.hide(page)
         await _chrome_hide(page)
-        card_active = True
     await _ensure_visuals(page, overlay, chrome)
     await page.screenshot()
     await page.wait_for_timeout(100)
@@ -476,11 +477,10 @@ async def run_render(
             # today's unconditional `_ensure_visuals` call (back-compat).
             if kind == "desktop":
                 assert step.desktop is not None  # guaranteed by command_kind()
-                if card_active:
+                if card is not None:
                     await _assert_card_alive(active_page)
                     await slide.hide(active_page)
-                    card_active = False
-                    active_card = None
+                    card = None
 
                 async def _reveal_shell(pg: Page = active_page) -> None:
                     await _chrome_show(pg)
@@ -496,11 +496,11 @@ async def run_render(
                     on_click=(sfx_sink if cfg.sound.enabled else None),
                 )
                 # The opener ends on the revealed chrome shell — normal visible
-                # state, so from here it is exactly the no-card path (card_active
-                # stays False).
+                # state, so from here it is exactly the no-card path (`card`
+                # stays None).
             elif kind == "slide":
                 assert step.slide is not None  # guaranteed by command_kind()
-                if card_active:
+                if card is not None:
                     # Fail loud before repainting: a slide following a say whose
                     # card was destroyed mid-narration must NOT silently swap in a
                     # fresh card over the wrong page (mirrors the generic dismiss
@@ -509,24 +509,22 @@ async def run_render(
                     await slide.hide(active_page)
                     await overlay.show(active_page)
                     await _chrome_show(active_page)
-                active_card = {
+                card = {
                     "title": step.slide.title,
                     "subtitle": step.slide.subtitle,
                     "notes": step.slide.notes,
                 }
-                await slide.show(active_page, active_card)
+                await slide.show(active_page, card)
                 await overlay.hide(active_page)
                 await _chrome_hide(active_page)
-                card_active = True
-            elif kind == "say" and card_active:
+            elif kind == "say" and card is not None:
                 await _ensure_card(active_page)
-            elif card_active:
+            elif card is not None:
                 await _assert_card_alive(active_page)
                 await slide.hide(active_page)
                 await overlay.show(active_page)
                 await _chrome_show(active_page)
-                card_active = False
-                active_card = None
+                card = None
                 await _ensure_visuals(
                     active_page,
                     overlay,
@@ -656,7 +654,7 @@ async def run_render(
             # destruction even when the say is the LAST step (the loop still fully
             # processes that step before exiting). When no card is active this is
             # exactly today's unconditional `_ensure_visuals` (back-compat).
-            if card_active:
+            if card is not None:
                 await _ensure_card(active_page)
             else:
                 await _ensure_visuals(
