@@ -1191,7 +1191,7 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     overlay_viewports: list = []
     recorder_kwargs: list = []
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         def __init__(self, cursor=None, viewport=None):
             overlay_viewports.append(viewport)
             super().__init__(cursor, viewport)
@@ -1201,7 +1201,7 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
     monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
@@ -1418,7 +1418,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
 
     slide_events: list[tuple[str, dict]] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             slide_events.append(("show", dict(card)))
@@ -1436,7 +1436,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
                 )
             )
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1487,13 +1487,13 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
     overlay_show_calls = 0
     dom_state_before_navigate: list[int] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def hide(self, page):
             nonlocal slide_hide_calls
             slide_hide_calls += 1
             await super().hide(page)
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         async def show(self, page):
             nonlocal overlay_show_calls
             overlay_show_calls += 1
@@ -1506,8 +1506,8 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
             )
             await super().navigate(url)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
     monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
@@ -1560,13 +1560,13 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
     # check therefore sees a live card; only a post-wait check sees the loss.
     destroyed = {"value": False}
 
-    class MidWaitDestroySlide(R._run.SlideOverlay):
+    class MidWaitDestroySlide(R.stage.SlideOverlay):
         async def token(self, page):
             if destroyed["value"]:
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", MidWaitDestroySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", MidWaitDestroySlide)
 
     original_wait = R.narration._pace_narration
 
@@ -1623,7 +1623,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
 
     destroyed = {"value": False}
 
-    class GhostNavSlide(R._run.SlideOverlay):
+    class GhostNavSlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             destroyed["value"] = False  # a repaint restores a truthy token
@@ -1633,7 +1633,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", GhostNavSlide)
 
     original_wait = R.narration._pace_narration
 
@@ -1690,7 +1690,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
 
     slide_ref: dict = {}
 
-    class GhostNavSlide(R._run.SlideOverlay):
+    class GhostNavSlide(R.stage.SlideOverlay):
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
             self._ghost = False
@@ -1708,7 +1708,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", GhostNavSlide)
 
     original_render_step = R._step._render_step
 
@@ -1760,12 +1760,12 @@ async def test_intro_enabled_replaces_bootstrap(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1801,12 +1801,12 @@ async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1879,7 +1879,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
     def _role(page) -> str:
         return "popup" if page.url.endswith("popup.html") else "main"
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         async def hide(self, page):
             events.append(("hide", _role(page)))
             await super().hide(page)
@@ -1888,7 +1888,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
             events.append(("show", _role(page)))
             await super().show(page)
 
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)

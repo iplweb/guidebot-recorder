@@ -24,9 +24,11 @@ keeps working after the split into submodules:
     timeline.py       observed freezes → validated model → the edited file
     audio.py          audio beds, muxing, and the two-phase artifact publish
     reuse.py          the compiled-sidecar contract as render reads it
+    plan.py           everything a render decides before a browser exists
+    stage.py          what is on screen now, and the one order the init scripts
+                      may be registered in
     _step.py          _render_step (opaque; phase 3 decomposes it)
-    _run.py           run_render (opaque; phase 3 decomposes it — still >600 lines,
-                      which is expected and is *not* a sign the cleanup is done)
+    _run.py           run_render — the order the phases run in
 
 It also, on purpose, **withholds every name the tests patch**. Nineteen names plus
 ``os.replace`` are this package's test seams, and five of them
@@ -80,10 +82,12 @@ from . import constants as constants
 from . import errors as errors
 from . import narration as narration
 from . import pages as pages
+from . import plan as plan
 from . import popup_crop as popup_crop
 from . import popup_detect as popup_detect
 from . import popup_session as popup_session
 from . import reuse as reuse
+from . import stage as stage
 from . import tasks as tasks
 from . import timeline as timeline
 from . import visuals as visuals

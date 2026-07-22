@@ -1,37 +1,33 @@
-"""``run_render``: the whole render pass, top to bottom. Phase 3 decomposes it.
+"""``run_render``: the whole render pass, top to bottom.
 
-Deliberately one opaque module, and deliberately **still over the 600-line limit**
-— phase 1 split the file, it did not decompose this function. ``run_render``
-carries cyclomatic complexity 97 and three interleaved lifetimes (the frozen plan,
-the recording clock, what is currently on screen); turning those into three state
-objects is phase 3's job. Moving it verbatim is what keeps this diff reviewable and
-keeps the two orderings below provably untouched.
+Phase 3 is turning the three interleaved lifetimes this function carried into
+three objects; what is left here is the order the phases run in.
 
-**Two orderings in here are load-bearing.**
+* :class:`~guidebot_recorder.recorder.render.plan._RenderPlan` — frozen:
+  everything decided before a browser exists;
+* :class:`~guidebot_recorder.recorder.render.stage._Stage` — what is on screen
+  now: the pages, the injected layers, the popup, the slide card;
+* the recording clock — freezes, SFX and narration placements (still inline
+  below; it becomes ``_Clock`` in the next step).
 
-* ``cursor.js`` / ``slide.js`` / ``desktop.js`` MUST be registered before
-  ``chrome.js``. Each decides its role by reading the real ``window.top``, and
-  ``chrome.js`` is what shadows ``top`` (frame-bust neutralization); a layer
-  registered after it would misidentify as the top window and mount inside the
-  framed site. The long comment beside the ``install_context`` calls is the
-  contract, and ``test_render.py`` asserts the registration order with
-  ``DesktopOverlay`` included.
-* Popup composition MUST run before time editing. Popups are composed on the
-  *recording* axis (their ``opened_at``/``closed_at`` are raw wall clock); time
-  editing is what moves narration and SFX onto the *virtual* axis. Swapping them
-  yields a film of the right length with the popup in the wrong place, and
-  ``test_popup_is_composed_before_time_editing_and_feeds_it`` (phase 0) asserts
-  both the call order and that the edit consumes the compositor's output.
+**Popup composition MUST run before time editing.** Popups are composed on the
+*recording* axis (their ``opened_at``/``closed_at`` are raw wall clock); time
+editing is what moves narration and SFX onto the *virtual* axis. Swapping them
+yields a film of the right length with the popup in the wrong place, and
+``test_popup_is_composed_before_time_editing_and_feeds_it`` (phase 0) asserts both
+the call order and that the edit consumes the compositor's output. The other
+load-bearing ordering — the role-gated init scripts — now lives in
+:mod:`~guidebot_recorder.recorder.render.stage`, in one function whose body *is*
+the order.
 
 Every test seam this function drives is called through a module object —
 ``narration._pace_narration``, ``timeline_module._apply_timeline_edits``,
 ``audio._assemble_audio_tracks``, ``_step._render_step``,
 ``visuals._prepare_main_after_popup_close`` — so a patch on the defining submodule
-lands on the globals read here. The seams defined *outside* the package
-(``Overlay``, ``SlideOverlay``, ``Recorder``, ``compose_popup_video``,
-``probe_frame_count``) are name-imported instead, which makes *this* module their
-patch target; ``Recorder`` and ``probe_frame_count`` have a second consumer inside
-the package and therefore need two patch lines each.
+lands on the globals read here. Of the seams defined *outside* the package, the
+two overlay constructors moved to ``stage`` with the code that calls them;
+``Recorder``, ``compose_popup_video`` and ``probe_frame_count`` are still
+name-imported here, which makes *this* module their patch target.
 
 ``timeline`` is imported as ``timeline_module`` because ``timeline`` is already a
 local name in ``run_render`` — the same reason ``mux_probe`` is aliased below.
@@ -40,26 +36,20 @@ local name in ``run_render`` — the same reason ``mux_probe`` is aliased below.
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
 
 from playwright.async_api import Browser, Frame, Page
 from tqdm import tqdm
 
-from guidebot_recorder.chrome import SHELL_URL, Chrome
-from guidebot_recorder.chrome.framing import install_framing
-from guidebot_recorder.desktop import DesktopOverlay
 from guidebot_recorder.models.action import CachedAction, PendingAction
-from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import pause_for_inspection, redact_exception
 from guidebot_recorder.recorder.recorder import Recorder
-from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import ResolvedTarget
 from guidebot_recorder.resolver.validate import reuse_is_valid
-from guidebot_recorder.selects import SelectsNotReadyError, install_selects
-from guidebot_recorder.slide import SlideOverlay
+from guidebot_recorder.selects import SelectsNotReadyError
 from guidebot_recorder.tts.base import Segment, TtsProvider
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import FadeSpec, compose_popup_video
@@ -79,26 +69,16 @@ from . import _step, audio, narration, visuals
 from . import timeline as timeline_module
 from .errors import RenderError, _OptionalAbsent
 from .narration import _stamp_frame
-from .pages import _active_page, _expect_chrome
 from .plan import _prepare_render
-from .popup_crop import _popup_fills_canvas, _resolve_popup_crop, _settle_popup_content_box
-from .popup_detect import _POPUP_REQUEST_SCRIPT, _popup_window_opened
-from .popup_session import (
-    _PageObservation,
-    _PopupSession,
-    _prepare_popup,
-    _sync_popup_close,
-    _unexpected_pages,
-)
+from .popup_crop import _popup_fills_canvas, _resolve_popup_crop
+from .popup_detect import _popup_window_opened
+from .popup_session import _prepare_popup
 from .reuse import _resolve_pending_target
+from .stage import _close_stage, _open_stage
 from .timeline import _build_timeline
-from .visuals import _ensure_visuals, _hand_cursor_to_popup, _play_desktop_opener, _prime_visuals
+from .visuals import _hand_cursor_to_popup, _play_desktop_opener
 
 _VIDEO_POSTROLL_SECONDS = 0.1
-
-
-#: A slide card's on-screen content, as consumed by ``SlideOverlay.show``/``.ensure``.
-Card = dict[str, str | None]
 
 
 async def run_render(
@@ -140,185 +120,10 @@ async def run_render(
     scenario_hash = plan.scenario_hash
     desktop_payloads = plan.desktop_payloads
     step_message = plan.step_message
-    path = plan.path
     out_mp4 = plan.out_mp4
-
-    # --- Render z nagrywaniem wideo (viewport z config — patrz compile) ---
     work = plan.work
-    work.mkdir(parents=True, exist_ok=True)
-    # The context viewport and video size stay at the configured dimensions so the
-    # output MP4 keeps its size and popups are geometrically untouched; the shell
-    # shrinks only the site iframe interior (see compile / site_viewport).
-    # Both settings are context-level, so a popup also records onto a
-    # main-viewport-sized canvas with filler around its real window. That is
-    # corrected in post (``compose_popup_video(popup_crop=...)``), never here:
-    # shrinking the recording would also shrink the main window's frame.
-    #
-    # Pre-recording setup: when the target declares ``config.setup`` its login
-    # steps were removed, so the recording context must start already logged in.
-    # ``ensure_session`` establishes/reuses the prepared session on separate,
-    # non-recording contexts *before* this line, so the login can never reach the
-    # film (spec: "Target render").
-    setup_state = (
-        await ensure_session(browser, Path(path), Path(".guidebot/sessions"), env, timeout=timeout)
-        if cfg.setup is not None
-        else None
-    )
-    context = await browser.new_context(
-        viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
-        locale=cfg.locale,
-        record_video_dir=str(work),
-        record_video_size={"width": cfg.viewport.width, "height": cfg.viewport.height},
-        **({"storage_state": setup_state} if setup_state is not None else {}),
-        **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
-    )
-    # Independent of the role-gating order below (it only wraps ``window.open``),
-    # but registered first so it wraps the *native* function on every document.
-    await context.add_init_script(script=_POPUP_REQUEST_SCRIPT)
-    overlay = Overlay(cfg.cursor, cfg.viewport)
-    # Role-gating contract: cursor.js, slide.js and desktop.js MUST be registered
-    # before chrome.js. Inside the site iframe, each of them decides its role by
-    # reading the real ``window.top`` (cursor.js to skip mounting a duplicate
-    # cursor, slide.js's ``isTop`` guard to skip installing
-    # ``window.__guidebot_slide``, desktop.js likewise); chrome.js is what
-    # shadows ``top`` (frame-bust neutralization). If any of these init scripts
-    # ran after chrome.js, it would read the shadowed ``top``, misidentify as the
-    # top window, and mount inside the frame.
-    #
-    # selects.js reads ``top`` too but is deliberately NOT part of that contract:
-    # its only test is ``isTop && origin === SHELL_ORIGIN``, and chrome.js
-    # shadows ``top`` solely inside framed documents, whose origin is never the
-    # shell's — so the shim reaches the same verdict on either side of chrome.js.
-    # It is registered here anyway, next to the overlays it sits beside; nothing
-    # downstream may rely on that position. See the role-gating comment at the
-    # top of ``selects/selects.js``.
-    await overlay.install_context(context)
-    slide = SlideOverlay()
-    await slide.install_context(context)
-    # Same role-gating rationale as slide.js (isTop guard): must be registered
-    # before chrome.js so it reads the real ``window.top`` and never mounts the
-    # desktop inside the framed site.
-    desktop = DesktopOverlay(config={"background": cfg.desktop.color})
-    await desktop.install_context(context)
-    # The DOM select shim — one of the three contexts that drive pages (spec §1),
-    # and the reason the recording shows an option list at all. ``None`` under
-    # ``selects.mode: native``, which keeps the page's own control.
-    selects = await install_selects(context, cfg)
-    # Composited popups (float or slide) render bare (no in-DOM chrome bar); the
-    # compositor frames them in post. This flips the chrome.js popup-site branch
-    # off and gates the fail-loud "expect chrome" checks on popup pages below.
-    bare_popups = cfg.popup.is_bare
-    chrome = Chrome(cfg.chrome, bare_popups=bare_popups) if cfg.chrome.enabled else None
-    if chrome is not None:
-        await chrome.install_context(context)
-        # Strip X-Frame-Options / CSP frame-ancestors so arbitrary sites frame.
-        await install_framing(context, shell_origin=SHELL_URL)
 
-    # --- Slide card state -----------------------------------------------------
-    # `card` is the slide card that currently owns the screen (painted either by a
-    # `slide` step or the auto-intro below), or None when the page itself is on
-    # screen. One variable, not a `(bool, payload)` pair: the two halves were
-    # written together at every site and the code asserted they agreed, so the
-    # only thing a pair could express was a desync. When no card is ever painted
-    # (no `slide` steps, `intro.enabled=False`) it stays None for the whole render
-    # and every helper below is a pure pass-through to today's `_ensure_visuals` —
-    # i.e. byte-identical back-compat.
-    card: Card | None = None
-
-    async def _chrome_hide(pg: Page) -> None:
-        if chrome is not None:
-            await chrome.hide(pg)
-
-    async def _chrome_show(pg: Page) -> None:
-        if chrome is not None:
-            await chrome.show(pg)
-
-    async def _assert_card_alive(pg: Page) -> None:
-        """Fail loud when a navigation destroyed the card mid-say.
-
-        A fresh, tokenless document (``slide.token`` falsy) means the picture
-        on screen is no longer the card the narration/scenario describes —
-        never narrate over — or silently dismiss — the wrong picture.
-        """
-        if not await slide.token(pg):
-            raise RenderError("karta slajdu zniknęła po nawigacji — narracja nad złym obrazem")
-
-    async def _ensure_card(pg: Page) -> None:
-        """Card-aware replacement for `_ensure_visuals`: re-mount the active
-        card (rebuild-from-missing only; a live card's content is untouched)
-        and re-assert the hidden cursor/chrome layers.
-        """
-        await _assert_card_alive(pg)
-        assert card is not None  # only ever called on the card-active path
-        await slide.ensure(pg, card)
-        await overlay.hide(pg)
-        await _chrome_hide(pg)
-
-    observed_pages: dict[Page, _PageObservation] = {}
-
-    def observe_page(candidate: Page) -> None:
-        if candidate in observed_pages:
-            return
-        # Bare (floating) popups carry no legacy chrome bar; nor does the main
-        # window's about:blank warm-up under that flag. Prime against the cursor
-        # only, or the prime loop deadlocks waiting for a bar that never mounts.
-        expect_chrome = _expect_chrome(chrome, bare_popups)
-        observation = _PageObservation(
-            opened_at=time.monotonic(),
-            video=candidate.video,
-            visual_prime=asyncio.create_task(
-                _prime_visuals(candidate, overlay, chrome, expect_chrome=expect_chrome)
-            ),
-        )
-        observed_pages[candidate] = observation
-
-        def mark_closed(_: Page, observed: _PageObservation = observation) -> None:
-            if observed.closed_at is None:
-                observed.closed_at = time.monotonic()
-
-        candidate.on("close", mark_closed)
-
-    context.on("page", observe_page)
-    page = await context.new_page()
-    observe_page(page)
-    page.set_default_timeout(timeout * 1000)
-    main_observation = observed_pages[page]
-    if main_observation.visual_prime is not None:
-        await main_observation.visual_prime
-    video = page.video
-    if video is None:  # pragma: no cover - record_video_dir makes this invariant true
-        await context.close()
-        raise RenderError("Playwright nie udostępnił nagrania głównego okna")
-
-    # Chromium's screencast may not emit a first frame for a pristine about:blank
-    # page.  A scenario can narrate for several seconds before its first navigate;
-    # anchoring at the Page event would then put that narration on a timeline the
-    # WebM never encoded.  Paint a neutral document, force one captured frame, and
-    # only then establish the shared narration/window clock.  The tiny warm-up is
-    # bounded pre-roll; it avoids losing an arbitrarily long opening narration.
-    # With chrome enabled the neutral document IS the shell (bar + empty iframe),
-    # so the recording opens on the browser chrome rather than a bare white page.
-    # Auto-intro (`cfg.intro.enabled`) replaces this neutral document with a
-    # title card instead — render-only, so `intro.enabled=False` keeps today's
-    # bootstrap byte-identical.
-    site_frame: Frame | None = None
-    if chrome is not None:
-        site_frame = await chrome.install_shell(page)
-    elif not cfg.intro.enabled:
-        await page.set_content("<style>html,body{margin:0;background:white}</style>")
-    if cfg.intro.enabled:
-        card = {
-            "title": cfg.title,
-            "subtitle": cfg.intro.subtitle,
-            "notes": cfg.intro.notes,
-        }
-        await slide.show(page, card)
-        await overlay.hide(page)
-        await _chrome_hide(page)
-    await _ensure_visuals(page, overlay, chrome)
-    await page.screenshot()
-    await page.wait_for_timeout(100)
-    anchor = time.monotonic()
+    stage = await _open_stage(browser, plan, env=env, timeout=timeout)
 
     # Audio placements are collected as recording-axis FRAMES, not seconds: the
     # grid is what `Timeline` reasons on, and quantising once at the moment of
@@ -333,14 +138,11 @@ async def run_render(
     last_freeze_frame = -1
 
     def sfx_sink(kind: str) -> None:
-        sfx_events.append((kind, _stamp_frame(anchor, not_before=last_freeze_frame + 1)))
+        sfx_events.append((kind, _stamp_frame(stage.anchor, not_before=last_freeze_frame + 1)))
 
     placed_by_language: dict[str, list[tuple[Segment, int]]] = {
         tts.lang: [] for tts in audio_configs
     }
-    popup: _PopupSession | None = None
-    popup_open_at_end = False
-
     #: branch whose gate turned out to be absent — every step of it is skipped
     skipped_branch: int | None = None
 
@@ -355,10 +157,10 @@ async def run_render(
                 bar.update(1)
                 continue
             skipped_branch = None
-            _sync_popup_close(popup, observed_pages, anchor)
-            if popup is not None and popup.page.is_closed() and not popup.close_handled:
+            stage.sync_popup_close()
+            if stage.popup_closed_unhandled():
                 raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
-            if _unexpected_pages(observed_pages, page, popup):
+            if stage.unexpected_pages():
                 raise RenderError(
                     step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
                 )
@@ -366,7 +168,7 @@ async def run_render(
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
 
-            active_page = _active_page(page, popup)
+            active_page = stage.active_page
             await active_page.bring_to_front()
             # Card-aware visual prep, ahead of the narration block: a `slide`
             # step paints (replacing any prior card); a `say` step keeps a live
@@ -376,22 +178,16 @@ async def run_render(
             # today's unconditional `_ensure_visuals` call (back-compat).
             if kind == "desktop":
                 assert step.desktop is not None  # guaranteed by command_kind()
-                if card is not None:
-                    await _assert_card_alive(active_page)
-                    await slide.hide(active_page)
-                    card = None
-
-                async def _reveal_shell(pg: Page = active_page) -> None:
-                    await _chrome_show(pg)
-
+                if stage.card is not None:
+                    await stage.hide_card(active_page)
                 await _play_desktop_opener(
-                    desktop,
-                    overlay,
+                    stage.desktop,
+                    stage.overlay,
                     active_page,
                     desktop_payloads[index],
                     hold=step.desktop.hold,
                     settle_ms=cfg.cursor.settle,
-                    reveal=_reveal_shell,
+                    reveal=partial(stage.chrome_show, active_page),
                     on_click=(sfx_sink if cfg.sound.enabled else None),
                 )
                 # The opener ends on the revealed chrome shell — normal visible
@@ -399,44 +195,27 @@ async def run_render(
                 # stays None).
             elif kind == "slide":
                 assert step.slide is not None  # guaranteed by command_kind()
-                if card is not None:
+                if stage.card is not None:
                     # Fail loud before repainting: a slide following a say whose
                     # card was destroyed mid-narration must NOT silently swap in a
-                    # fresh card over the wrong page (mirrors the generic dismiss
-                    # branch's token assert below).
-                    await _assert_card_alive(active_page)
-                    await slide.hide(active_page)
-                    await overlay.show(active_page)
-                    await _chrome_show(active_page)
-                card = {
-                    "title": step.slide.title,
-                    "subtitle": step.slide.subtitle,
-                    "notes": step.slide.notes,
-                }
-                await slide.show(active_page, card)
-                await overlay.hide(active_page)
-                await _chrome_hide(active_page)
-            elif kind == "say" and card is not None:
-                await _ensure_card(active_page)
-            elif card is not None:
-                await _assert_card_alive(active_page)
-                await slide.hide(active_page)
-                await overlay.show(active_page)
-                await _chrome_show(active_page)
-                card = None
-                await _ensure_visuals(
+                    # fresh card over the wrong page (`reveal_page` asserts the
+                    # token, exactly like the generic dismiss branch below).
+                    await stage.reveal_page(active_page)
+                await stage.show_card(
                     active_page,
-                    overlay,
-                    chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
+                    {
+                        "title": step.slide.title,
+                        "subtitle": step.slide.subtitle,
+                        "notes": step.slide.notes,
+                    },
                 )
+            elif kind == "say" and stage.card is not None:
+                await stage.ensure_card(active_page)
+            elif stage.card is not None:
+                await stage.reveal_page(active_page)
+                await stage.ensure_visuals(active_page, expect_chrome=stage.expect_chrome)
             else:
-                await _ensure_visuals(
-                    active_page,
-                    overlay,
-                    chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
-                )
+                await stage.ensure_visuals(active_page, expect_chrome=stage.expect_chrome)
 
             # --- absence probe / in-place resolution, ahead of the narration ----
             # An optional step that turns out to be absent must not narrate first
@@ -458,16 +237,18 @@ async def run_render(
             # chrome-disabled renders — never the shell document, which the shim
             # deliberately skips.
             probe_root: Page | Frame = (
-                site_frame if active_page is page and site_frame is not None else active_page
+                stage.site_frame
+                if active_page is stage.page and stage.site_frame is not None
+                else active_page
             )
-            if selects is not None and step.requires_target():
+            if stage.selects is not None and step.requires_target():
                 # Readiness barrier, the mirror of compile's: both the in-place
                 # resolution below and the frozen-target check inside
                 # ``_render_step`` must see the shimmed DOM, or render would drive
                 # a page compile never resolved against. Any navigation that led
                 # here has settled — it was an earlier step.
                 try:
-                    await selects.wait_ready(probe_root)
+                    await stage.selects.wait_ready(probe_root)
                 except SelectsNotReadyError as exc:
                     # The barrier sits outside every per-step ``except`` in this
                     # loop, so without this the one failure that stops a render
@@ -503,7 +284,7 @@ async def run_render(
                         tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
                     if pause_on_error:
                         await pause_for_inspection(
-                            _active_page(page, popup),
+                            stage.active_page,
                             "render",
                             index,
                             kind,
@@ -518,7 +299,7 @@ async def run_render(
             step_segments: list[Segment] = []
             # Recording-axis frame: the mapping onto the finished film needs the
             # complete edit list, which does not exist until the loop ends.
-            narration_frame = _stamp_frame(anchor, not_before=last_freeze_frame + 1)
+            narration_frame = _stamp_frame(stage.anchor, not_before=last_freeze_frame + 1)
             for tts in audio_configs:
                 seg = segments[tts.lang].get(index)
                 if seg is not None:
@@ -529,7 +310,7 @@ async def run_render(
                 # while shorter tracks naturally contain silence before the action.
                 emitted = await narration._pace_narration(
                     step_segments,
-                    anchor=anchor,
+                    anchor=stage.anchor,
                     hold_frame=cfg.hold_frame_for_narration,
                     settle=cfg.hold_frame_settle,
                     edits=time_edits,
@@ -538,11 +319,11 @@ async def run_render(
                 if emitted is not None:
                     last_freeze_frame = emitted
 
-            _sync_popup_close(popup, observed_pages, anchor)
-            if popup is not None and popup.page.is_closed() and not popup.close_handled:
+            stage.sync_popup_close()
+            if stage.popup_closed_unhandled():
                 raise RenderError("popup zamknął się asynchronicznie podczas narracji")
-            active_page = _active_page(page, popup)
-            if _unexpected_pages(observed_pages, page, popup):
+            active_page = stage.active_page
+            if stage.unexpected_pages():
                 raise RenderError(
                     step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
                 )
@@ -553,30 +334,23 @@ async def run_render(
             # destruction even when the say is the LAST step (the loop still fully
             # processes that step before exiting). When no card is active this is
             # exactly today's unconditional `_ensure_visuals` (back-compat).
-            if card is not None:
-                await _ensure_card(active_page)
+            if stage.card is not None:
+                await stage.ensure_card(active_page)
             else:
-                await _ensure_visuals(
-                    active_page,
-                    overlay,
-                    chrome,
-                    expect_chrome=(
-                        popup.wants_bar
-                        if popup is not None and active_page is popup.page
-                        else _expect_chrome(chrome, bare_popups)
-                    ),
+                await stage.ensure_visuals(
+                    active_page, expect_chrome=stage.expects_bar(active_page)
                 )
-            if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
+            if isinstance(cached, CachedAction) and cached.opens_popup and stage.popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
-            if kind == "closeWindow" and popup is None:
+            if kind == "closeWindow" and stage.popup is None:
                 raise RenderError(step_message(entry, index, "closeWindow bez otwartego okna"))
             # Main window drives the site iframe (a Frame); popups drive the page.
-            on_shell = active_page is page and site_frame is not None
+            on_shell = active_page is stage.page and stage.site_frame is not None
             recorder = Recorder(
                 active_page,
-                overlay,
+                stage.overlay,
                 settle_ms=cfg.cursor.settle,
-                frame=site_frame if on_shell else None,
+                frame=stage.site_frame if on_shell else None,
                 type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
                 type_jitter_ms=cfg.typing.jitter_ms,
                 type_max_delay_factor=cfg.typing.max_delay_factor,
@@ -591,65 +365,61 @@ async def run_render(
                 opened = await _step._render_step(
                     active_page,
                     recorder,
-                    overlay,
-                    chrome,
+                    stage.overlay,
+                    stage.chrome,
                     scenario,
                     step,
                     kind,
                     index,
                     cached,
-                    anchor,
-                    observed_pages,
-                    _ensure_card,
+                    stage.anchor,
+                    stage.observed_pages,
+                    stage.ensure_card,
                     entry=entry,
                     total=len(flat),
                     sensitive=sensitive_values,
-                    expect_chrome=(
-                        popup.wants_bar
-                        if popup is not None and active_page is popup.page
-                        else _expect_chrome(chrome, bare_popups)
-                    ),
+                    expect_chrome=stage.expects_bar(active_page),
                     resolved=resolved,
                     optional=optional,
                     scenario_hash=scenario_hash,
                     on_resolved=plan.persist_resolved,
                 )
                 if opened is not None:
-                    popup = opened
-                    popup.page.set_default_timeout(timeout * 1000)
-                    popup.is_blank_tab = not await _popup_window_opened(page)
-                    popup.wants_bar = chrome is not None and popup.is_blank_tab
+                    stage.popup = opened
+                    opened.page.set_default_timeout(timeout * 1000)
+                    opened.is_blank_tab = not await _popup_window_opened(stage.page)
+                    opened.wants_bar = stage.chrome is not None and opened.is_blank_tab
                     prepared = await _prepare_popup(
-                        popup.page,
-                        overlay,
-                        chrome,
-                        expect_chrome=_expect_chrome(chrome, bare_popups) or popup.wants_bar,
-                        mount_bar=popup.wants_bar,
+                        opened.page,
+                        stage.overlay,
+                        stage.chrome,
+                        expect_chrome=stage.expect_chrome or opened.wants_bar,
+                        mount_bar=opened.wants_bar,
                     )
-                    _sync_popup_close(popup, observed_pages, anchor)
+                    stage.sync_popup_close()
                     if not prepared:
                         raise RenderError("popup zamknął się podczas otwierania")
                     # The popup now owns the cursor (it mounted its own); stop
                     # painting a second one in the main window behind it.
-                    await _hand_cursor_to_popup(page, popup, overlay)
-                if page.is_closed():
+                    await _hand_cursor_to_popup(stage.page, opened, stage.overlay)
+                if stage.page.is_closed():
                     raise RenderError("główne okno zostało zamknięte podczas render")
-                _sync_popup_close(popup, observed_pages, anchor)
-                if popup is not None and popup.page.is_closed():
-                    if not popup.close_handled:
+                stage.sync_popup_close()
+                if stage.popup is not None and stage.popup.page.is_closed():
+                    if not stage.popup.close_handled:
                         if opened is not None or kind in {"say", "navigate", "wait", "slide"}:
                             raise RenderError(
                                 "popup zamknął się asynchronicznie poza obsługiwaną akcją"
                             )
-                        popup.close_handled = True
+                        stage.popup.close_handled = True
                         await visuals._prepare_main_after_popup_close(
-                            page,
-                            overlay,
-                            chrome,
+                            stage.page,
+                            stage.overlay,
+                            stage.chrome,
                             cfg.cursor.settle,
-                            restore_cursor_to=popup.main_cursor_pos,
+                            restore_cursor_to=stage.popup.main_cursor_pos,
                         )
-                if _unexpected_pages(observed_pages, page, popup):
+                if stage.unexpected_pages():
                     raise RenderError(
                         step_message(
                             entry, index, "nieoczekiwany popup — uruchom `compile --force`"
@@ -666,9 +436,8 @@ async def run_render(
                 if verbose:
                     tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
                 if pause_on_error:
-                    debug_page = _active_page(page, popup)
                     await pause_for_inspection(
-                        debug_page,
+                        stage.active_page,
                         "render",
                         index,
                         kind,
@@ -684,36 +453,18 @@ async def run_render(
         # this post-roll, a static last page can leave the VFR recording a fraction
         # shorter than the audio timeline and make the final syllable trimmable.
         await asyncio.sleep(_VIDEO_POSTROLL_SECONDS)
-        postroll_page = _active_page(page, popup)
+        postroll_page = stage.active_page
         await postroll_page.screenshot()
-        _sync_popup_close(popup, observed_pages, anchor)
-        if page.is_closed():
+        stage.sync_popup_close()
+        if stage.page.is_closed():
             raise RenderError("główne okno zostało zamknięte na końcu scenariusza")
-        if _unexpected_pages(observed_pages, page, popup):
+        if stage.unexpected_pages():
             raise RenderError("nieoczekiwany popup na końcu scenariusza")
-        if popup is not None and popup.page.is_closed() and not popup.close_handled:
+        if stage.popup_closed_unhandled():
             raise RenderError("popup zamknął się asynchronicznie na końcu scenariusza")
     finally:
         bar.close()
-        _sync_popup_close(popup, observed_pages, anchor)
-        if popup is not None and popup.closed_at is None:
-            popup_open_at_end = True
-            popup.closed_at = max(popup.opened_at, time.monotonic() - anchor)
-        if popup is not None:
-            # Last moment the popup's DOM can still answer: the context (and with
-            # it every page) is closed a few lines below. The probe was started
-            # when the popup opened, so this normally settles instantly.
-            await _settle_popup_content_box(popup)
-        prime_tasks = [
-            observation.visual_prime
-            for observation in observed_pages.values()
-            if observation.visual_prime is not None
-        ]
-        for task in prime_tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*prime_tasks, return_exceptions=True)
-        await context.close()
+        await _close_stage(stage)
 
     sfx_frames: list[tuple[str, int]] = []
     if cfg.sound.enabled:
@@ -726,7 +477,8 @@ async def run_render(
                 raise RenderError(f"ujemna klatka SFX ({frame}) — błąd zegara renderu")
             sfx_frames.append((kind, frame))
 
-    main_webm = Path(await video.path())
+    main_webm = Path(await stage.video.path())
+    popup = stage.popup
     if popup is None:
         source_video = main_webm
         preencoded = False
@@ -761,7 +513,9 @@ async def run_render(
             transition = "slide"
             if verbose:
                 tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
-        closed_at = mux_probe.probe_duration(main_webm) if popup_open_at_end else popup.closed_at
+        closed_at = (
+            mux_probe.probe_duration(main_webm) if stage.popup_open_at_end else popup.closed_at
+        )
         assert closed_at is not None
         composite = work / f"{out_mp4.stem}.composite.mp4"
         compose_popup_video(
@@ -780,7 +534,7 @@ async def run_render(
             backdrop_blur=cfg.popup.backdrop_blur,
             open_ms=cfg.popup.open_ms,
             close_ms=cfg.popup.close_ms,
-            hold_open_at_end=popup_open_at_end,
+            hold_open_at_end=stage.popup_open_at_end,
             popup_crop=popup_crop,
         )
         source_video = composite
