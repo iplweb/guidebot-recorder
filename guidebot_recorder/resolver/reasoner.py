@@ -356,23 +356,35 @@ def _reject_non_finite_number(value: str) -> Any:
     raise ValueError(f"Codex frame contains non-finite JSON number: {value}")
 
 
-def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerError:
-    if "error" in payload:
-        if set(payload) != {"error", "message"}:
-            raise ValueError("Error response must contain only error and message")
-        reason = payload["error"]
-        message = payload["message"]
-        if not isinstance(reason, str) or reason not in _ERROR_REASONS:
-            raise ValueError(f"Unsupported reasoner error: {reason!r}")
-        if not isinstance(message, str):
-            raise ValueError("Reasoner error message must be a string")
-        return ReasonerError(reason=cast(ErrorReason, reason), message=message)
+def _error_from_payload(payload: dict[str, Any]) -> ReasonerError:
+    """Read the error arm of a reasoner frame, or reject it.
 
-    action = payload.get("action")
-    if not isinstance(action, str) or action not in _ACTIONS:
-        raise ValueError(f"Unsupported reasoner action: {action!r}")
+    The arm is exact-keyed on purpose: an ``error`` alongside an ``action`` is a
+    model that answered two questions at once, and guessing which one it meant is
+    how a wrong target gets frozen.
+    """
 
-    input_text: str | None = None
+    if set(payload) != {"error", "message"}:
+        raise ValueError("Error response must contain only error and message")
+    reason = payload["error"]
+    message = payload["message"]
+    if not isinstance(reason, str) or reason not in _ERROR_REASONS:
+        raise ValueError(f"Unsupported reasoner error: {reason!r}")
+    if not isinstance(message, str):
+        raise ValueError("Reasoner error message must be a string")
+    return ReasonerError(reason=cast(ErrorReason, reason), message=message)
+
+
+def _input_text_from_payload(payload: dict[str, Any], action: str) -> str | None:
+    """Return the literal a ``type`` answer wants entered, checking its field set.
+
+    Both halves live here because they are one contract: ``type`` is the only
+    action allowed to carry ``inputText``, so the permitted field set differs by
+    action and the two checks must stay keyed to the same branch. ``None`` means
+    the step supplies the text itself (``teach``), which is why an absent
+    ``inputText`` is legal but an empty one is not.
+    """
+
     if action == "type":
         if set(payload) not in _TYPE_KEY_SETS:
             raise ValueError("Type response contains unsupported fields")
@@ -380,9 +392,21 @@ def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerEr
             raw_input_text = payload["inputText"]
             if not isinstance(raw_input_text, str) or not raw_input_text.strip():
                 raise ValueError("Type response inputText must be a non-empty string")
-            input_text = raw_input_text
+            return raw_input_text
     elif set(payload) not in _ACTION_KEY_SETS:
         raise ValueError("Non-type response must contain only action, target and candidateId")
+    return None
+
+
+def _result_from_payload(payload: dict[str, Any]) -> ReasonerResult | ReasonerError:
+    if "error" in payload:
+        return _error_from_payload(payload)
+
+    action = payload.get("action")
+    if not isinstance(action, str) or action not in _ACTIONS:
+        raise ValueError(f"Unsupported reasoner action: {action!r}")
+
+    input_text = _input_text_from_payload(payload, action)
 
     candidate_id: str | None = None
     if "candidateId" in payload:

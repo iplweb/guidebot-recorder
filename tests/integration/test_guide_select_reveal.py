@@ -116,10 +116,14 @@ class SelectReasoner:
 # RGBA.
 
 
-def _read_png(path: Path) -> tuple[int, int, list[list[tuple[int, int, int]]]]:
-    """Decode a PNG into row-major ``(r, g, b)`` tuples."""
+def _png_chunks(data: bytes) -> tuple[int, int, int, bytes]:
+    """Walk the chunk stream, returning ``(width, height, channels, idat)``.
 
-    data = path.read_bytes()
+    ``IDAT`` may legally be split across several chunks, so they are concatenated
+    before inflating; every other chunk type is skipped, which is why the whole
+    ancillary half of the format (``pHYs``, ``tEXt``, …) needs no handling.
+    """
+
     assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
     pos, idat = 8, bytearray()
     width = height = channels = 0
@@ -136,7 +140,48 @@ def _read_png(path: Path) -> tuple[int, int, list[list[tuple[int, int, int]]]]:
             idat += chunk
         elif kind == b"IEND":
             break
-    raw = zlib.decompress(bytes(idat))
+    return width, height, channels, bytes(idat)
+
+
+def _unfilter_scanline(
+    line: bytearray, previous: bytearray, filter_type: int, channels: int
+) -> None:
+    """Reconstruct one filtered scanline in place (PNG spec §9.2).
+
+    ``line`` is the raw filtered bytes and comes back reconstructed; ``previous``
+    is the already-reconstructed line above, all zeroes for the first row. Filter
+    type 0 (None) is the missing branch and needs none: the bytes are already the
+    reconstruction. Bytes to the left of the first pixel count as zero, which is
+    what every ``x >= channels`` guard below is saying.
+    """
+
+    stride = len(line)
+    if filter_type == 1:  # Sub
+        for x in range(channels, stride):
+            line[x] = (line[x] + line[x - channels]) & 0xFF
+    elif filter_type == 2:  # Up
+        for x in range(stride):
+            line[x] = (line[x] + previous[x]) & 0xFF
+    elif filter_type == 3:  # Average
+        for x in range(stride):
+            left = line[x - channels] if x >= channels else 0
+            line[x] = (line[x] + ((left + previous[x]) >> 1)) & 0xFF
+    elif filter_type == 4:  # Paeth
+        for x in range(stride):
+            a = line[x - channels] if x >= channels else 0
+            b = previous[x]
+            c = previous[x - channels] if x >= channels else 0
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            predictor = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+            line[x] = (line[x] + predictor) & 0xFF
+
+
+def _read_png(path: Path) -> tuple[int, int, list[list[tuple[int, int, int]]]]:
+    """Decode a PNG into row-major ``(r, g, b)`` tuples."""
+
+    width, height, channels, idat = _png_chunks(path.read_bytes())
+    raw = zlib.decompress(idat)
     stride = width * channels
     rows: list[list[tuple[int, int, int]]] = []
     previous = bytearray(stride)
@@ -146,25 +191,7 @@ def _read_png(path: Path) -> tuple[int, int, list[list[tuple[int, int, int]]]]:
         offset += 1
         line = bytearray(raw[offset : offset + stride])
         offset += stride
-        if filter_type == 1:
-            for x in range(channels, stride):
-                line[x] = (line[x] + line[x - channels]) & 0xFF
-        elif filter_type == 2:
-            for x in range(stride):
-                line[x] = (line[x] + previous[x]) & 0xFF
-        elif filter_type == 3:
-            for x in range(stride):
-                left = line[x - channels] if x >= channels else 0
-                line[x] = (line[x] + ((left + previous[x]) >> 1)) & 0xFF
-        elif filter_type == 4:
-            for x in range(stride):
-                a = line[x - channels] if x >= channels else 0
-                b = previous[x]
-                c = previous[x - channels] if x >= channels else 0
-                p = a + b - c
-                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
-                predictor = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-                line[x] = (line[x] + predictor) & 0xFF
+        _unfilter_scanline(line, previous, filter_type, channels)
         rows.append(
             [
                 (line[x * channels], line[x * channels + 1], line[x * channels + 2])

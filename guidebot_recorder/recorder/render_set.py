@@ -17,7 +17,7 @@ from guidebot_recorder.recorder.compile import (
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
-from guidebot_recorder.scenario.render_set import RenderSetPlan
+from guidebot_recorder.scenario.render_set import RenderSetPlan, RenderSetVariantPlan
 from guidebot_recorder.tts.base import TtsProvider
 
 
@@ -118,6 +118,67 @@ def _overlaps(first: Path, second: Path) -> bool:
     return _contains(first, second) or _contains(second, first)
 
 
+def _resolved_variant_paths(root: Path, variant: RenderSetVariantPlan) -> tuple[Path, Path]:
+    """One variant's final MP4 and its private render workspace, both inside ``root``.
+
+    Two separate escape gates, because they fail independently: the output's
+    parent directory may resolve inside ``--output-dir`` while
+    ``.guidebot_video`` beside it is a symlink pointing out of the tree.
+    """
+
+    requested = root / variant.output
+    parent = requested.parent.resolve()
+    try:
+        parent.relative_to(root)
+    except ValueError:
+        raise RenderSetError(
+            f"output wariantu {variant.language} wychodzi poza --output-dir po rozwiązaniu "
+            "linków symbolicznych"
+        ) from None
+    output = parent / requested.name
+    workspace = (parent / ".guidebot_video" / output.stem).resolve()
+    try:
+        workspace.relative_to(root)
+    except ValueError:
+        raise RenderSetError(
+            f"katalog roboczy wariantu {variant.language} wychodzi poza --output-dir"
+        ) from None
+    return output, workspace
+
+
+def _reject_output_overlaps(outputs: list[Path]) -> None:
+    """Reject two variants that would write their MP4 to the same place."""
+
+    for index, output in enumerate(outputs):
+        for other in outputs[index + 1 :]:
+            if _overlaps(output, other):
+                raise RenderSetError(
+                    "docelowe MP4 wariantów kolidują po rozwiązaniu ścieżek lub linków "
+                    "symbolicznych"
+                )
+
+
+def _reject_workspace_overlaps(workspaces: list[Path], outputs: list[Path]) -> None:
+    """Reject a workspace that would swallow another variant's workspace or MP4.
+
+    The two loops are interleaved per workspace, not run one after the other, and
+    that order is load-bearing: a workspace can collide with both a later
+    workspace and some variant's MP4 at once, and the workspace×workspace rule is
+    the one that must speak. ``test_render_set_rejects_workspaces_overlapping_
+    without_output_collision`` pins exactly that case.
+    """
+
+    for index, workspace in enumerate(workspaces):
+        for other in workspaces[index + 1 :]:
+            if _overlaps(workspace, other):
+                raise RenderSetError("katalogi robocze wariantów nakładają się")
+        for output in outputs:
+            if _overlaps(workspace, output):
+                raise RenderSetError(
+                    "docelowy MP4 wariantu koliduje z katalogiem roboczym innego wariantu"
+                )
+
+
 def render_set_output_paths(
     plan: RenderSetPlan,
     out_dir: Path | str,
@@ -128,42 +189,12 @@ def render_set_output_paths(
     outputs: list[Path] = []
     workspaces: list[Path] = []
     for variant in plan.variants:
-        requested = root / variant.output
-        parent = requested.parent.resolve()
-        try:
-            parent.relative_to(root)
-        except ValueError:
-            raise RenderSetError(
-                f"output wariantu {variant.language} wychodzi poza --output-dir po rozwiązaniu "
-                "linków symbolicznych"
-            ) from None
-        output = parent / requested.name
-        workspace = (parent / ".guidebot_video" / output.stem).resolve()
-        try:
-            workspace.relative_to(root)
-        except ValueError:
-            raise RenderSetError(
-                f"katalog roboczy wariantu {variant.language} wychodzi poza --output-dir"
-            ) from None
+        output, workspace = _resolved_variant_paths(root, variant)
         outputs.append(output)
         workspaces.append(workspace)
 
-    for index, output in enumerate(outputs):
-        for other in outputs[index + 1 :]:
-            if _overlaps(output, other):
-                raise RenderSetError(
-                    "docelowe MP4 wariantów kolidują po rozwiązaniu ścieżek lub linków "
-                    "symbolicznych"
-                )
-    for index, workspace in enumerate(workspaces):
-        for other in workspaces[index + 1 :]:
-            if _overlaps(workspace, other):
-                raise RenderSetError("katalogi robocze wariantów nakładają się")
-        for output in outputs:
-            if _overlaps(workspace, output):
-                raise RenderSetError(
-                    "docelowy MP4 wariantu koliduje z katalogiem roboczym innego wariantu"
-                )
+    _reject_output_overlaps(outputs)
+    _reject_workspace_overlaps(workspaces, outputs)
     return tuple(outputs)
 
 

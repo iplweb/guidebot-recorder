@@ -263,6 +263,74 @@ async def is_sensitive_type_target(locator: Locator) -> bool:
     return not isinstance(text, str) or _SENSITIVE_FIELD_METADATA.search(text) is not None
 
 
+async def _presence_failure(locator: Locator, action: ActionKind) -> ValidationFail | None:
+    """Return why the locator does not name one visible element, or ``None``.
+
+    The checks every supported action shares: it exists, it is the only match,
+    and the viewer can see it. ``None`` means the element itself is fine and the
+    action-specific gates in :func:`_action_gate_failure` may run.
+    """
+
+    count = await locator.count()
+    if count == 0:
+        return ValidationFail("not_found", "The target locator matched no elements.")
+    if count != 1:
+        return ValidationFail(
+            "not_unique", f"The target locator matched {count} elements; expected 1."
+        )
+
+    if action == "select":
+        # A page may hide the real <select> and render its own dropdown
+        # (select2 clips it to 1x1 px — already "visible" by Playwright's
+        # rule below; Tom Select sets display:none, which is not). What
+        # matters for `select` is whether the viewer sees *some* control
+        # for it, not whether this exact element is on screen.
+        control = await user_visible_control(locator)
+        if control is None:
+            return ValidationFail("not_visible", "The matched element is not visible.")
+        # Only its existence was the question; the handle would otherwise
+        # pin the element for the life of the context (see the ownership
+        # note on `associated_control`).
+        await control.dispose()
+    elif not await locator.is_visible():
+        return ValidationFail("not_visible", "The matched element is not visible.")
+    return None
+
+
+async def _action_gate_failure(
+    locator: Locator, action: ActionKind, option: str | None
+) -> ValidationFail | None:
+    """Return why this *action* cannot drive the element, or ``None``.
+
+    The gates keyed to an action that touches the page — text-entry
+    compatibility, native ``<select>``-ness, enabled, editable, and the wanted
+    option label. Each is skipped for actions it does not apply to, which is why
+    ``highlight`` (which only draws) never reaches any of them.
+    """
+
+    if action == "type" and not await _is_type_compatible(locator):
+        return ValidationFail("incompatible_type", "The type action requires a text-entry element.")
+
+    if action == "select" and not await _is_native_select(locator):
+        return ValidationFail("not_select", "The select action requires a native <select> element.")
+
+    if action in ("click", "type", "select") and not await locator.is_enabled():
+        return ValidationFail("not_enabled", "The matched element is disabled.")
+
+    if action == "type" and not await locator.is_editable():
+        return ValidationFail("not_editable", "The matched element is not editable.")
+
+    # Where a select has no accessible name the resolver can only freeze it
+    # positionally (combobox nth=N), and that index drifts with the DOM. The
+    # wanted option is the semantic check that catches the drift — without it
+    # a wrong-but-plausible dropdown only fails later, as a 15s timeout.
+    if action == "select" and option is not None and not await _is_page_enhanced(locator):
+        labels = await _select_option_labels(locator)
+        if not _offers_option(labels, option):
+            return ValidationFail("option_missing", _option_missing_message(option, labels))
+    return None
+
+
 async def validate_compile_time(
     page: Page | Frame, target: Target, action: ActionKind, option: str | None = None
 ) -> ValidationOk | ValidationFail:
@@ -278,61 +346,22 @@ async def validate_compile_time(
     """
 
     # `highlight` only draws over the element, so it stops at the checks every
-    # action shares (exists / unique / visible); the enabled, editable and
-    # native-<select> gates below are each keyed to an action that touches the page.
+    # action shares (`_presence_failure`: exists / unique / visible); the enabled,
+    # editable and native-<select> gates (`_action_gate_failure`) are each keyed
+    # to an action that touches the page. That split is what the two helpers are.
     if action not in ("click", "hover", "type", "waitFor", "select", "highlight"):
         return ValidationFail("unsupported_action", f"Unsupported action kind: {action!r}.")
 
     try:
         locator = await build_locator(page, target)
-        count = await locator.count()
-        if count == 0:
-            return ValidationFail("not_found", "The target locator matched no elements.")
-        if count != 1:
-            return ValidationFail(
-                "not_unique", f"The target locator matched {count} elements; expected 1."
-            )
 
-        if action == "select":
-            # A page may hide the real <select> and render its own dropdown
-            # (select2 clips it to 1x1 px — already "visible" by Playwright's
-            # rule below; Tom Select sets display:none, which is not). What
-            # matters for `select` is whether the viewer sees *some* control
-            # for it, not whether this exact element is on screen.
-            control = await user_visible_control(locator)
-            if control is None:
-                return ValidationFail("not_visible", "The matched element is not visible.")
-            # Only its existence was the question; the handle would otherwise
-            # pin the element for the life of the context (see the ownership
-            # note on `associated_control`).
-            await control.dispose()
-        elif not await locator.is_visible():
-            return ValidationFail("not_visible", "The matched element is not visible.")
+        failure = await _presence_failure(locator, action)
+        if failure is not None:
+            return failure
 
-        if action == "type" and not await _is_type_compatible(locator):
-            return ValidationFail(
-                "incompatible_type", "The type action requires a text-entry element."
-            )
-
-        if action == "select" and not await _is_native_select(locator):
-            return ValidationFail(
-                "not_select", "The select action requires a native <select> element."
-            )
-
-        if action in ("click", "type", "select") and not await locator.is_enabled():
-            return ValidationFail("not_enabled", "The matched element is disabled.")
-
-        if action == "type" and not await locator.is_editable():
-            return ValidationFail("not_editable", "The matched element is not editable.")
-
-        # Where a select has no accessible name the resolver can only freeze it
-        # positionally (combobox nth=N), and that index drifts with the DOM. The
-        # wanted option is the semantic check that catches the drift — without it
-        # a wrong-but-plausible dropdown only fails later, as a 15s timeout.
-        if action == "select" and option is not None and not await _is_page_enhanced(locator):
-            labels = await _select_option_labels(locator)
-            if not _offers_option(labels, option):
-                return ValidationFail("option_missing", _option_missing_message(option, labels))
+        failure = await _action_gate_failure(locator, action, option)
+        if failure is not None:
+            return failure
 
         # Close the largest count/check race window. The DOM can always mutate
         # after this function returns, so execution performs its own checks too.

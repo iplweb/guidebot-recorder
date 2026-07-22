@@ -8,7 +8,9 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from ruamel.yaml import YAML
 
+from guidebot_recorder.models.config import Config
 from guidebot_recorder.models.render_set import LocalizedRenderSet
+from guidebot_recorder.models.scenario import Scenario
 from guidebot_recorder.scenario.compiled import compiled_path
 from guidebot_recorder.scenario.loader import ScenarioValidationError, load_scenario
 
@@ -57,6 +59,57 @@ def _portable_relative_path(
         expected = " lub ".join(suffixes)
         raise RenderSetValidationError(f"{field} musi kończyć się na {expected}: {raw}")
     return Path(*portable.parts)
+
+
+def _load_variant_scenario(
+    scenario_path: Path,
+    env: Mapping[str, str] | None,
+    *,
+    language: str,
+    declared_scenario: str,
+) -> Scenario:
+    """Load one variant's scenario, keeping substituted ``${ENV}`` values out of errors."""
+
+    try:
+        return load_scenario(scenario_path, env)
+    except ScenarioValidationError:
+        # Banner jest bezpieczny do pokazania w całości: snippet pochodzi
+        # sprzed podstawienia ${ENV}, a treść składa się wyłącznie z nazw
+        # kluczy — inaczej niż surowe `pydantic.ValidationError`, które
+        # niesie `input_value=…`, czyli wartości już podstawione. Ścieżka
+        # w nagłówku sama wskazuje wariant, więc nic nie trzeba doklejać.
+        raise
+    except Exception as exc:
+        raise RenderSetValidationError(
+            f"wariant {language}: nie można wczytać {declared_scenario} "
+            f"({type(exc).__name__}); sprawdź poprawność scenariusza"
+        ) from None
+
+
+def _check_variant_config(language: str, cfg: Config) -> None:
+    """Reject a scenario whose own config contradicts the variant key it is filed under.
+
+    The language key of the manifest is the single source of truth; a scenario
+    that disagrees would render under one name and speak in another.
+    """
+
+    if cfg.locale != language:
+        raise RenderSetValidationError(
+            f"wariant {language}: config.locale musi być równe kluczowi wariantu"
+        )
+    if cfg.tts.lang != language:
+        raise RenderSetValidationError(
+            f"wariant {language}: config.tts.lang musi być równe kluczowi wariantu"
+        )
+    if cfg.tts.track_language is None:
+        raise RenderSetValidationError(
+            f"wariant {language}: config.tts.trackLanguage jest wymagane"
+        )
+    if cfg.audio_tracks:
+        raise RenderSetValidationError(
+            f"wariant {language}: render-set wymaga dokładnie jednej ścieżki; "
+            "usuń config.audioTracks"
+        )
 
 
 def load_render_set(
@@ -119,38 +172,14 @@ def load_render_set(
         compiled_keys.add(compiled_key)
         output_keys.add(output_key)
 
-        try:
-            scenario = load_scenario(scenario_path, env)
-        except ScenarioValidationError:
-            # Banner jest bezpieczny do pokazania w całości: snippet pochodzi
-            # sprzed podstawienia ${ENV}, a treść składa się wyłącznie z nazw
-            # kluczy — inaczej niż surowe `pydantic.ValidationError`, które
-            # niesie `input_value=…`, czyli wartości już podstawione. Ścieżka
-            # w nagłówku sama wskazuje wariant, więc nic nie trzeba doklejać.
-            raise
-        except Exception as exc:
-            raise RenderSetValidationError(
-                f"wariant {language}: nie można wczytać {declared.scenario} "
-                f"({type(exc).__name__}); sprawdź poprawność scenariusza"
-            ) from None
+        scenario = _load_variant_scenario(
+            scenario_path,
+            env,
+            language=language,
+            declared_scenario=declared.scenario,
+        )
         cfg = scenario.config
-        if cfg.locale != language:
-            raise RenderSetValidationError(
-                f"wariant {language}: config.locale musi być równe kluczowi wariantu"
-            )
-        if cfg.tts.lang != language:
-            raise RenderSetValidationError(
-                f"wariant {language}: config.tts.lang musi być równe kluczowi wariantu"
-            )
-        if cfg.tts.track_language is None:
-            raise RenderSetValidationError(
-                f"wariant {language}: config.tts.trackLanguage jest wymagane"
-            )
-        if cfg.audio_tracks:
-            raise RenderSetValidationError(
-                f"wariant {language}: render-set wymaga dokładnie jednej ścieżki; "
-                "usuń config.audioTracks"
-            )
+        _check_variant_config(language, cfg)
         providers.add(cfg.tts.provider)
         variants.append(
             RenderSetVariantPlan(
