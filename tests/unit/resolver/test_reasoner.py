@@ -15,6 +15,7 @@ from guidebot_recorder.resolver.reasoner import (
     _build_prompt,
     _parse_framed,
     _response_schema_json,
+    _result_from_payload,
 )
 
 
@@ -187,6 +188,67 @@ async def test_resolve_returns_explicit_no_action_error(
     assert result == ReasonerError(
         reason="no_action", message="Instrukcja nie opisuje żadnej akcji."
     )
+
+
+_TARGET: dict[str, object] = {"strategy": "role", "role": "button", "name": "Zaloguj"}
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"error": "no_action"}, "Error response must contain only error and message"),
+        (
+            {"error": "no_action", "message": "Brak akcji.", "candidateId": "candidate-abc"},
+            "Error response must contain only error and message",
+        ),
+        ({"error": "nie_wiem", "message": "Brak akcji."}, "Unsupported reasoner error: 'nie_wiem'"),
+        ({"error": 7, "message": "Brak akcji."}, "Unsupported reasoner error: 7"),
+        ({"error": "no_action", "message": 7}, "Reasoner error message must be a string"),
+        (
+            {"action": "teleport", "target": _TARGET},
+            "Unsupported reasoner action: 'teleport'",
+        ),
+        ({"action": 7, "target": _TARGET}, "Unsupported reasoner action: 7"),
+        (
+            {"action": "type", "target": _TARGET, "temperature": 0.7},
+            "Type response contains unsupported fields",
+        ),
+    ],
+)
+def test_result_from_payload_rejects_each_malformed_arm_with_its_own_message(
+    payload: dict[str, object],
+    message: str,
+):
+    """Pin every rejection message of the two-arm union, branch by branch.
+
+    Most of these branches were never executed by any test: only the happy paths
+    were pinned (end-to-end, through ``CodexReasoner.resolve``). The error arm is
+    about to be extracted into its own helper, and a dropped branch or a reworded
+    message would go unnoticed today.
+
+    Deliberately called directly rather than through ``resolve``: that path retries
+    ``_MAX_ATTEMPTS`` times and re-wraps whatever fired into one generic
+    ``ValueError``, so a test written that way passes no matter which branch —
+    or whether the right one — raised.
+    """
+
+    with pytest.raises(ValueError) as excinfo:
+        _result_from_payload(payload)
+
+    assert str(excinfo.value) == message
+
+
+def test_result_from_payload_returns_the_error_arm_verbatim():
+    """The error arm's happy path, pinned at the unit the refactor will move.
+
+    ``test_resolve_returns_explicit_no_action_error`` covers the same payload, but
+    only end-to-end through ``resolve``; this one holds once the arm lives in a
+    separate helper.
+    """
+
+    result = _result_from_payload({"error": "no_handle", "message": "Brak uchwytu."})
+
+    assert result == ReasonerError(reason="no_handle", message="Brak uchwytu.")
 
 
 @pytest.mark.parametrize(

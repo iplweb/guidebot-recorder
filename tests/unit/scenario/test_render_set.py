@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import textwrap
+import traceback
+from collections.abc import Mapping
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -115,6 +118,66 @@ def test_load_render_set_does_not_expose_substituted_secret_in_validation_error(
     assert secret not in repr(captured.value)
     assert "${PASSWORD}" in str(captured.value)
     assert "en.scenario.yaml:" in str(captured.value)
+
+
+def test_load_render_set_redacts_secret_from_non_validation_load_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wyjątek spoza ``ScenarioValidationError`` gubi treść, zostaje sama nazwa typu.
+
+    To druga — dotąd niepokryta testem — gałąź `try`/`except` wokół
+    ``load_scenario``. Siostrzany test powyżej pilnuje gałęzi
+    ``ScenarioValidationError`` (banner, bezpieczny w całości); tutaj chodzi
+    o wszystko inne, co może wypaść z wczytywania *po* podstawieniu ``${ENV}``:
+    surowy ``pydantic.ValidationError`` z ``input_value=…``, ``OSError`` ze
+    ścieżką, cokolwiek. Redakcja stoi na dwóch szczegółach, które łatwo zgubić
+    przy przenoszeniu tej gałęzi do helpera: komunikat składa się wyłącznie
+    z ``type(exc).__name__`` (nigdy ``str(exc)``), a ``raise ... from None``
+    ucina łańcuch, żeby oryginał nie wypłynął w tracebacku do logów.
+    Gdyby którykolwiek zniknął, sekret trafiłby do wyjścia i nic by nie padło.
+    """
+
+    secret = "sentinel-password-that-must-not-leak"
+
+    def _fail_after_substitution(
+        scenario_path: Path, env: Mapping[str, str] | None = None
+    ) -> NoReturn:
+        # Udajemy wyjątek, który — jak `pydantic.ValidationError` — niesie
+        # w treści wartość już po podstawieniu ${ENV}, a nie samą nazwę klucza.
+        assert env is not None
+        raise RuntimeError(f"input_value={env['PASSWORD']!r}")
+
+    monkeypatch.setattr(
+        "guidebot_recorder.scenario.render_set.load_scenario",
+        _fail_after_substitution,
+    )
+    (tmp_path / "en.scenario.yaml").write_text(
+        _scenario("en-US").replace(
+            '- say: "Narration in en-US"',
+            '- enterText: {text: "${PASSWORD}"}',
+        ),
+        encoding="utf-8",
+    )
+    manifest = _write_set(
+        tmp_path,
+        "      en-US: {scenario: en.scenario.yaml, output: en.mp4}",
+    )
+
+    with pytest.raises(RenderSetValidationError) as captured:
+        load_render_set(manifest, {"PASSWORD": secret})
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert secret not in str(captured.value)
+    assert secret not in repr(captured.value)
+    assert secret not in rendered
+    # `from None` — nie ma przyczyny do wypisania, a kontekst jest wygaszony,
+    # więc oryginalny RuntimeError nie dojdzie do tracebacku ani do logów.
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__ is True
+    assert str(captured.value) == (
+        "wariant en-US: nie można wczytać en.scenario.yaml "
+        "(RuntimeError); sprawdź poprawność scenariusza"
+    )
 
 
 @pytest.mark.parametrize(

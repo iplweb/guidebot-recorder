@@ -239,6 +239,72 @@ def test_render_set_rejects_output_symlink_escape_and_alias_collision(tmp_path: 
         render_set_output_paths(aliased, out_dir)
 
 
+def test_render_set_rejects_workspace_symlink_escape(tmp_path: Path) -> None:
+    """Bramka ucieczki *katalogu roboczego* poza `--output-dir` — dotąd bez testu.
+
+    Output wariantu jest zwyczajny i leży w `--output-dir`; poza katalog wychodzi
+    dopiero prywatny `.guidebot_video/<stem>`, bo `.guidebot_video` jest dowiązaniem
+    na zewnątrz. Bez tego przypadku render pisałby pliki tymczasowe (a potem
+    kasował je) w cudzym drzewie, a testy by tego nie zauważyły.
+
+    Nadchodzący refaktor przenosi ten `raise` do osobnego resolvera ścieżek
+    wariantu — zgubienie go byłoby ciche, bo pierwsza bramka (`output ... wychodzi
+    poza --output-dir`) tu nie działa i nic by nie rzuciło.
+    """
+
+    plan = _plan(tmp_path)
+    out_dir = tmp_path / "out"
+    outside = tmp_path / "outside"
+    out_dir.mkdir()
+    outside.mkdir()
+    (out_dir / ".guidebot_video").symlink_to(outside, target_is_directory=True)
+
+    escaping = replace(
+        plan,
+        variants=(replace(plan.variants[0], output=Path("login.mp4")),),
+    )
+
+    with pytest.raises(
+        RenderSetError,
+        match=r"^katalog roboczy wariantu pl-PL wychodzi poza --output-dir$",
+    ):
+        render_set_output_paths(escaping, out_dir)
+
+
+def test_render_set_rejects_workspaces_overlapping_without_output_collision(
+    tmp_path: Path,
+) -> None:
+    """Bramka nakładania się *katalogów roboczych* — dotąd bez testu.
+
+    Osiągalna przez publiczne API i przez manifest: oba outputy są względne, bez
+    `..`, z rozszerzeniem `.mp4` i różne, więc wcześniejsza bramka kolizji MP4
+    milczy. Nakładają się dopiero prywatne katalogi robocze — `out/.guidebot_video/x`
+    jest przedrostkiem `out/.guidebot_video/x/y/.guidebot_video/b` — bo drugi wariant
+    celuje wprost w katalog `.guidebot_video`, który pierwszy wariant traktuje jako
+    swój warsztat. Dwa równoległe rendery deptałyby sobie po plikach tymczasowych.
+
+    Kolejność bramek jest tu istotna i też jest przedmiotem tego testu: `workspace`
+    pierwszego wariantu koliduje również z *outputem* drugiego, ale pętla
+    workspace × workspace biegnie wcześniej, więc komunikat musi być ten o
+    katalogach roboczych, nie ten o MP4 kolidującym z katalogiem roboczym.
+    Refaktor przenosi ten `raise` do osobnego checkera nakładania się — bez testu
+    zniknięcie bramki albo odwrócenie kolejności przeszłoby niezauważone.
+    """
+
+    plan = _plan(tmp_path)
+    first, second = plan.variants[:2]
+    overlapping = replace(
+        plan,
+        variants=(
+            replace(first, output=Path("x.mp4")),
+            replace(second, output=Path(".guidebot_video/x/y/b.mp4")),
+        ),
+    )
+
+    with pytest.raises(RenderSetError, match=r"^katalogi robocze wariantów nakładają się$"):
+        render_set_output_paths(overlapping, tmp_path / "out")
+
+
 async def test_render_set_redacts_enter_text_value_from_wrapped_runtime_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
