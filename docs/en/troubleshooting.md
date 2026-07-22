@@ -115,6 +115,53 @@ contains only visible elements intersecting the configured viewport. There is no
 source `scroll` command. Guidebot can scroll to a target after it has a locator, but
 the agent may not be able to resolve an element that was absent from its snapshot.
 
+## A target matches several elements
+
+When several controls share a role and accessible name, the reasoner points at the
+candidate it means and the compiler measures its position, freezing a positional `nth`.
+Compile still succeeds, but prints a warning naming how many elements matched:
+
+```
+namiar pozycyjny (2 z 11 pasujących, nth=1) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
+```
+
+The warning is not an error; the step will render. It flags a target that is only as
+stable as the element's position: a later page rebuild that inserts or reorders matching
+siblings shifts the index.
+
+Guidebot catches some of those shifts at the next `compile`: the frozen index is checked
+against the element it was pinned to, so a target that disappears or moves elsewhere in
+the page structure invalidates the entry and gets resolved again. **It does not catch
+the most insidious case** — one more structurally identical row added ahead of the
+target. The element that then takes the frozen position looks structurally identical to
+the previous one, so no signal is produced and the step quietly starts acting on a
+different row.
+
+Treat the warning as work to do rather than noise. To clear it, make the target unique:
+refine the instruction (name the section heading, row label, or purpose) or give the
+control an accessible name. That is the only thing that removes the fragility instead of
+reporting it.
+
+If the reasoner cannot single out one element at all — the description stays ambiguous
+and nothing distinguishes the look-alikes — the step fails after its retries with:
+
+```
+nie udało się zwalidować namiaru dla: '...'
+```
+
+This is a deliberate hard failure: an ambiguous target that used to be frozen wrongly —
+and noticed only when a human watched the finished video — now stops the compile. Fix it
+the same way, with a more specific instruction or an accessible name on the control, so
+exactly one element answers the description.
+
+The same error has a second, less obvious cause: **an element outside the viewport**. The
+candidate snapshot covers only what is inside the viewport, and at most 200 elements, so a
+control scrolled below the fold carries no identifier for the reasoner to point at — and
+without one an ambiguous target can no longer be pinned. A guessed index used to hit such
+an element by luck now and then; now the step fails instead of quietly acting on a
+different element. Precede it with a `scroll` or a `wait` so the target is in frame — the
+same remedy as for the other symptoms in this section.
+
 ## A localized page differs between compile and render
 
 Stock compile and render both create fresh contexts with `config.locale`. If the page

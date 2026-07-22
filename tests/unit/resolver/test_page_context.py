@@ -5,7 +5,12 @@ from hashlib import sha256
 import pytest
 from playwright.async_api import Page, async_playwright
 
-from guidebot_recorder.resolver.page_context import Candidate, collect_candidates
+from guidebot_recorder.resolver.page_context import (
+    Candidate,
+    candidate_id_for_path,
+    candidate_ids_of,
+    collect_candidates,
+)
 
 
 @pytest.fixture
@@ -215,6 +220,32 @@ async def test_limit_is_hard_and_candidate_ids_are_stable(page: Page) -> None:
     ]
 
 
+async def test_candidate_ids_are_unique_across_a_shadow_root(page: Page) -> None:
+    """Siblings directly under a shadow root have no ``parentElement``.
+
+    Without an index on every segment their DOM paths collapse into one, and so
+    do their ids — which, now that the id carries the intent, would silently
+    freeze the wrong element.
+    """
+
+    await page.set_content(
+        """
+        <div id="host"></div>
+        <script>
+          const root = document.getElementById("host").attachShadow({ mode: "open" });
+          root.innerHTML = "<button>Pierwszy</button><button>Drugi</button>";
+        </script>
+        """
+    )
+
+    candidates = await collect_candidates(page)
+    by_name = {candidate.name: candidate for candidate in candidates}
+
+    assert {"Pierwszy", "Drugi"} <= set(by_name)
+    assert by_name["Pierwszy"].id != by_name["Drugi"].id
+    assert len({candidate.id for candidate in candidates}) == len(candidates)
+
+
 async def test_candidate_ids_keep_exact_nth_of_type_path_semantics(page: Page) -> None:
     await page.set_content(
         """
@@ -230,5 +261,124 @@ async def test_candidate_ids_keep_exact_nth_of_type_path_semantics(page: Page) -
     def candidate_id(path: str) -> str:
         return "candidate-" + sha256(path.encode("utf-8")).hexdigest()[:16]
 
-    assert by_name["Pierwszy"].id == candidate_id("html>body:nth-of-type(1)>button:nth-of-type(1)")
-    assert by_name["Drugi"].id == candidate_id("html>body:nth-of-type(1)>button:nth-of-type(2)")
+    first_path = "html:nth-of-type(1)>body:nth-of-type(1)>button:nth-of-type(1)"
+    second_path = "html:nth-of-type(1)>body:nth-of-type(1)>button:nth-of-type(2)"
+
+    assert by_name["Pierwszy"].id == candidate_id(first_path)
+    assert by_name["Drugi"].id == candidate_id(second_path)
+
+    # The public helper is the only definition of the id; it must agree with the
+    # formula pinned above rather than restate it.
+    assert candidate_id_for_path(first_path) == candidate_id(first_path)
+
+
+async def test_candidate_ids_of_follow_the_order_locator_nth_indexes(page: Page) -> None:
+    await page.set_content(
+        """
+        <button>Pierwszy</button>
+        <span>Rozdzielacz</span>
+        <button>Drugi</button>
+        <button>Trzeci</button>
+        """
+    )
+
+    locator = page.get_by_role("button")
+    ids = await candidate_ids_of(locator)
+
+    assert len(ids) == await locator.count() == 3
+    assert len(set(ids)) == 3
+    for index, expected in enumerate(ids):
+        assert await candidate_ids_of(locator.nth(index)) == [expected]
+
+    collected = {candidate.name: candidate.id for candidate in await collect_candidates(page)}
+    assert ids == [collected["Pierwszy"], collected["Drugi"], collected["Trzeci"]]
+
+
+async def test_candidate_ids_of_sees_elements_inside_shadow_roots(page: Page) -> None:
+    await page.set_content(
+        """
+        <div id="host"></div>
+        <script>
+          const root = document.getElementById("host").attachShadow({ mode: "open" });
+          root.innerHTML = "<button>Pierwszy</button><button>Drugi</button>";
+        </script>
+        """
+    )
+
+    locator = page.get_by_role("button")
+    ids = await candidate_ids_of(locator)
+
+    assert len(ids) == 2
+    assert len(set(ids)) == 2
+
+
+async def test_candidate_ids_stay_unique_for_siblings_differing_only_in_case(
+    page: Page,
+) -> None:
+    """`nth-of-type` liczyło rodzeństwo z rozróżnianiem wielkości liter, a ścieżka nie.
+
+    Segment ścieżki emituje `localName.toLowerCase()`, więc `<myTag>` i `<mytag>`
+    dawały ten sam tekst — ale licznik pomijał się nawzajem jako „inny tag"
+    i obu przypisywał `nth-of-type(1)`. Wynik: jedno `candidateId` dla dwóch
+    różnych elementów, czyli dokładnie ta nieunikalność, na której stoi
+    przypinanie. Parser HTML normalizuje nazwy, więc kolizję da się zbudować
+    tylko przez `createElementNS` (tak jak robią to biblioteki SVG/MathML).
+    """
+
+    await page.set_content("<div id='host'></div>")
+    await page.evaluate(
+        """() => {
+          const host = document.getElementById('host');
+          const ns = 'http://www.w3.org/2000/svg';
+          for (const name of ['myTag', 'mytag']) {
+            const element = document.createElementNS(ns, name);
+            element.textContent = name;
+            host.appendChild(element);
+          }
+        }"""
+    )
+
+    ids = await candidate_ids_of(page.locator("#host > *"))
+
+    assert len(ids) == 2
+    assert len(set(ids)) == 2
+
+
+async def test_candidate_ids_of_index_a_chained_scoped_locator_exactly_like_nth(
+    page: Page,
+) -> None:
+    """Namiar ze `scope` to lokator łańcuchowy — a to on jest indeksowany przez `nth`.
+
+    Docstring `candidate_ids_of` stawia tu jawną tezę: Playwright składa człony
+    „po kolei dla każdego korzenia zawężenia", niekoniecznie w kolejności
+    dokumentu. Teza jest nieszkodliwa dokładnie dlatego, że obie strony czytają
+    tę samą listę — i to jest jedyna własność, na której stoi przypinanie:
+    element pod indeksem `i` w wyniku `candidate_ids_of` to ten sam element,
+    który wskaże `locator.nth(i)`. Lista nie może być nigdy przesortowana.
+    """
+
+    await page.set_content(
+        """
+        <div role="group" aria-label="Grupa A">
+          <div class="row"><button>A1</button></div>
+          <div class="row"><button>A2</button></div>
+        </div>
+        <div role="group" aria-label="Grupa B">
+          <div class="row"><button>B1</button></div>
+          <div class="row"><button>B2</button></div>
+        </div>
+        """
+    )
+
+    scoped = page.get_by_role("group", name="Grupa B").get_by_role("button")
+    ids = await candidate_ids_of(scoped)
+
+    assert len(ids) == await scoped.count() == 2
+    assert len(set(ids)) == 2
+    for index, expected in enumerate(ids):
+        assert await candidate_ids_of(scoped.nth(index)) == [expected]
+
+    # zawężenie faktycznie odcina drugą grupę
+    everything = await candidate_ids_of(page.get_by_role("button"))
+    assert len(everything) == 4
+    assert set(ids) < set(everything)

@@ -7,7 +7,11 @@ from typer.testing import CliRunner
 
 import guidebot_recorder.cli as cli_module
 from guidebot_recorder.cli import app
+from guidebot_recorder.models.action import CachedAction, Fingerprint
 from guidebot_recorder.models.compiled import CompiledScenario
+from guidebot_recorder.models.config import config_hash
+from guidebot_recorder.models.identity import Identity
+from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.render_set import CompileSetResult
 from guidebot_recorder.scenario.compiled import compiled_path, write_compiled
 from guidebot_recorder.scenario.loader import load_scenario
@@ -484,3 +488,114 @@ def test_render_set_success_wires_dependencies_and_closes_browser(tmp_path, monk
     assert (reasoner is not None) == (shutil.which("codex") is not None)
     assert browser.closed is True
     assert f"zrenderowano: {out_dir / 'en.mp4'}" in result.output
+
+
+POSITIONAL = textwrap.dedent(
+    """\
+    config:
+      title: t
+      viewport: {width: 640, height: 480}
+      tts: {provider: edge, voice: v, lang: pl-PL}
+    steps:
+      - click: "Usuń"
+    """
+)
+
+#: ten sam scenariusz w kształcie wariantu zestawu (manifest wymaga `locale`)
+POSITIONAL_VARIANT = textwrap.dedent(
+    """\
+    config:
+      title: t
+      viewport: {width: 640, height: 480}
+      locale: en-US
+      tts: {provider: edge, voice: en, lang: en-US, trackLanguage: eng}
+    steps:
+      - click: "Usuń"
+    """
+)
+
+
+def _freeze_positional_sidecar(scenario: Path) -> None:
+    """Zamroź sidecar, który *odpowiada źródłu*, ale niesie zmierzony `nth`.
+
+    Odcisk kroku (`compiler_version`, `command_kind`, `compiled_from`,
+    `config_hash`) jest kompletny, więc `compile_up_to_date` mówi „aktualne" —
+    i tylko osobne pytanie o namiar pozycyjny może kazać otworzyć przeglądarkę.
+    """
+
+    config = load_scenario(scenario).config
+    write_compiled(
+        compiled_path(scenario),
+        CompiledScenario(
+            source=scenario.name,
+            actions=[
+                CachedAction(
+                    action="click",
+                    target=RoleTarget(role="button", name="Usuń", exact=True, nth=1),
+                    identity=Identity(
+                        tag="button", ancestry_digest="a", dom_path_digest="p"
+                    ),
+                    expect="none",
+                    fingerprint=Fingerprint(
+                        command_kind="click",
+                        compiled_from="Usuń",
+                        expect="none",
+                        config_hash=config_hash(config),
+                    ),
+                )
+            ],
+        ),
+    )
+
+
+def test_compile_opens_the_browser_for_a_frozen_positional_index(tmp_path, monkeypatch):
+    """Zamrożony `nth` jest wart tyle, co strona, na której go zmierzono.
+
+    Odcisk kroku nie zmienia się od przebudowy strony, więc bramka „nic do
+    skompilowania" jest jedynym miejscem, w którym wykrywanie dryfu może umrzeć.
+    """
+
+    path = tmp_path / "positional.scenario.yaml"
+    path.write_text(POSITIONAL, encoding="utf-8")
+    _freeze_positional_sidecar(path)
+    browser, launches = _install_fake_playwright(monkeypatch)
+    calls = []
+
+    async def compile_in_browser(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(cli_module, "CodexReasoner", lambda: object())
+    monkeypatch.setattr(cli_module, "run_compile_in_browser", compile_in_browser)
+
+    result = runner.invoke(app, ["compile", str(path)])
+
+    assert result.exit_code == 0
+    assert "nic do skompilowania" not in result.output
+    assert launches == [True]
+    assert len(calls) == 1
+    assert browser.closed is True
+
+
+def test_compile_set_opens_the_browser_for_a_frozen_positional_index(tmp_path, monkeypatch):
+    """Ta sama bramka dla zestawu — `compile-set` kończy pracę przed `run_compile_set`."""
+
+    manifest, scenario = _write_render_set(tmp_path)
+    scenario.write_text(POSITIONAL_VARIANT, encoding="utf-8")
+    _freeze_positional_sidecar(scenario)
+    browser, launches = _install_fake_playwright(monkeypatch)
+    calls = []
+
+    async def compile_set(plan, *args, **kwargs):
+        calls.append(plan)
+        return CompileSetResult(compiled=("en-US",), reused=())
+
+    monkeypatch.setattr(cli_module, "CodexReasoner", lambda: object())
+    monkeypatch.setattr(cli_module, "run_compile_set", compile_set)
+
+    result = runner.invoke(app, ["compile-set", str(manifest)])
+
+    assert result.exit_code == 0
+    assert "wszystkie warianty aktualne" not in result.output
+    assert launches == [True]
+    assert len(calls) == 1
+    assert browser.closed is True

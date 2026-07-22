@@ -56,6 +56,7 @@ from guidebot_recorder.recorder._debug import (
     scenario_sensitive_values,
 )
 from guidebot_recorder.recorder.recorder import Recorder, SelectDriveError
+from guidebot_recorder.resolver.positional import Pinned, pinned_drifted
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import (
     ResolvedTarget,
@@ -78,6 +79,7 @@ from guidebot_recorder.selects import Selects, SelectsNotReadyError, install_sel
 __all__ = [
     "compile_up_to_date",
     "heuristic_expect",
+    "needs_positional_recheck",
     "run_compile",
     "run_compile_in_browser",
 ]
@@ -116,15 +118,41 @@ def _short(step: Step, limit: int = 60) -> str:
 
 
 def _target_desc(target: Target) -> str:
+    """Opis namiaru dla `--verbose`, z `scope` i `nth`.
+
+    Te dwa pola są dokładnie tym, co odróżnia jeden element od kilku identycznych
+    z nim rodzeństwa — log, który je pomija, ukrywa całą treść namiaru
+    pozycyjnego i pokazuje dwa różne kroki jako ten sam target.
+    """
+
     if isinstance(target, RoleTarget):
-        return f'role={target.role} name="{target.name}"'
-    if isinstance(target, TextTarget):
-        return f'text="{target.text}"'
-    if isinstance(target, LabelTarget):
-        return f'label="{target.label}"'
-    if isinstance(target, TestidTarget):
-        return f"testid={target.testid}"
-    return str(target)
+        desc = f'role={target.role} name="{target.name}"'
+        if target.nth is not None:
+            desc = f"{desc} nth={target.nth}"
+    elif isinstance(target, TextTarget):
+        desc = f'text="{target.text}"'
+    elif isinstance(target, LabelTarget):
+        desc = f'label="{target.label}"'
+    elif isinstance(target, TestidTarget):
+        desc = f"testid={target.testid}"
+    else:  # pragma: no cover - the union is closed
+        return str(target)
+    if target.scope is not None:
+        desc = f"{desc} scope=[{_target_desc(target.scope)}]"
+    return desc
+
+
+def _carries_positional_index(action: CompiledAction | None) -> bool:
+    """Czy zamrożona akcja niesie indeks pozycyjny — także w zagnieżdżonym `scope`."""
+
+    if not isinstance(action, CachedAction):
+        return False
+    target: Target | None = action.target
+    while target is not None:
+        if isinstance(target, RoleTarget) and target.nth is not None:
+            return True
+        target = target.scope
+    return False
 
 
 def _load_prior_actions(cpath: Path, n_steps: int) -> list[CompiledAction | None]:
@@ -167,6 +195,13 @@ def compile_up_to_date(
 
     Lets the CLI skip launching Chromium entirely when the only edits were to
     non-target steps (e.g. ``say`` narration) or nothing at all.
+
+    One question only: **does the sidecar answer the source?** Whether a frozen
+    positional index still points where it did is a different question with a
+    different answer, and it lives in :func:`needs_positional_recheck`. Folding
+    it in here would make a freshly built sidecar report itself stale, and the
+    render-set preflight (which asks precisely this question) would demand a
+    ``compile-set`` that had just succeeded.
     """
     if force:
         return False
@@ -184,6 +219,33 @@ def compile_up_to_date(
     ):
         return False
     return not _steps_needing_resolution(flat, actions, chash, force)
+
+
+def needs_positional_recheck(path: Path | str, env: Mapping[str, str] | None = None) -> bool:
+    """Czy trzeba otworzyć przeglądarkę, bo zamrożony jest namiar pozycyjny?
+
+    Osobne pytanie od :func:`compile_up_to_date`, i celowo osobna funkcja.
+    Tamta odpowiada „czy sidecar odpowiada źródłu" — pytanie, na które
+    ``render``/``render-set`` opierają swój preflight, i na które świeżo
+    zbudowany sidecar zawsze odpowiada „tak". To pytanie brzmi inaczej: odcisk
+    kroku (wersja kompilatora, rodzaj polecenia, tekst źródła, hash configu,
+    stan) nie mówi nic o stronie, więc przebudowany DOM zostawia go
+    identycznym. Zamrożony ``nth`` jest wart tyle, co strona, na której go
+    zmierzono — a jedynym miejscem, gdzie dryf da się sprawdzić, jest otwarta
+    przeglądarka.
+
+    Koszt jest zamierzony i wąski: scenariusz z namiarem pozycyjnym uruchamia
+    Chromium przy każdej kompilacji. To dokładnie ten scenariusz, który po
+    cichu gnije. Wpięte **wyłącznie** w bramki kompilacji (``compile``,
+    ``compile-set``); preflight renderu pyta o co innego i pytać o to nie może,
+    bo świeży sidecar z ``nth`` unieruchomiłby ``render-set`` na zawsze.
+    """
+
+    path = Path(path)
+    scenario = load_scenario(path, env)
+    flat = scenario.flat_steps()
+    actions = _load_prior_actions(compiled_path(path), len(flat))
+    return any(_carries_positional_index(action) for action in actions)
 
 
 def _compiled_artifact_is_current(cpath: Path, source_name: str, n_steps: int) -> bool:
@@ -598,6 +660,53 @@ def _warn_absent(
     )
 
 
+def _warn_positional(
+    index: int,
+    pinned: Pinned,
+    *,
+    total: int,
+    location: StepLocation | None = None,
+    source: ScenarioSource | None = None,
+    sensitive: Iterable[str] = (),
+) -> None:
+    """Ostrzeż, że krok trafił w cel dopiero po zmierzeniu indeksu — z `plik:linia`.
+
+    Indeks jest teraz mierzony, nie zgadywany, ale zostaje kruchy: jednorodne
+    dołożenie rodzeństwa przesuwa go cicho, a wykrywanie dryfu tego wariantu
+    z założenia nie łapie (spec: „Ograniczenie: co ten sygnał łapie, a czego
+    nie"). Dlatego komunikat kieruje autora do doprecyzowania opisu — czyli
+    tam, gdzie problem znika na dobre — zamiast obiecywać, że mechanizm sam się
+    obroni.
+
+    Liczebnik jest 1-based, bo to zdanie dla człowieka: „1 z 2" znaczy po polsku
+    „pierwszy z dwóch", więc wydrukowanie tu surowego `nth=1` opisywałoby drugie
+    trafienie słowami pierwszego. Surowa wartość idzie zaraz obok, w nawiasie —
+    bez niej autor nie skoreluje banera z `nth` w sidecarze ani w `--verbose`,
+    a z nią nie musi wybierać między czytelnością a możliwością odnalezienia
+    wpisu. Ostatnia liczba to trafienia namiaru bez `nth`.
+
+    `sensitive` przechodzi przez banner jak w :func:`_warn_absent`: sam komunikat
+    jest złożony z liczb, ale fragment YAML-a pod nim cytuje krok, który bywa
+    sklejony z `${ENV}`.
+    """
+
+    tqdm.write(
+        step_banner(
+            index=index,
+            total=total,
+            location=location,
+            source=source,
+            message=(
+                f"namiar pozycyjny ({pinned.index + 1} z {pinned.matches} pasujących, "
+                f"nth={pinned.index}) — rozważ doprecyzowanie opisu, żeby wskazywał "
+                "element jednoznacznie"
+            ),
+            warning=True,
+            sensitive=sensitive,
+        )
+    )
+
+
 def _fingerprint_matches(fp: Fingerprint, step: Step, chash: str) -> bool:
     return (
         fp.compiler_version == COMPILER_VERSION
@@ -772,7 +881,19 @@ async def _compile_step(
             return cached_in
         cached_in = None
 
-    if _can_reuse(cached_in, step, chash, force) and await reuse_is_valid(page, cached_in):
+    # ``isinstance`` is not belt-and-braces: the pending branch above either
+    # returned or cleared ``cached_in``, but both ``reuse_is_valid`` and
+    # ``pinned_drifted`` read ``.target``, which a :class:`PendingAction` does
+    # not have. Stating the type here keeps that invariant local and checked.
+    if (
+        _can_reuse(cached_in, step, chash, force)
+        and isinstance(cached_in, CachedAction)
+        and await reuse_is_valid(page, cached_in)
+        # A frozen index is only worth as much as the page it was measured
+        # against. Drift means it now points somewhere else, so the entry is
+        # dropped and the fresh resolution below measures the index anew.
+        and not await pinned_drifted(page, cached_in)
+    ):
         action, target, state, expect = (
             cached_in.action,
             cached_in.target,
@@ -814,6 +935,15 @@ async def _compile_step(
         cached_out = None  # built after the action, once we know `expect`
         if verbose:
             tqdm.write(f"   ↳ {action} → {_target_desc(target)}")
+        if resolved.pinned is not None and resolved.pinned.index is not None:
+            _warn_positional(
+                index,
+                resolved.pinned,
+                total=total,
+                location=entry.location if entry is not None else None,
+                source=scenario.source,
+                sensitive=sensitive,
+            )
 
     # perform the action (reveals the state for later steps)
     url_before = page.url

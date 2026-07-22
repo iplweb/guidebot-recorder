@@ -142,6 +142,11 @@ Sidecar v2 zapisuje źródło, wyrównane akcje, pełne fingerprinty, targety, t
 `opens_popup` i ewentualny `input_text`. Render przed TTS sprawdza jego zgodność ze
 źródłem; podczas akcji sprawdza też żywą tożsamość celu.
 
+Przeglądając sidecar, wypatruj nieoczekiwanie szerokich targetów oraz zaskakujących
+zakresów. Pozycyjny `nth` jest teraz mierzony przez kompilator (nie zgadywany przez
+model), a każdy świeżo zamrożony wypisuje ostrzeżenie kompilacji podpowiadające, kiedy
+warto doprecyzować opis celu.
+
 ## Cykl życia zestawu
 
 ```bash

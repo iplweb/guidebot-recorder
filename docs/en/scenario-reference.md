@@ -688,10 +688,14 @@ Validation also checks that the resolved `<select>` actually **offers** the requ
 option; if it does not, the target is rejected with `option_missing`, and the message
 lists the labels the element really has. This is the semantic safety net for dropdowns
 with no accessible name, which the resolver can only address positionally
-(`combobox nth=N`): that index shifts with the state of the DOM, so without the check a
-wrong-but-plausible `<select>` would pass validation and the mistake would only surface
-later — as a compile-time timeout, or as a render that clicks the wrong control on
-camera. The comparison collapses whitespace and is then case-sensitive: exactly the
+(`combobox nth=N`). That index is now measured by the compiler from the candidate the
+model points at, not guessed, and a later page rebuild that moves it is usually caught
+at the next compile — usually, because a rebuild that shifts a whole set of look-alike
+siblings uniformly leaves the position itself unchanged and goes unnoticed. A measured
+index also still names one of several look-alike `<select>`
+elements, so without this option check a wrong-but-plausible one would pass validation
+and the mistake would only surface later — as a compile-time timeout, or as a render
+that clicks the wrong control on camera. The comparison collapses whitespace and is then case-sensitive: exactly the
 rule every execution path applies (see below), so validation never refuses a control
 Guidebot could have driven, and never blesses one it could not.
 
@@ -864,8 +868,11 @@ form) exactly as you would a button.
     `generic`, so the reasoner never sees it and the step fails with "no such
     element". Point at a `<table>`, `<form>`, `<ul>`, `<figure>`, `<article>`, or a
     `<section>` carrying an `aria-label` (only the label turns a section into a
-    `region`). An accessible name helps a lot: without one the reasoner can address
-    the container only positionally, and that index shifts with the DOM.
+    `region`). An accessible name helps a lot: without one Guidebot can only pin
+    the container by position — a measured index, not a guess, though a DOM rebuild
+    still shifts it. The next compile detects most such shifts, but not one that
+    moves a whole set of look-alike siblings uniformly; an accessible name is the
+    only thing that removes the fragility instead of reporting it.
 
 During `render` the cursor glides to the target, moves to the right edge of the ellipse
 circumscribed around it, and laps that ellipse `loops` times, leaving a growing marker

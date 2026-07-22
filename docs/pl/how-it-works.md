@@ -35,6 +35,13 @@ walidują cały manifest oraz wszystkie źródła przed uruchomieniem przegląda
    i zamraża jego niezależną tożsamość;
 5. wykonuje akcję, wykrywa ewentualny popup i atomowo zapisuje postęp sidecara.
 
+Gdy kilka elementów ma tę samą rolę i nazwę dostępną, reasoner nie zgaduje pozycji.
+Wskazuje kandydata, którego ma na myśli; dopiero zaufany kod buduje locator, liczy
+trafienia i mierzy, którym z kolei jest ten kandydat — zapisany indeks `nth` jest więc
+zmierzony, nie zgadnięty. Reasoner może też zawęzić niejednoznaczny cel przez `scope` —
+przodka zawierającego wyróżniający tekst — tak, że namiar trafia w jeden element bez
+polegania na pozycji.
+
 `say`, `navigate` i liczbowy `wait` nie wywołują AI. Kompilacja ma realne skutki:
 nawiguje, klika, wykonuje hover i wpisuje wartości.
 

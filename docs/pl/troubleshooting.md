@@ -83,6 +83,55 @@ Snapshot jest ograniczony do 200 semantycznych kandydatów i zwykle do elementó
 widocznych w viewportcie. Guidebot może przewinąć do już rozwiązanego targetu, ale nie
 ma źródłowej komendy `scroll`.
 
+## Namiar pasuje do kilku elementów
+
+Gdy kilka kontrolek ma tę samą rolę i nazwę dostępną, reasoner wskazuje kandydata,
+którego ma na myśli, a kompilator mierzy jego pozycję i zamraża pozycyjny `nth`.
+Kompilacja i tak kończy się sukcesem, ale wypisuje ostrzeżenie z liczbą trafień:
+
+```
+namiar pozycyjny (2 z 11 pasujących, nth=1) — rozważ doprecyzowanie opisu, żeby wskazywał element jednoznacznie
+```
+
+To nie jest błąd — krok się wyrenderuje. Ostrzeżenie sygnalizuje namiar tak stabilny,
+jak pozycja elementu: późniejsza przebudowa strony, która dołoży albo przestawi pasujące
+rodzeństwo, przesunie indeks.
+
+Część takich przesunięć Guidebot wykrywa przy kolejnym `compile`: zamrożony indeks jest
+sprawdzany względem elementu, do którego był przypięty, więc gdy cel zniknie albo trafi
+w inne miejsce struktury strony, wpis zostaje unieważniony i namiar rozwiązany od nowa.
+**Nie wykrywa jednak przypadku najbardziej podstępnego** — dołożenia kolejnego,
+strukturalnie identycznego wiersza przed celem. Wtedy element, który wchodzi na
+zamrożoną pozycję, wygląda z punktu widzenia struktury tak samo jak poprzedni, więc
+żaden sygnał nie powstaje, a krok po cichu zaczyna dotyczyć innego wiersza.
+
+Dlatego ostrzeżenie warto potraktować poważnie, a nie odłożyć na później. Żeby je
+usunąć, uczyń cel jednoznacznym: doprecyzuj opis (dopisz nagłówek sekcji, etykietę
+wiersza albo funkcję kontrolki) lub nadaj kontrolce nazwę dostępną. To jedyne, co
+usuwa kruchość, zamiast ją zgłaszać.
+
+Jeśli reasoner w ogóle nie potrafi wskazać jednego elementu — opis pozostaje
+niejednoznaczny i nic nie odróżnia bliźniaczych kontrolek — krok kończy się po
+wyczerpaniu prób błędem:
+
+```
+nie udało się zwalidować namiaru dla: '...'
+```
+
+To celowa twarda porażka: niejednoznaczny namiar, który dawniej bywał błędnie zamrażany
+— i wychodził dopiero, gdy człowiek obejrzał gotowy film — teraz zatrzymuje kompilację.
+Napraw go tak samo, precyzyjniejszym opisem albo nazwą dostępną kontrolki, tak żeby
+opisowi odpowiadał dokładnie jeden element.
+
+Ten sam błąd ma drugą, mniej oczywistą przyczynę: **element poza kadrem**. Migawka
+kandydatów obejmuje wyłącznie to, co widać w viewporcie, i najwyżej 200 elementów, więc
+kontrolka przewinięta poniżej krawędzi okna nie ma identyfikatora, którym reasoner mógłby
+ją wskazać — a bez niego niejednoznacznego namiaru nie da się już przypiąć. Dawniej
+zgadywany indeks bywał w takiej sytuacji przypadkiem trafiony; teraz krok kończy się
+błędem, zamiast po cichu wskazać inny element. Poprzedź go przewinięciem (`scroll`) albo
+`wait`, żeby cel znalazł się w kadrze — tak samo jak przy pozostałych objawach z tej
+sekcji.
+
 ## `select` trafia w złą listę rozwijaną
 
 Objaw to `option_missing` w komunikacie kompilacji, który — jak każdy komunikat

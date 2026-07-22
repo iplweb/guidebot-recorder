@@ -43,6 +43,13 @@ For each step:
    stale, unprocessed later slots, and there is no completion marker; only a
    successful compile makes the artifact ready for render.
 
+When several elements share a role and accessible name, the reasoner does not guess a
+position. It names the candidate it means; trusted code then builds the locator, counts
+the matches, and measures which one that candidate is, so a recorded `nth` index is
+measured, not guessed. The reasoner can also narrow an ambiguous target with a `scope` —
+an ancestor that contains distinguishing text — resolving the target to a single element
+without relying on a position at all.
+
 Compilation has real side effects: it navigates, fills, hovers, and clicks. It must
 run against a resettable environment.
 

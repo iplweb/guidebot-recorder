@@ -9,7 +9,11 @@ from pathlib import Path
 from playwright.async_api import Browser
 
 from guidebot_recorder.recorder._debug import redact_exception, scenario_sensitive_values
-from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
+from guidebot_recorder.recorder.compile import (
+    compile_up_to_date,
+    needs_positional_recheck,
+    run_compile_in_browser,
+)
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
@@ -67,9 +71,37 @@ def render_set_up_to_date(
     plan: RenderSetPlan,
     env: Mapping[str, str] | None = None,
 ) -> bool:
-    """Return whether every variant has a current, source-matched sidecar."""
+    """Return whether every variant has a current, source-matched sidecar.
+
+    Deliberately blind to frozen positional indices: this is the question the
+    render-set preflight asks, and a freshly compiled sidecar carrying an ``nth``
+    must answer it "yes". Whether the browser has to reopen to re-measure that
+    index is :func:`render_set_needs_positional_recheck`.
+    """
 
     return not _stale_languages(plan, env)
+
+
+def render_set_needs_positional_recheck(
+    plan: RenderSetPlan,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether any variant froze a positional index that only a browser can re-check.
+
+    For the *compilation* gates only (``compile-set``, :func:`run_compile_set`) —
+    never for the render preflight, which would then loop forever.
+    """
+
+    for variant in plan.variants:
+        try:
+            if needs_positional_recheck(variant.scenario, env):
+                return True
+        except Exception as exc:
+            detail = _safe_variant_error(variant.scenario, env, exc)
+            raise RenderSetError(
+                f"nie można sprawdzić compiled wariantu {variant.language}: {detail}"
+            ) from None
+    return False
 
 
 def _path_parts(path: Path) -> tuple[str, ...]:
@@ -167,7 +199,12 @@ async def run_compile_set(
     for variant in plan.variants:
         if not force:
             try:
-                current = compile_up_to_date(variant.scenario, env)
+                # Ścieżka KOMPILACJI, więc oba pytania — dokładnie jak `compile`
+                # dla pojedynczego scenariusza. Zamrożony `nth` nie jest wart
+                # więcej niż strona, na której go zmierzono.
+                current = compile_up_to_date(variant.scenario, env) and not (
+                    needs_positional_recheck(variant.scenario, env)
+                )
             except Exception as exc:
                 detail = _safe_variant_error(variant.scenario, env, exc)
                 raise RenderSetError(f"compile wariantu {variant.language}: {detail}") from None

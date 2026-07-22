@@ -5,14 +5,19 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from playwright.async_api import async_playwright
 
 import guidebot_recorder.recorder.render_set as render_set_module
+from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.render_set import (
     RenderSetError,
+    ensure_render_set_compiled,
     render_set_output_paths,
+    render_set_up_to_date,
     run_compile_set,
     run_render_set,
 )
+from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.render_set import RenderSetPlan, load_render_set
 
 _VARIANTS = (
@@ -276,3 +281,103 @@ async def test_render_set_redacts_enter_text_value_from_wrapped_runtime_error(
 
     assert secret not in str(captured.value)
     assert "<redacted>" in str(captured.value)
+
+
+#: Wariant, którego jedyny krok celowany trafia w dwa identyczne przyciski —
+#: `compile` zmierzy indeks i zamrozi `nth`. Adres `data:` wystarczy, bo cały
+#: dowód dotyczy sidecara, nie sieci.
+_AMBIGUOUS_VARIANT = textwrap.dedent(
+    """\
+    config:
+      title: Dwa przyciski
+      viewport: {width: 800, height: 600}
+      locale: pl-PL
+      tts: {provider: edge, voice: v, lang: pl-PL, trackLanguage: pol}
+    steps:
+      - navigate: "data:text/html,<div><button>Usun</button></div><div><i>x</i></div><div><button>Usun</button></div>"
+      - teach: "kliknij drugi Usun"
+    """
+)
+
+
+class _PickingReasoner:
+    """Wskazuje ostatniego kandydata o roli `button`; indeks liczy `compile`."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def resolve(self, instruction, candidates, feedback=None):  # noqa: ANN001, ANN201
+        self.calls += 1
+        buttons = [candidate for candidate in candidates if candidate.role == "button"]
+        return ReasonerResult(
+            action="click",
+            target=RoleTarget(role="button", name="Usun", exact=True),
+            candidate_id=buttons[-1].id,
+        )
+
+
+def _ambiguous_plan(tmp_path: Path) -> RenderSetPlan:
+    (tmp_path / "ambig.pl.scenario.yaml").write_text(_AMBIGUOUS_VARIANT, encoding="utf-8")
+    manifest = tmp_path / "ambig.render-set.yaml"
+    manifest.write_text(
+        textwrap.dedent(
+            """\
+            kind: localized-render-set
+            version: 1
+            variants:
+              pl-PL:
+                scenario: ambig.pl.scenario.yaml
+                output: ambig.pl.mp4
+            """
+        ),
+        encoding="utf-8",
+    )
+    return load_render_set(manifest)
+
+
+@pytest.fixture
+async def browser():
+    async with async_playwright() as playwright:
+        launched = await playwright.chromium.launch(headless=True)
+        yield launched
+        await launched.close()
+
+
+async def test_compile_set_leaves_a_positional_variant_ready_to_render(
+    tmp_path: Path, browser
+) -> None:
+    """Świeżo zbudowany sidecar z `nth` musi przejść preflight `render-set`.
+
+    Bramka „czy trzeba otworzyć przeglądarkę" i pytanie „czy sidecar odpowiada
+    źródłu" to dwa różne pytania. Zlanie ich w jedno robiło pętlę nie do
+    przerwania: `compile-set` kończył się sukcesem, a `render-set` i tak żądał
+    „uruchom `guidebot compile-set`" — bo świeży sidecar nadal niesie `nth`.
+    """
+
+    plan = _ambiguous_plan(tmp_path)
+
+    result = await run_compile_set(plan, browser, _PickingReasoner())
+
+    assert result.compiled == ("pl-PL",)
+    ensure_render_set_compiled(plan)  # nie wolno rzucić
+    assert render_set_up_to_date(plan) is True
+
+
+async def test_compile_set_reopens_the_browser_for_a_positional_variant(
+    tmp_path: Path, browser
+) -> None:
+    """Regresja odwrotna: bramka *kompilacji* zestawu nadal sprawdza dryf.
+
+    Odcisk kroku nie zmienia się od przebudowy strony, więc pominięcie
+    przeglądarki zabiłoby wykrywanie dryfu na ścieżce, którą używa człowiek.
+    """
+
+    plan = _ambiguous_plan(tmp_path)
+    await run_compile_set(plan, browser, _PickingReasoner())
+
+    second = _PickingReasoner()
+    result = await run_compile_set(plan, browser, second)
+
+    assert result.compiled == ("pl-PL",)  # przeglądarka otwarta ponownie
+    assert result.reused == ()
+    assert second.calls == 0  # ale bez dryfu wpis zostaje wznowiony w środku

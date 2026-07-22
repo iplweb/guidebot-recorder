@@ -9,6 +9,7 @@ from typing import TypedDict
 from playwright.async_api import Locator
 
 from guidebot_recorder.models.identity import Identity
+from guidebot_recorder.resolver.page_context import candidate_id_for_path, with_dom_path
 
 
 class _DomIdentity(TypedDict):
@@ -16,10 +17,13 @@ class _DomIdentity(TypedDict):
     testid: str | None
     href: str | None
     ancestry: list[list[str]]
+    path: str
 
 
-_CAPTURE_SCRIPT = """
+_CAPTURE_SCRIPT = with_dom_path("""
 (element) => {
+  const domPath = __DOM_PATH__;
+
   const concreteRoles = new Set(`
     alert alertdialog application article banner blockquote button caption cell
     checkbox code columnheader combobox complementary contentinfo definition
@@ -164,9 +168,10 @@ _CAPTURE_SCRIPT = """
     testid: element.getAttribute("data-testid"),
     href,
     ancestry,
+    path: domPath(element),
   };
 }
-"""
+""")
 
 
 def _digest_ancestry(ancestry: list[list[str]]) -> str:
@@ -187,6 +192,11 @@ async def capture_identity(locator: Locator) -> Identity:
     those fields form part of the locator and would make verification
     tautological. Ancestor roles remain part of the independent structural
     fingerprint.
+
+    The DOM path digest comes from the *same* ``evaluate`` as the rest — not
+    only because `reuse_failure` calls this on every step of `render` and
+    `guide`, but because two reads at two moments could describe two different
+    states of the page.
     """
     count = await locator.count()
     if count != 1:
@@ -198,4 +208,5 @@ async def capture_identity(locator: Locator) -> Identity:
         testid=captured["testid"],
         href=captured["href"],
         ancestry_digest=_digest_ancestry(captured["ancestry"]),
+        dom_path_digest=candidate_id_for_path(captured["path"]),
     )
