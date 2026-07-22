@@ -50,7 +50,7 @@ from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import ResolvedTarget
 from guidebot_recorder.resolver.validate import reuse_is_valid
 from guidebot_recorder.selects import SelectsNotReadyError
-from guidebot_recorder.tts.base import Segment, TtsProvider
+from guidebot_recorder.tts.base import TtsProvider
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import FadeSpec, compose_popup_video
 
@@ -59,16 +59,15 @@ from guidebot_recorder.video.mux import FadeSpec, compose_popup_video
 # because `probe` is already used as a local name elsewhere in this module.
 from guidebot_recorder.video.mux import probe as mux_probe
 from guidebot_recorder.video.timeline import (
-    TimeEdit,
     assert_recording_fps,
     frames_to_seconds,
     probe_frame_count,
 )
 
-from . import _step, audio, narration, visuals
+from . import _step, audio, visuals
 from . import timeline as timeline_module
+from .clock import _Clock
 from .errors import RenderError, _OptionalAbsent
-from .narration import _stamp_frame
 from .plan import _prepare_render
 from .popup_crop import _popup_fills_canvas, _resolve_popup_crop
 from .popup_detect import _popup_window_opened
@@ -125,24 +124,9 @@ async def run_render(
 
     stage = await _open_stage(browser, plan, env=env, timeout=timeout)
 
-    # Audio placements are collected as recording-axis FRAMES, not seconds: the
-    # grid is what `Timeline` reasons on, and quantising once at the moment of
-    # observation is what lets `_stamp_frame` keep them monotonic against the
-    # freezes. Seconds reappear only at the very end, when the audio bed is built.
-    sfx_events: list[tuple[str, int]] = []
-    # Freezes recorded while rendering, on the *recording* axis. Applied to the
-    # video — and used to remap every audio offset — once the loop is done.
-    time_edits: list[TimeEdit] = []
-    # Frame of the most recent freeze, or -1 before any. Read by `_stamp_frame`
-    # so nothing is ever stamped inside a hold that was already recorded.
-    last_freeze_frame = -1
-
-    def sfx_sink(kind: str) -> None:
-        sfx_events.append((kind, _stamp_frame(stage.anchor, not_before=last_freeze_frame + 1)))
-
-    placed_by_language: dict[str, list[tuple[Segment, int]]] = {
-        tts.lang: [] for tts in audio_configs
-    }
+    # Audio placements are collected as recording-axis FRAMES, not seconds — see
+    # `clock.py` for why, and for why `note_sfx` is handed over as a bound method.
+    clock = _Clock.started(stage.anchor, audio_configs)
     #: branch whose gate turned out to be absent — every step of it is skipped
     skipped_branch: int | None = None
 
@@ -188,7 +172,7 @@ async def run_render(
                     hold=step.desktop.hold,
                     settle_ms=cfg.cursor.settle,
                     reveal=partial(stage.chrome_show, active_page),
-                    on_click=(sfx_sink if cfg.sound.enabled else None),
+                    on_click=(clock.note_sfx if cfg.sound.enabled else None),
                 )
                 # The opener ends on the revealed chrome shell — normal visible
                 # state, so from here it is exactly the no-card path (`card`
@@ -296,28 +280,11 @@ async def run_render(
                         )
                     raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
 
-            step_segments: list[Segment] = []
             # Recording-axis frame: the mapping onto the finished film needs the
             # complete edit list, which does not exist until the loop ends.
-            narration_frame = _stamp_frame(stage.anchor, not_before=last_freeze_frame + 1)
-            for tts in audio_configs:
-                seg = segments[tts.lang].get(index)
-                if seg is not None:
-                    placed_by_language[tts.lang].append((seg, narration_frame))
-                    step_segments.append(seg)
+            step_segments, narration_frame = clock.place_narration(index, audio_configs, segments)
             if step_segments:
-                # One picture timeline: the action waits for the longest language,
-                # while shorter tracks naturally contain silence before the action.
-                emitted = await narration._pace_narration(
-                    step_segments,
-                    anchor=stage.anchor,
-                    hold_frame=cfg.hold_frame_for_narration,
-                    settle=cfg.hold_frame_settle,
-                    edits=time_edits,
-                    not_before=narration_frame,
-                )
-                if emitted is not None:
-                    last_freeze_frame = emitted
+                await clock.pace(step_segments, cfg, not_before=narration_frame)
 
             stage.sync_popup_close()
             if stage.popup_closed_unhandled():
@@ -354,7 +321,7 @@ async def run_render(
                 type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
                 type_jitter_ms=cfg.typing.jitter_ms,
                 type_max_delay_factor=cfg.typing.max_delay_factor,
-                on_sfx=(sfx_sink if cfg.sound.enabled else None),
+                on_sfx=(clock.note_sfx if cfg.sound.enabled else None),
                 # How long the unfurled option list is held before the cursor
                 # sets off towards the chosen row. Render is the only phase that
                 # animates a `select:` step, so this is the one place the
@@ -466,16 +433,7 @@ async def run_render(
         bar.close()
         await _close_stage(stage)
 
-    sfx_frames: list[tuple[str, int]] = []
-    if cfg.sound.enabled:
-        for kind, frame in sfx_events:
-            if kind == "click" and not cfg.sound.click:
-                continue
-            if kind == "key" and not cfg.sound.keys:
-                continue
-            if frame < 0:
-                raise RenderError(f"ujemna klatka SFX ({frame}) — błąd zegara renderu")
-            sfx_frames.append((kind, frame))
+    sfx_frames = clock.sfx_frames(cfg.sound)
 
     main_webm = Path(await stage.video.path())
     popup = stage.popup
@@ -544,7 +502,7 @@ async def run_render(
     # recording axis (their opened_at/closed_at are raw wall clock) and must stay
     # there. Only what is consumed downstream — narration and SFX — moves onto
     # the virtual axis.
-    timeline = _build_timeline(time_edits, source_frames=probe_frame_count(source_video))
+    timeline = _build_timeline(clock.time_edits, source_frames=probe_frame_count(source_video))
     if dump_timeline:
         out_mp4.with_suffix(".timeline.json").write_text(timeline.to_json(), encoding="utf-8")
     if not timeline.is_empty:
@@ -563,7 +521,7 @@ async def run_render(
             Placed(segment=seg, offset=frames_to_seconds(timeline.to_virtual(frame)))
             for seg, frame in placed
         ]
-        for lang, placed in placed_by_language.items()
+        for lang, placed in clock.placed_by_language.items()
     }
     sfx_offsets = [
         (kind, frames_to_seconds(timeline.to_virtual(frame))) for kind, frame in sfx_frames

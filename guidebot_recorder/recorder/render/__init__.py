@@ -24,6 +24,7 @@ keeps working after the split into submodules:
     timeline.py       observed freezes → validated model → the edited file
     audio.py          audio beds, muxing, and the two-phase artifact publish
     reuse.py          the compiled-sidecar contract as render reads it
+    clock.py          the recording axis: freezes, SFX and narration placements
     plan.py           everything a render decides before a browser exists
     stage.py          what is on screen now, and the one order the init scripts
                       may be registered in
@@ -78,6 +79,7 @@ from __future__ import annotations
 from . import _run as _run
 from . import _step as _step
 from . import audio as audio
+from . import clock as clock
 from . import constants as constants
 from . import errors as errors
 from . import narration as narration
