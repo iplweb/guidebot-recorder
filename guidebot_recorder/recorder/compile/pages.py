@@ -1,11 +1,12 @@
 """Which pages the compile session is allowed to have, and when a popup counts.
 
 The session contract is "one main window plus at most one popup, and a popup may
-only be opened by a ``click``". Enforcing it takes two things that belong
+only be opened by a ``click``". Enforcing it takes three things that belong
 together: a view of what the context currently holds
-(:func:`_new_pages`, :func:`_unexpected_pages`) and the bounded observation
+(:func:`_new_pages`, :func:`_unexpected_pages`), the bounded observation
 window that decides whether a page that just appeared belongs to the click that
-was performed (:func:`_wait_for_new_pages`, over the two constants below).
+was performed (:func:`_wait_for_new_pages`, over the two constants below), and
+the running record of what the session has actually seen (:class:`_PageWatch`).
 
 The constants live here rather than beside the compile loop because they *are*
 the window: ``_POPUP_DETECTION_SECONDS`` bounds how long a click may take to
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from playwright.async_api import BrowserContext, Page
 from playwright.async_api import (
@@ -82,6 +84,67 @@ async def _wait_for_new_pages(
         if remaining <= 0:
             return found
         await asyncio.sleep(min(0.05, remaining))
+
+
+# ``eq=False`` is load-bearing, not style: :meth:`observe` is registered as a
+# context listener and pyee keys its handler table by hash, so the bound method —
+# and therefore the watch itself — has to stay hashable. A dataclass with the
+# default ``eq=True`` sets ``__hash__`` to ``None`` and the listener could not be
+# registered at all.
+@dataclass(eq=False)
+class _PageWatch:
+    """Which pages a compile session has seen, and which one it is driving.
+
+    The three questions the session contract asks are all questions about this
+    object: what is open (:attr:`observed`), when did it open (:attr:`opened_at`),
+    and which window is the scenario currently acting on (:attr:`active`).
+
+    :meth:`observe` has to run for *every* page the context opens, including ones
+    that appear while a step is being resolved — that is how "a popup may only be
+    opened by a click" is detected rather than assumed. The timestamps are what
+    let a page be attributed to the click that was running, so they are recorded
+    here at the moment of observation and never inferred afterwards.
+    """
+
+    main: Page
+    active: Page
+    loop: asyncio.AbstractEventLoop
+    observed: list[Page]
+    opened_at: dict[Page, float]
+    popup: Page | None = None
+    #: Whether a popup was adopted *at any point* in the session, not whether one
+    #: is open now — the v1 contract is one popup per session, not one at a time.
+    popup_seen: bool = False
+
+    @classmethod
+    def starting_at(cls, main: Page) -> _PageWatch:
+        """A watch on a session that has only its main window so far."""
+
+        loop = asyncio.get_running_loop()
+        return cls(
+            main=main,
+            active=main,
+            loop=loop,
+            observed=[main],
+            opened_at={main: loop.time()},
+        )
+
+    def observe(self, candidate: Page) -> None:
+        """Record a page the context just opened. Registered as the listener."""
+
+        if all(candidate is not observed for observed in self.observed):
+            self.observed.append(candidate)
+            self.opened_at[candidate] = self.loop.time()
+
+    def unexpected(self) -> list[Page]:
+        """Observed pages outside the main + one-popup session contract."""
+
+        return _unexpected_pages(self.observed, self.main, self.popup)
+
+    def since(self, mark: int) -> list[Page]:
+        """Pages observed after ``mark`` was taken from :func:`len` of the log."""
+
+        return self.observed[mark:]
 
 
 async def _prepare_popup(page: Page, viewport: dict[str, int]) -> bool:
