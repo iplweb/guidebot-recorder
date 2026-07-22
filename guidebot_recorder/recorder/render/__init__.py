@@ -26,6 +26,7 @@ keeps working after the split into submodules:
     reuse.py          the compiled-sidecar contract as render reads it
     clock.py          the recording axis: freezes, SFX and narration placements
     plan.py           everything a render decides before a browser exists
+    loop.py           replaying one flat step, and the loop that drives them
     stage.py          what is on screen now, and the one order the init scripts
                       may be registered in
     _step.py          _render_step (opaque; phase 3 decomposes it)
@@ -82,6 +83,7 @@ from . import audio as audio
 from . import clock as clock
 from . import constants as constants
 from . import errors as errors
+from . import loop as loop
 from . import narration as narration
 from . import pages as pages
 from . import plan as plan

@@ -402,7 +402,7 @@ async def test_render_produces_mp4_with_audio(tmp_path):
 async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     tmp_path, monkeypatch
 ):
-    """Locks in the context init-script ordering contract of ``render/_run.py``.
+    """Locks in the context init-script ordering contract of ``render/stage.py``.
 
     cursor.js, slide.js and desktop.js rely on reading the real ``window.top``
     to decide whether they are running in the top document or a framed site;
@@ -511,7 +511,7 @@ async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, 
     )
 
     holds: list[float | None] = []
-    original_recorder = render_module._run.Recorder
+    original_recorder = render_module.loop.Recorder
 
     class SpyRecorder(original_recorder):  # type: ignore[misc, valid-type]
         def __init__(self, *args, **kwargs):
@@ -520,7 +520,7 @@ async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, 
 
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(render_module._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(render_module.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(render_module.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1094,7 +1094,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
         # attribute the window to the click).
         early_uri = early.resolve().as_uri()
 
-        class EarlyWindowRecorder(R._run.Recorder):
+        class EarlyWindowRecorder(R.loop.Recorder):
             async def click(self, target, *, before_click=None):
                 # Awaiting the context's own page event is what makes this
                 # deterministic: the render has *observed* the window by the time
@@ -1106,7 +1106,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
 
         # `Recorder` is constructed in two submodules — the render loop and the
         # post-popup-close funnel — so replacing it takes both lines.
-        monkeypatch.setattr(R._run, "Recorder", EarlyWindowRecorder)
+        monkeypatch.setattr(R.loop, "Recorder", EarlyWindowRecorder)
         monkeypatch.setattr(R.visuals, "Recorder", EarlyWindowRecorder)
 
         with pytest.raises(RenderError, match="przed akcją click"):
@@ -1196,7 +1196,7 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
             overlay_viewports.append(viewport)
             super().__init__(cursor, viewport)
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
@@ -1204,7 +1204,7 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1237,14 +1237,14 @@ async def test_render_respects_typing_animate_false(tmp_path, monkeypatch):
 
     recorder_kwargs: list = []
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1499,7 +1499,7 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
             overlay_show_calls += 1
             await super().show(page)
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         async def navigate(self, url):
             dom_state_before_navigate.append(
                 await self.page.locator("[data-guidebot-slide]").count()
@@ -1510,7 +1510,7 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
     monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -2418,9 +2418,9 @@ async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypa
 
     `test_hold_frame_narrations_never_overlap` proves the narration clamp
     (`not_before=narration_frame` on the NEXT step's own narration stamp); it
-    never looks at SFX. `sfx_sink` (render/_run.py, the `on_sfx` closure passed to
-    `Recorder`) carries the exact same `not_before=last_freeze_frame + 1`
-    clamp, but nothing previously asserted it does anything — the render
+    never looks at SFX. `_Clock.note_sfx` (render/clock.py, the bound method
+    handed to `Recorder(on_sfx=...)`) carries the exact same
+    `not_before=last_freeze_frame + 1` clamp, but nothing asserts it does anything — the render
     could clamp narration and NOT sound effects and the whole suite would
     stay green, since `test_render_with_sound_collects_and_mixes_sfx` only
     checks the events list is non-empty, never an offset.
@@ -2588,7 +2588,7 @@ def test_apply_timeline_edits_rejects_a_file_that_disagrees_with_the_model(
 
     timeline = Timeline.build([TimeEdit(at=10, kind="freeze", frames=25)], source_frames=100)
     monkeypatch.setattr(R.timeline, "apply_time_edits", lambda src, tl, out: None)
-    # `probe_frame_count` has a second consumer in `_run` (it sizes the timeline
+    # `probe_frame_count` has a second consumer in `post` (it sizes the timeline
     # before the edit runs), so replacing it takes both lines.
     monkeypatch.setattr(R.timeline, "probe_frame_count", lambda path: 123)
     monkeypatch.setattr(R._run, "probe_frame_count", lambda path: 123)

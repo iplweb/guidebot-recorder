@@ -35,21 +35,13 @@ local name in ``run_render`` — the same reason ``mux_probe`` is aliased below.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
-from functools import partial
 from pathlib import Path
 
-from playwright.async_api import Browser, Frame, Page
+from playwright.async_api import Browser
 from tqdm import tqdm
 
-from guidebot_recorder.models.action import CachedAction, PendingAction
-from guidebot_recorder.recorder._debug import pause_for_inspection, redact_exception
-from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.resolver.reasoner import Reasoner
-from guidebot_recorder.resolver.resolution import ResolvedTarget
-from guidebot_recorder.resolver.validate import reuse_is_valid
-from guidebot_recorder.selects import SelectsNotReadyError
 from guidebot_recorder.tts.base import TtsProvider
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import FadeSpec, compose_popup_video
@@ -64,20 +56,14 @@ from guidebot_recorder.video.timeline import (
     probe_frame_count,
 )
 
-from . import _step, audio, visuals
+from . import audio
 from . import timeline as timeline_module
 from .clock import _Clock
-from .errors import RenderError, _OptionalAbsent
+from .loop import _LoopOptions, _run_steps
 from .plan import _prepare_render
 from .popup_crop import _popup_fills_canvas, _resolve_popup_crop
-from .popup_detect import _popup_window_opened
-from .popup_session import _prepare_popup
-from .reuse import _resolve_pending_target
-from .stage import _close_stage, _open_stage
+from .stage import _open_stage
 from .timeline import _build_timeline
-from .visuals import _hand_cursor_to_popup, _play_desktop_opener
-
-_VIDEO_POSTROLL_SECONDS = 0.1
 
 
 async def run_render(
@@ -106,19 +92,8 @@ async def run_render(
         hold_frame_settle=hold_frame_settle,
         verbose=verbose,
     )
-    # Read-only aliases onto the frozen plan. The plan is the single source of
-    # truth; these exist so the phases below still read as prose rather than as
-    # `plan.` repeated three hundred times.
+    # Read-only aliases onto the frozen plan, for the post-production phase below.
     cfg = plan.cfg
-    scenario = plan.scenario
-    flat = plan.flat
-    compiled = plan.compiled
-    audio_configs = plan.audio_configs
-    segments = plan.segments
-    sensitive_values = plan.sensitive_values
-    scenario_hash = plan.scenario_hash
-    desktop_payloads = plan.desktop_payloads
-    step_message = plan.step_message
     out_mp4 = plan.out_mp4
     work = plan.work
 
@@ -126,312 +101,18 @@ async def run_render(
 
     # Audio placements are collected as recording-axis FRAMES, not seconds — see
     # `clock.py` for why, and for why `note_sfx` is handed over as a bound method.
-    clock = _Clock.started(stage.anchor, audio_configs)
-    #: branch whose gate turned out to be absent — every step of it is skipped
-    skipped_branch: int | None = None
-
-    bar = tqdm(total=len(flat), desc="render", unit="krok", disable=not verbose)
-    try:
-        for index, entry in enumerate(flat):
-            step = entry.step
-            if skipped_branch is not None and entry.branch == skipped_branch:
-                # The gate never showed: the branch's children never run, and their
-                # narration is removed from the timeline rather than left as silence
-                # (segments are placed per index, so never placing them removes them).
-                bar.update(1)
-                continue
-            skipped_branch = None
-            stage.sync_popup_close()
-            if stage.popup_closed_unhandled():
-                raise RenderError("popup zamknął się poza obsługiwaną akcją scenariusza")
-            if stage.unexpected_pages():
-                raise RenderError(
-                    step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
-                )
-            kind = step.command_kind()
-            if verbose:
-                tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
-
-            active_page = stage.active_page
-            await active_page.bring_to_front()
-            # Card-aware visual prep, ahead of the narration block: a `slide`
-            # step paints (replacing any prior card); a `say` step keeps a live
-            # card up while it narrates; any other step dismisses the card
-            # first (asserting it survived, fail-loud) before its normal
-            # `_ensure_visuals`. With no card ever painted this is exactly
-            # today's unconditional `_ensure_visuals` call (back-compat).
-            if kind == "desktop":
-                assert step.desktop is not None  # guaranteed by command_kind()
-                if stage.card is not None:
-                    await stage.hide_card(active_page)
-                await _play_desktop_opener(
-                    stage.desktop,
-                    stage.overlay,
-                    active_page,
-                    desktop_payloads[index],
-                    hold=step.desktop.hold,
-                    settle_ms=cfg.cursor.settle,
-                    reveal=partial(stage.chrome_show, active_page),
-                    on_click=(clock.note_sfx if cfg.sound.enabled else None),
-                )
-                # The opener ends on the revealed chrome shell — normal visible
-                # state, so from here it is exactly the no-card path (`card`
-                # stays None).
-            elif kind == "slide":
-                assert step.slide is not None  # guaranteed by command_kind()
-                if stage.card is not None:
-                    # Fail loud before repainting: a slide following a say whose
-                    # card was destroyed mid-narration must NOT silently swap in a
-                    # fresh card over the wrong page (`reveal_page` asserts the
-                    # token, exactly like the generic dismiss branch below).
-                    await stage.reveal_page(active_page)
-                await stage.show_card(
-                    active_page,
-                    {
-                        "title": step.slide.title,
-                        "subtitle": step.slide.subtitle,
-                        "notes": step.slide.notes,
-                    },
-                )
-            elif kind == "say" and stage.card is not None:
-                await stage.ensure_card(active_page)
-            elif stage.card is not None:
-                await stage.reveal_page(active_page)
-                await stage.ensure_visuals(active_page, expect_chrome=stage.expect_chrome)
-            else:
-                await stage.ensure_visuals(active_page, expect_chrome=stage.expect_chrome)
-
-            # --- absence probe / in-place resolution, ahead of the narration ----
-            # An optional step that turns out to be absent must not narrate first
-            # and only then do nothing, so everything decidable before the action —
-            # a stale frozen target, an unresolvable pending entry — is decided
-            # here. A cached gate is the exception: its `waitFor` IS the action, so
-            # it stays in `_step._render_step` (a synthetic gate step never
-            # narrates).
-            #
-            # `optional` marks the only two places absence is tolerated: a branch
-            # gate and an `optional: true` step. A *child* of an entered branch is
-            # not optional — the branch demonstrably happened, so anything failing
-            # inside it is a real regression (§5 of the design). Its pending entry
-            # is still resolved here; only the verdict on absence differs.
-            optional = entry.is_gate or step.optional
-            resolved: ResolvedTarget | None = None
-            cached = compiled.actions[index]
-            # The site iframe for the main window, the page itself for popups /
-            # chrome-disabled renders — never the shell document, which the shim
-            # deliberately skips.
-            probe_root: Page | Frame = (
-                stage.site_frame
-                if active_page is stage.page and stage.site_frame is not None
-                else active_page
-            )
-            if stage.selects is not None and step.requires_target():
-                # Readiness barrier, the mirror of compile's: both the in-place
-                # resolution below and the frozen-target check inside
-                # ``_render_step`` must see the shimmed DOM, or render would drive
-                # a page compile never resolved against. Any navigation that led
-                # here has settled — it was an earlier step.
-                try:
-                    await stage.selects.wait_ready(probe_root)
-                except SelectsNotReadyError as exc:
-                    # The barrier sits outside every per-step ``except`` in this
-                    # loop, so without this the one failure that stops a render
-                    # before its step even begins would be the only one to reach
-                    # the author with no file, no line and no YAML fragment.
-                    raise RenderError(step_message(entry, index, str(exc))) from exc
-            if step.requires_target() and (optional or isinstance(cached, PendingAction)):
-                try:
-                    if isinstance(cached, PendingAction):
-                        if reasoner is None:
-                            raise _OptionalAbsent(
-                                "brak dostępnego reasonera, a krok nie został skompilowany "
-                                "(pending) — zainstaluj `codex`, aby rozwiązać go na miejscu"
-                            )
-                        resolved = await _resolve_pending_target(probe_root, step, kind, reasoner)
-                    elif isinstance(cached, CachedAction) and cached.action != "waitFor":
-                        if not await reuse_is_valid(probe_root, cached):
-                            raise _OptionalAbsent("zamrożony namiar nie pasuje do strony")
-                except _OptionalAbsent as absent:
-                    if not optional:
-                        raise RenderError(step_message(entry, index, str(absent))) from None
-                    plan.note_skip(entry, index, str(absent), gate=entry.is_gate)
-                    if entry.is_gate:
-                        skipped_branch = entry.branch
-                    bar.update(1)
-                    continue
-                except Exception as exc:
-                    # Everything the resolver rejects for a reason other than
-                    # absence — `multiple_actions` above all — is an authoring bug
-                    # and fails the render, exactly as in the action loop below.
-                    safe_message = redact_exception(exc, sensitive_values)
-                    if verbose:
-                        tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
-                    if pause_on_error:
-                        await pause_for_inspection(
-                            stage.active_page,
-                            "render",
-                            index,
-                            kind,
-                            exc,
-                            sensitive_values,
-                            total=len(flat),
-                            location=entry.location,
-                            source=scenario.source,
-                        )
-                    raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
-
-            # Recording-axis frame: the mapping onto the finished film needs the
-            # complete edit list, which does not exist until the loop ends.
-            step_segments, narration_frame = clock.place_narration(index, audio_configs, segments)
-            if step_segments:
-                await clock.pace(step_segments, cfg, not_before=narration_frame)
-
-            stage.sync_popup_close()
-            if stage.popup_closed_unhandled():
-                raise RenderError("popup zamknął się asynchronicznie podczas narracji")
-            active_page = stage.active_page
-            if stage.unexpected_pages():
-                raise RenderError(
-                    step_message(entry, index, "nieoczekiwany popup — uruchom `compile --force`")
-                )
-            await active_page.bring_to_front()
-            # Card-aware post-narration re-assert: a navigation that destroyed the
-            # card DURING the narration wait (a say/slide over a live card) must
-            # fail loud here — this is the checkpoint that catches a mid-wait
-            # destruction even when the say is the LAST step (the loop still fully
-            # processes that step before exiting). When no card is active this is
-            # exactly today's unconditional `_ensure_visuals` (back-compat).
-            if stage.card is not None:
-                await stage.ensure_card(active_page)
-            else:
-                await stage.ensure_visuals(
-                    active_page, expect_chrome=stage.expects_bar(active_page)
-                )
-            if isinstance(cached, CachedAction) and cached.opens_popup and stage.popup is not None:
-                raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
-            if kind == "closeWindow" and stage.popup is None:
-                raise RenderError(step_message(entry, index, "closeWindow bez otwartego okna"))
-            # Main window drives the site iframe (a Frame); popups drive the page.
-            on_shell = active_page is stage.page and stage.site_frame is not None
-            recorder = Recorder(
-                active_page,
-                stage.overlay,
-                settle_ms=cfg.cursor.settle,
-                frame=stage.site_frame if on_shell else None,
-                type_delay_ms=(cfg.typing.speed if cfg.typing.animate else None),
-                type_jitter_ms=cfg.typing.jitter_ms,
-                type_max_delay_factor=cfg.typing.max_delay_factor,
-                on_sfx=(clock.note_sfx if cfg.sound.enabled else None),
-                # How long the unfurled option list is held before the cursor
-                # sets off towards the chosen row. Render is the only phase that
-                # animates a `select:` step, so this is the one place the
-                # configured value can take effect at all.
-                open_hold_ms=cfg.selects.open_hold_ms,
-            )
-            try:
-                opened = await _step._render_step(
-                    active_page,
-                    recorder,
-                    stage.overlay,
-                    stage.chrome,
-                    scenario,
-                    step,
-                    kind,
-                    index,
-                    cached,
-                    stage.anchor,
-                    stage.observed_pages,
-                    stage.ensure_card,
-                    entry=entry,
-                    total=len(flat),
-                    sensitive=sensitive_values,
-                    expect_chrome=stage.expects_bar(active_page),
-                    resolved=resolved,
-                    optional=optional,
-                    scenario_hash=scenario_hash,
-                    on_resolved=plan.persist_resolved,
-                )
-                if opened is not None:
-                    stage.popup = opened
-                    opened.page.set_default_timeout(timeout * 1000)
-                    opened.is_blank_tab = not await _popup_window_opened(stage.page)
-                    opened.wants_bar = stage.chrome is not None and opened.is_blank_tab
-                    prepared = await _prepare_popup(
-                        opened.page,
-                        stage.overlay,
-                        stage.chrome,
-                        expect_chrome=stage.expect_chrome or opened.wants_bar,
-                        mount_bar=opened.wants_bar,
-                    )
-                    stage.sync_popup_close()
-                    if not prepared:
-                        raise RenderError("popup zamknął się podczas otwierania")
-                    # The popup now owns the cursor (it mounted its own); stop
-                    # painting a second one in the main window behind it.
-                    await _hand_cursor_to_popup(stage.page, opened, stage.overlay)
-                if stage.page.is_closed():
-                    raise RenderError("główne okno zostało zamknięte podczas render")
-                stage.sync_popup_close()
-                if stage.popup is not None and stage.popup.page.is_closed():
-                    if not stage.popup.close_handled:
-                        if opened is not None or kind in {"say", "navigate", "wait", "slide"}:
-                            raise RenderError(
-                                "popup zamknął się asynchronicznie poza obsługiwaną akcją"
-                            )
-                        stage.popup.close_handled = True
-                        await visuals._prepare_main_after_popup_close(
-                            stage.page,
-                            stage.overlay,
-                            stage.chrome,
-                            cfg.cursor.settle,
-                            restore_cursor_to=stage.popup.main_cursor_pos,
-                        )
-                if stage.unexpected_pages():
-                    raise RenderError(
-                        step_message(
-                            entry, index, "nieoczekiwany popup — uruchom `compile --force`"
-                        )
-                    )
-            except _OptionalAbsent as absent:
-                # Only a cached gate reaches here (its `waitFor` timed out); every
-                # other absence signal was already settled by the probe above.
-                plan.note_skip(entry, index, str(absent), gate=entry.is_gate)
-                if entry.is_gate:
-                    skipped_branch = entry.branch
-            except Exception as exc:
-                safe_message = redact_exception(exc, sensitive_values)
-                if verbose:
-                    tqdm.write(f"   ✗ {type(exc).__name__}: {safe_message}")
-                if pause_on_error:
-                    await pause_for_inspection(
-                        stage.active_page,
-                        "render",
-                        index,
-                        kind,
-                        exc,
-                        sensitive_values,
-                        total=len(flat),
-                        location=entry.location,
-                        source=scenario.source,
-                    )
-                raise RenderError(f"{type(exc).__name__}: {safe_message}") from None
-            bar.update(1)
-        # Force a bounded final frame after narration/action completion. Without
-        # this post-roll, a static last page can leave the VFR recording a fraction
-        # shorter than the audio timeline and make the final syllable trimmable.
-        await asyncio.sleep(_VIDEO_POSTROLL_SECONDS)
-        postroll_page = stage.active_page
-        await postroll_page.screenshot()
-        stage.sync_popup_close()
-        if stage.page.is_closed():
-            raise RenderError("główne okno zostało zamknięte na końcu scenariusza")
-        if stage.unexpected_pages():
-            raise RenderError("nieoczekiwany popup na końcu scenariusza")
-        if stage.popup_closed_unhandled():
-            raise RenderError("popup zamknął się asynchronicznie na końcu scenariusza")
-    finally:
-        bar.close()
-        await _close_stage(stage)
+    clock = _Clock.started(stage.anchor, plan.audio_configs)
+    await _run_steps(
+        plan,
+        stage,
+        clock,
+        _LoopOptions(
+            timeout=timeout,
+            pause_on_error=pause_on_error,
+            verbose=verbose,
+            reasoner=reasoner,
+        ),
+    )
 
     sfx_frames = clock.sfx_frames(cfg.sound)
 
@@ -529,7 +210,7 @@ async def run_render(
 
     await audio._assemble_audio_tracks(
         source_video,
-        audio_configs,
+        plan.audio_configs,
         placed_tracks,
         total,
         work,
