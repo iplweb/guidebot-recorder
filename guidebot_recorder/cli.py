@@ -12,11 +12,16 @@ import typer
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
-from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile_in_browser
+from guidebot_recorder.recorder.compile import (
+    compile_up_to_date,
+    needs_positional_recheck,
+    run_compile_in_browser,
+)
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.recorder.render_set import (
     RenderSetError,
     ensure_render_set_compiled,
+    render_set_needs_positional_recheck,
     render_set_output_paths,
     render_set_up_to_date,
     run_compile_set,
@@ -118,7 +123,7 @@ def compile_cmd(
         raise typer.Exit(code=2) from None
     # kod 2 jak sąsiednie odrzucenie wejścia (`CompiledSidecarError`) wyżej
     with _scenario_errors(code=2):
-        if not force and compile_up_to_date(path):
+        if not force and compile_up_to_date(path) and not needs_positional_recheck(path):
             typer.echo("nic do skompilowania (aktualne)")
             return
 
@@ -162,7 +167,12 @@ def compile_set_cmd(
         # kod 1 jak reszta obsługi błędów zestawu w tym poleceniu
         with _scenario_errors(code=1):
             try:
-                if render_set_up_to_date(plan):
+                # Bramka kompilacji, więc pyta o obie rzeczy: czy sidecary
+                # odpowiadają źródłom, ORAZ czy któryś nie niesie namiaru
+                # pozycyjnego, którego dryf da się sprawdzić tylko w otwartej
+                # przeglądarce. Bez tego drugiego pytania `compile-set` kończy
+                # pracę tutaj i wykrywanie dryfu jest martwe dla zestawów.
+                if render_set_up_to_date(plan) and not render_set_needs_positional_recheck(plan):
                     typer.echo("nic do skompilowania (wszystkie warianty aktualne)")
                     return
             except RenderSetError as exc:

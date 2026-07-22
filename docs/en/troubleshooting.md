@@ -154,6 +154,14 @@ and noticed only when a human watched the finished video — now stops the compi
 the same way, with a more specific instruction or an accessible name on the control, so
 exactly one element answers the description.
 
+The same error has a second, less obvious cause: **an element outside the viewport**. The
+candidate snapshot covers only what is inside the viewport, and at most 200 elements, so a
+control scrolled below the fold carries no identifier for the reasoner to point at — and
+without one an ambiguous target can no longer be pinned. A guessed index used to hit such
+an element by luck now and then; now the step fails instead of quietly acting on a
+different element. Precede it with a `scroll` or a `wait` so the target is in frame — the
+same remedy as for the other symptoms in this section.
+
 ## A localized page differs between compile and render
 
 Stock compile and render both create fresh contexts with `config.locale`. If the page

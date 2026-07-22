@@ -79,6 +79,7 @@ from guidebot_recorder.selects import Selects, SelectsNotReadyError, install_sel
 __all__ = [
     "compile_up_to_date",
     "heuristic_expect",
+    "needs_positional_recheck",
     "run_compile",
     "run_compile_in_browser",
 ]
@@ -194,6 +195,13 @@ def compile_up_to_date(
 
     Lets the CLI skip launching Chromium entirely when the only edits were to
     non-target steps (e.g. ``say`` narration) or nothing at all.
+
+    One question only: **does the sidecar answer the source?** Whether a frozen
+    positional index still points where it did is a different question with a
+    different answer, and it lives in :func:`needs_positional_recheck`. Folding
+    it in here would make a freshly built sidecar report itself stale, and the
+    render-set preflight (which asks precisely this question) would demand a
+    ``compile-set`` that had just succeeded.
     """
     if force:
         return False
@@ -210,17 +218,34 @@ def compile_up_to_date(
         for index, entry in enumerate(flat)
     ):
         return False
-    if any(_carries_positional_index(action) for action in actions):
-        # A frozen ``nth`` is the one thing this gate cannot vouch for. The
-        # per-step fingerprint (compiler version, command kind, source text,
-        # config hash, state) says nothing about the page, so a rebuilt DOM
-        # leaves it identical — and the CLI stops here, printing "nothing to
-        # compile", without ever opening a browser. Drift detection would then
-        # be dead on the only path a human uses. The cost is deliberate and
-        # narrow: a scenario carrying a positional target launches Chromium on
-        # every compile. That is precisely the scenario that rots in silence.
-        return False
     return not _steps_needing_resolution(flat, actions, chash, force)
+
+
+def needs_positional_recheck(path: Path | str, env: Mapping[str, str] | None = None) -> bool:
+    """Czy trzeba otworzyć przeglądarkę, bo zamrożony jest namiar pozycyjny?
+
+    Osobne pytanie od :func:`compile_up_to_date`, i celowo osobna funkcja.
+    Tamta odpowiada „czy sidecar odpowiada źródłu" — pytanie, na które
+    ``render``/``render-set`` opierają swój preflight, i na które świeżo
+    zbudowany sidecar zawsze odpowiada „tak". To pytanie brzmi inaczej: odcisk
+    kroku (wersja kompilatora, rodzaj polecenia, tekst źródła, hash configu,
+    stan) nie mówi nic o stronie, więc przebudowany DOM zostawia go
+    identycznym. Zamrożony ``nth`` jest wart tyle, co strona, na której go
+    zmierzono — a jedynym miejscem, gdzie dryf da się sprawdzić, jest otwarta
+    przeglądarka.
+
+    Koszt jest zamierzony i wąski: scenariusz z namiarem pozycyjnym uruchamia
+    Chromium przy każdej kompilacji. To dokładnie ten scenariusz, który po
+    cichu gnije. Wpięte **wyłącznie** w bramki kompilacji (``compile``,
+    ``compile-set``); preflight renderu pyta o co innego i pytać o to nie może,
+    bo świeży sidecar z ``nth`` unieruchomiłby ``render-set`` na zawsze.
+    """
+
+    path = Path(path)
+    scenario = load_scenario(path, env)
+    flat = scenario.flat_steps()
+    actions = _load_prior_actions(compiled_path(path), len(flat))
+    return any(_carries_positional_index(action) for action in actions)
 
 
 def _compiled_artifact_is_current(cpath: Path, source_name: str, n_steps: int) -> bool:

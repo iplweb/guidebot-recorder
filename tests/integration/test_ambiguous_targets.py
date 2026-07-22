@@ -41,7 +41,11 @@ from playwright.async_api import async_playwright
 
 from guidebot_recorder.models.config import TtsConfig
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.compile import compile_up_to_date, run_compile
+from guidebot_recorder.recorder.compile import (
+    compile_up_to_date,
+    needs_positional_recheck,
+    run_compile,
+)
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.recorder.render import run_render
 from guidebot_recorder.resolver.page_context import Candidate
@@ -366,9 +370,9 @@ async def test_named_candidate_lands_on_the_fields_the_scenario_describes(
 async def test_gate_stays_true_when_no_positional_index_was_frozen(tmp_path: Path) -> None:
     """Kontrola dla testu niżej: bramka nie jest wyłączona na ślepo.
 
-    Bez tego „``compile_up_to_date`` jest ``False``" nie znaczyłoby nic — mogłoby
-    być ``False`` zawsze. Scenariusz celujący w jednoznaczny przycisk nadal
-    oszczędza uruchomienie przeglądarki.
+    Bez tego „``needs_positional_recheck`` jest ``True``" nie znaczyłoby nic —
+    mogłoby być ``True`` zawsze. Scenariusz celujący w jednoznaczny przycisk
+    nadal oszczędza uruchomienie przeglądarki.
     """
 
     page_path = _install_page(tmp_path)
@@ -382,6 +386,7 @@ async def test_gate_stays_true_when_no_positional_index_was_frozen(tmp_path: Pat
 
     assert _targets(path)[1].nth is None
     assert compile_up_to_date(path) is True
+    assert needs_positional_recheck(path) is False
 
 
 async def test_drift_reresolves_through_the_gate_the_cli_uses(tmp_path: Path) -> None:
@@ -418,10 +423,12 @@ async def test_drift_reresolves_through_the_gate_the_cli_uses(tmp_path: Path) ->
         await page.context.close()
         assert first.calls == 2
 
-        # Bramka, na której CLI kończy pracę bez przeglądarki. Zamrożony `nth`
-        # musi ją otworzyć — inaczej dalszy ciąg tego testu nigdy by się nie
-        # wykonał na prawdziwej ścieżce.
-        assert compile_up_to_date(path) is False
+        # Bramka, na której CLI kończy pracę bez przeglądarki, to koniunkcja
+        # dwóch pytań. Sidecar odpowiada źródłu (`compile_up_to_date`), więc
+        # przeglądarkę otwiera dopiero to drugie — inaczej dalszy ciąg tego
+        # testu nigdy by się nie wykonał na prawdziwej ścieżce.
+        assert compile_up_to_date(path) is True
+        assert needs_positional_recheck(path) is True
 
         # Strona się przebudowała. Odcisk kroku (wersja kompilatora, rodzaj
         # komendy, treść, hash configu, stan) jest identyczny, więc `_can_reuse`

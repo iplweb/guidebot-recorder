@@ -621,8 +621,16 @@ async def test_resolve_forwards_feedback_to_the_prompt(monkeypatch: pytest.Monke
     assert "candidate-abc123 matched 2 of 5" in prompts[0]
 
 
-async def test_legacy_reasoner_stub_without_feedback_parameter_still_works():
-    """~40 test doubles use ``resolve(self, instruction, candidates)`` and no kwargs."""
+async def test_legacy_reasoner_stub_without_feedback_parameter_satisfies_the_protocol():
+    """~40 test doubles use ``resolve(self, instruction, candidates)`` and no kwargs.
+
+    Covers the *protocol* only: a two-argument ``resolve`` still types as a
+    :class:`Reasoner` and answers when called directly. It says nothing about the
+    caller — this stub would answer the same whatever ``resolve_step_target``
+    did with it. The behaviour that can actually break is exercised where it
+    lives, in ``test_resolution.py``
+    (``test_a_legacy_double_survives_the_path_that_actually_builds_feedback``).
+    """
 
     class LegacyStub:
         async def resolve(

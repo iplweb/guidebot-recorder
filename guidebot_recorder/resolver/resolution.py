@@ -13,7 +13,10 @@ instead would resolve against the wrong document.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any
 
 from playwright.async_api import Frame, Locator, Page
 
@@ -220,6 +223,59 @@ _UNKNOWN_CANDIDATE_FEEDBACK = (
 )
 
 
+def _takes_feedback(resolve: Any) -> bool:
+    """Whether ``resolve`` would accept a ``feedback=`` keyword."""
+
+    if resolve is None:  # pragma: no cover — the protocol requires it
+        return False
+    try:
+        parameters = inspect.signature(resolve).parameters.values()
+    except (TypeError, ValueError):  # pragma: no cover — exotic callables
+        return False
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return True
+    return any(
+        parameter.name == "feedback"
+        and parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        for parameter in parameters
+    )
+
+
+@lru_cache(maxsize=256)
+def _class_takes_feedback(reasoner_type: type[Any]) -> bool:
+    """:func:`_takes_feedback` for a class, memoised — one ``signature`` call per type."""
+
+    return _takes_feedback(getattr(reasoner_type, "resolve", None))
+
+
+def _accepts_feedback(reasoner: object) -> bool:
+    """Whether this ``Reasoner`` implementation's ``resolve`` takes ``feedback``.
+
+    Roughly forty test doubles implement the protocol as
+    ``resolve(self, instruction, candidates)`` with no ``**kwargs``. A default
+    value on the real implementations is not enough to protect them: the moment
+    a pin fails, the loop *wants* to pass feedback, and an old double would
+    answer ``TypeError: got an unexpected keyword argument`` — not a
+    :class:`TargetResolutionError`, so it escapes compile's `plik:linia` banner
+    entirely.
+
+    Asked of the signature rather than by catching ``TypeError`` around the call:
+    a ``TypeError`` raised *inside* the double's own body would otherwise be
+    swallowed and silently retried two-argument, turning a genuine bug into a
+    confusing rerun.
+
+    The class is consulted first — that is where the answer lives for every real
+    implementation, and it is the key the cache is built on. An object carrying
+    ``resolve`` per instance (a mock, a ``partial``) still gets a correct answer,
+    just an uncached one.
+    """
+
+    if getattr(type(reasoner), "resolve", None) is not None:
+        return _class_takes_feedback(type(reasoner))
+    return _takes_feedback(getattr(reasoner, "resolve", None))
+
+
 @dataclass(frozen=True, slots=True)
 class _Accepted:
     """A target variant that validated, plus how its index was measured (if it was)."""
@@ -300,13 +356,15 @@ async def resolve_step_target(
     last_pin_failure: PinFail | None = None
     feedback: str | None = None
 
+    accepts_feedback = _accepts_feedback(reasoner)
+
     for _ in range(MAX_REPROMPT):
-        # Passed only when non-empty: roughly forty test doubles implement the
-        # protocol as `resolve(self, instruction, candidates)` with no `**kwargs`,
-        # so an unconditional keyword would break every one of them.
+        # Passed only when there is something to say *and* the implementation can
+        # hear it — see `_accepts_feedback`. An old two-argument double simply
+        # gets asked again without the correction rather than raising.
         result = (
             await reasoner.resolve(instruction, candidates, feedback=feedback)
-            if feedback
+            if feedback and accepts_feedback
             else await reasoner.resolve(instruction, candidates)
         )
         feedback = None

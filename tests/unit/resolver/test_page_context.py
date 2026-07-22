@@ -310,3 +310,75 @@ async def test_candidate_ids_of_sees_elements_inside_shadow_roots(page: Page) ->
 
     assert len(ids) == 2
     assert len(set(ids)) == 2
+
+
+async def test_candidate_ids_stay_unique_for_siblings_differing_only_in_case(
+    page: Page,
+) -> None:
+    """`nth-of-type` liczyło rodzeństwo z rozróżnianiem wielkości liter, a ścieżka nie.
+
+    Segment ścieżki emituje `localName.toLowerCase()`, więc `<myTag>` i `<mytag>`
+    dawały ten sam tekst — ale licznik pomijał się nawzajem jako „inny tag"
+    i obu przypisywał `nth-of-type(1)`. Wynik: jedno `candidateId` dla dwóch
+    różnych elementów, czyli dokładnie ta nieunikalność, na której stoi
+    przypinanie. Parser HTML normalizuje nazwy, więc kolizję da się zbudować
+    tylko przez `createElementNS` (tak jak robią to biblioteki SVG/MathML).
+    """
+
+    await page.set_content("<div id='host'></div>")
+    await page.evaluate(
+        """() => {
+          const host = document.getElementById('host');
+          const ns = 'http://www.w3.org/2000/svg';
+          for (const name of ['myTag', 'mytag']) {
+            const element = document.createElementNS(ns, name);
+            element.textContent = name;
+            host.appendChild(element);
+          }
+        }"""
+    )
+
+    ids = await candidate_ids_of(page.locator("#host > *"))
+
+    assert len(ids) == 2
+    assert len(set(ids)) == 2
+
+
+async def test_candidate_ids_of_index_a_chained_scoped_locator_exactly_like_nth(
+    page: Page,
+) -> None:
+    """Namiar ze `scope` to lokator łańcuchowy — a to on jest indeksowany przez `nth`.
+
+    Docstring `candidate_ids_of` stawia tu jawną tezę: Playwright składa człony
+    „po kolei dla każdego korzenia zawężenia", niekoniecznie w kolejności
+    dokumentu. Teza jest nieszkodliwa dokładnie dlatego, że obie strony czytają
+    tę samą listę — i to jest jedyna własność, na której stoi przypinanie:
+    element pod indeksem `i` w wyniku `candidate_ids_of` to ten sam element,
+    który wskaże `locator.nth(i)`. Lista nie może być nigdy przesortowana.
+    """
+
+    await page.set_content(
+        """
+        <div role="group" aria-label="Grupa A">
+          <div class="row"><button>A1</button></div>
+          <div class="row"><button>A2</button></div>
+        </div>
+        <div role="group" aria-label="Grupa B">
+          <div class="row"><button>B1</button></div>
+          <div class="row"><button>B2</button></div>
+        </div>
+        """
+    )
+
+    scoped = page.get_by_role("group", name="Grupa B").get_by_role("button")
+    ids = await candidate_ids_of(scoped)
+
+    assert len(ids) == await scoped.count() == 2
+    assert len(set(ids)) == 2
+    for index, expected in enumerate(ids):
+        assert await candidate_ids_of(scoped.nth(index)) == [expected]
+
+    # zawężenie faktycznie odcina drugą grupę
+    everything = await candidate_ids_of(page.get_by_role("button"))
+    assert len(everything) == 4
+    assert set(ids) < set(everything)

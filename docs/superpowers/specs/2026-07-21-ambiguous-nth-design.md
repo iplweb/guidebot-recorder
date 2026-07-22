@@ -83,7 +83,7 @@ Dlatego `MAX_REPROMPT` rośnie z 2 na 3 (patrz niżej).
 | `dom_path_digest` jest **opcjonalne** i **nie bierze udziału** w `Identity.matches()` | Ścieżka zmienia się od dowolnego nowego elementu u przodków, więc jako kryterium tożsamości dawałaby **fałszywe alarmy**. Koszt fałszywego alarmu zależy od miejsca: w `compile` to jedna zbędna rezolucja (bezpieczna, kończy się poprawnym wynikiem), w `render`/`guide` to zatrzymany film. Dlatego sygnał żyje wyłącznie tam, gdzie jego pomyłka jest tania. Domyślne `None` zachowuje ważność wszystkich istniejących sidecarów: **żadnego recompile**. |
 | Brak twardego błędu na `nth` bez `scope` | Po zmianie indeks jest zmierzony, nie zgadnięty, a jego kruchość pokrywa wykrywanie dryfu. Twardy błąd czyniłby nieskompilowalną stronę, której cel `compile` zna z całą pewnością. |
 | Brak nowej składni w `*.scenario.yaml` | Zgodnie ze zgłoszeniem: scenariusz zostaje warstwą intencji. |
-| `feedback` w protokole `Reasoner` ma wartość domyślną i jest przekazywany tylko gdy niepusty | W testach jest **40** atrap z sygnaturą `resolve(self, instruction, candidates)`, żadna nie przyjmuje `**kwargs`. Wymuszony parametr wysadziłby je wszystkie — ten rodzaj niezgodności zepsuł `main` przy PR #44. |
+| `feedback` w protokole `Reasoner` ma wartość domyślną, a wołający sprawdza sygnaturę implementacji (`inspect.signature`, raz na klasę) i atrapę bez tego parametru woła dwuargumentowo | W testach jest **40** atrap z sygnaturą `resolve(self, instruction, candidates)`, żadna nie przyjmuje `**kwargs`. Wymuszony parametr wysadziłby je wszystkie — ten rodzaj niezgodności zepsuł `main` przy PR #44. Sama wartość domyślna nie wystarcza: chroni tylko dopóki feedback jest pusty, a pierwszy `PinFail` sprawiał, że stara atrapa dostawała `TypeError` — nie `TargetResolutionError`, więc bez bannera `plik:linia`. Sygnatura, a nie `except TypeError`, bo tamto maskowałoby prawdziwe `TypeError` z wnętrza atrapy. |
 | Ścieżka DOM zyskuje indeks także pod shadow rootem | Bez tego nie jest unikalna (patrz niżej) — a po zmianie to ona przenosi intencję. |
 
 ### Odrzucone warianty
@@ -262,11 +262,33 @@ Odrzucone wzmocnienie: unieważnianie reuse dla każdego gołego `nth` (bez
 kosztem wywołania LLM-a na każdy taki krok przy każdej kompilacji i utraty
 determinizmu tam, gdzie cache istnieje właśnie po to, by go zapewnić.
 
-`False` — czyli „nie ma czego sprawdzać" — dla: targetu bez `nth`, targetu
-niebędącego `RoleTarget`, `cached.identity is None` (ukryte czekanie), oraz
-sidecara sprzed tej zmiany (`dom_path_digest is None`). Cisza dla starych
-artefaktów jest celowa: nie mają zamrożonej ścieżki, więc każdy werdykt poza
-„nie wiem" byłby zmyślony.
+`False` — czyli „nie ma czego sprawdzać" — dla targetu bez `nth` i targetu
+niebędącego `RoleTarget`. Taki wpis nie nazywa żadnej pozycji, więc nic nie
+mogło się przesunąć, a unieważnianie cache'u wszystkim kosztowałoby ponowną
+rezolucję każdego scenariusza i nie kupowałoby nic.
+
+`True` — „zmierz jeszcze raz" — gdy target **ma** `nth`, ale nie ma zamrożonej
+ścieżki (`cached.identity is None` albo `dom_path_digest is None`, czyli sidecar
+sprzed tej zmiany). „Nie wiem" nie jest tu bezpiecznym domyślnym: to dokładnie
+te artefakty, w których indeks był **zgadnięty** przez model (zgłoszenie #51),
+więc zaufanie im zamrażałoby pierwotną awarię na zawsze. Koszt to jedno
+przemierzenie — świeża rezolucja dopisuje ścieżkę, więc kolejne kompilacje
+porównują normalnie.
+
+Sprawdzany jest wyłącznie `target.nth`, a nie `nth` schowane w łańcuchu `scope`
+— świadoma asymetria wobec `_carries_positional_index`, które schodzi
+rekurencyjnie. Zagnieżdżony indeks jest nieosiągalny od modelu (`_reject_index`
+blokuje `nth` na każdym poziomie, a `pin_position` ustawia go tylko na targecie
+zewnętrznym), więc taki wpis i tak nie miałby pasującej zamrożonej ścieżki do
+porównania. Bramka kompilacji schodzi rekurencyjnie, bo tam fałszywy alarm
+kosztuje uruchomienie przeglądarki; tutaj błędne porównanie po cichu
+unieważniłoby albo po cichu zachowało wpis.
+
+`PlaywrightError` to również dryf — symetrycznie do `dom_changed` w
+`reuse_failure`. `reuse_is_valid` i `pinned_drifted` są osobnymi ogniwami
+łańcucha `and`, dzielonymi kilkunastoma round-tripami; strona zamknięta między
+nimi ma unieważnić wpis, a nie wywalić kompilację surowym `TargetClosedError`
+bez bannera `plik:linia`.
 
 ### `resolver/reasoner.py` — model wskazuje kandydata
 
@@ -415,13 +437,23 @@ zamienić.
 
 ### `recorder/compile.py`
 
-- **`compile_up_to_date` musi zwrócić `False`, gdy którykolwiek zamrożony target
-  niesie `nth`** (rekurencyjnie przez `scope`). Bez tego CLI kończy pracę
-  komunikatem „nic do skompilowania" **bez otwierania przeglądarki** — odcisk
-  kroku nie zmienia się od przebudowy strony — i wykrywanie dryfu jest martwe
-  na jedynej ścieżce, którą używa człowiek. Koszt: scenariusz z pozycyjnym
-  namiarem otwiera przeglądarkę przy każdej kompilacji. To dokładnie ten
-  scenariusz, który cicho gnije, więc koszt jest celowany.
+- **Osobny predykat `needs_positional_recheck(path, env=None)`**: `True`, gdy
+  którykolwiek zamrożony target niesie `nth` (rekurencyjnie przez `scope`).
+  Bez tego CLI kończy pracę komunikatem „nic do skompilowania" **bez otwierania
+  przeglądarki** — odcisk kroku nie zmienia się od przebudowy strony — i
+  wykrywanie dryfu jest martwe na jedynej ścieżce, którą używa człowiek. Koszt:
+  scenariusz z pozycyjnym namiarem otwiera przeglądarkę przy każdej kompilacji.
+  To dokładnie ten scenariusz, który cicho gnije, więc koszt jest celowany.
+- **To musi być osobna funkcja, a nie warunek w `compile_up_to_date`.** Tamta
+  odpowiada na pytanie „czy sidecar odpowiada źródłu" i ma **trzech** wołających;
+  dwóch z nich (`_stale_languages` → `render_set_up_to_date` oraz
+  `ensure_render_set_compiled`) to preflight **renderu**. Zlanie obu pytań w
+  jedno robiło pętlę nie do przerwania: świeżo zbudowany sidecar nadal niesie
+  `nth`, więc `render-set` zawsze żądał „uruchom `guidebot compile-set`" —
+  polecenia, które właśnie zakończyło się sukcesem.
+- Wpięte **wyłącznie** w bramki kompilacji: `cli.py` (`compile`), `cli.py`
+  (`compile-set`, przez `render_set_needs_positional_recheck` — to polecenie
+  kończy pracę **przed** `run_compile_set`) oraz `run_compile_set`.
 - Przy reuse: `pinned_drifted(page, cached_in)` obok `reuse_is_valid`; dryf
   unieważnia wpis, a świeża rezolucja mierzy indeks od nowa.
 - Po świeżej rezolucji z `resolved.pinned` niosącym indeks: baner ostrzegawczy
@@ -439,11 +471,11 @@ zamienić.
 
 | Artefakt | Skutek |
 |---|---|
-| Sidecar bez `dom_path_digest` | Ważny. `pinned_drifted` zwraca `False`, reuse działa jak dotąd. |
-| Sidecar z `nth` sprzed zmiany | Ważny. Pierwsza kompilacja z tą zmianą otworzy przeglądarkę (patrz `compile_up_to_date`), ale bez zamrożonej ścieżki dryfu nie wykryje. Ponowna rezolucja (`--force` albo zmiana kroku) zmierzy indeks i dopisze ścieżkę. |
+| Sidecar bez `dom_path_digest`, target **bez** `nth` | Ważny. `pinned_drifted` zwraca `False`, reuse działa jak dotąd. |
+| Sidecar z `nth` sprzed zmiany | **Goi się sam przy pierwszej kompilacji.** Otwiera przeglądarkę (`needs_positional_recheck`), a brak zamrożonej ścieżki jest tam werdyktem „zmierz jeszcze raz": wpis zostaje unieważniony, indeks zmierzony, ścieżka dopisana. Kolejne kompilacje porównują normalnie. Bez `--force`. To korpus, dla którego cała zmiana powstała — jego `nth` był **zgadnięty** i wedle zgłoszenia #51 najczęściej błędny. |
 | `Identity.matches()` | Bez zmian — `render` i `guide` zachowują się identycznie. |
 | `COMPILER_VERSION` | **Bez podbicia.** Podbicie wymusiłoby recompile wszystkiego dla zmiany, która sama się goi. |
-| 40 atrap `Reasoner` w testach | Bez zmian — `feedback` ma wartość domyślną i jest przekazywany tylko gdy niepusty. |
+| 40 atrap `Reasoner` w testach | Bez zmian, ale nie dzięki samej wartości domyślnej: `resolution.py` sprawdza `inspect.signature` raz na klasę i atrapę bez parametru `feedback` woła **dwuargumentowo**. Wartość domyślna chroni tylko dopóki feedback jest pusty — przy pierwszym `PinFail` stara atrapa dostawała `TypeError` lecący bez bannera `plik:linia`. |
 | `Candidate.id` dla shadow DOM | Zmienia się (naprawa unikalności). Id nie jest utrwalane; do poprawienia asercje w `test_page_context.py`. |
 
 ## Testy
@@ -461,12 +493,23 @@ nienazwanymi polami tekstowymi.
 - trzy trafienia + id trzeciego → `nth=2`;
 - brak `candidate_id` → `no_candidate_id`; id spoza trafień →
   `candidate_not_matched`; zero trafień → `not_found`; `TextTarget` →
-  `not_pinnable`;
+  `not_pinnable` (a jego komunikat mówi modelowi, w ile elementów trafił namiar
+  i czym go zawęzić — nie „target is not a positional (role) target");
+- id pasujące do **więcej niż jednego** elementu → `ambiguous_candidate_id`
+  (jedyny bezpiecznik naprawy unikalności; podstawiony odczyt ścieżek, bo
+  przeglądarka nie potrafi tego udać);
+- `matches` i `index` pochodzą z **tego samego** odczytu (`len(candidate_ids)`,
+  nie `count()`) — inaczej baner potrafi powiedzieć „3 z 2 pasujących";
 - **dwa różne kroki roku dostają różne `nth`** — regresja na najbardziej
   wymowny przypadek ze zgłoszenia;
+- **`scope`**: zawężenie zmienia zbiór, w którym mierzony jest indeks, przeżywa
+  przypięcie, a dryf jest liczony wewnątrz zawężenia (zmiana w sąsiedniej
+  gałęzi nie daje sygnału);
 - `pinned_drifted`: `False` dla świeżo zamrożonego, `True` gdy cel zmienia
   pozycję strukturalną, `True` gdy lista trafień skurczyła się poniżej `nth`,
-  `False` dla sidecara bez `dom_path_digest` i dla `identity is None`.
+  `True` dla sidecara z `nth` bez `dom_path_digest` i bez `identity` (patrz
+  „Kompatybilność wsteczna"), `False` dla targetu **bez** `nth`, `True` gdy
+  strona zniknęła w trakcie (`PlaywrightError`).
   **Uwaga**: wstawienie strukturalnie identycznego wiersza przed celem `True`
   **nie** da — patrz „Ograniczenie: co ten sygnał łapie, a czego nie". Test ma
   wymuszać dryf zmianą, która realnie przesuwa ścieżkę pozycyjną celu,
@@ -474,26 +517,43 @@ nienazwanymi polami tekstowymi.
 
 `tests/unit/resolver/test_page_context.py` — **unikalność `Candidate.id`
 w obecności shadow DOM** (test, którego dziś brakuje; bez naprawy `domPath`
-czerwony). Istniejący pomocnik liczący id i asercje na przybitych ścieżkach
-zostają zaktualizowane, nie dublowane. `candidate_ids_of` zgadza się co do
-kolejności z `locator.nth(i)`.
+czerwony) oraz dla rodzeństwa różniącego się wyłącznie wielkością liter
+(`createElementNS`; parser HTML normalizuje nazwy, więc ze statycznego HTML jest
+to nieosiągalne). Istniejący pomocnik liczący id i asercje na przybitych
+ścieżkach zostają zaktualizowane, nie dublowane. `candidate_ids_of` zgadza się
+co do kolejności z `locator.nth(i)` — także dla lokatora **łańcuchowego**
+(namiar ze `scope`), gdzie kolejność jest „po kolei dla każdego korzenia
+zawężenia" i nie wolno jej przesortować.
 
 `tests/unit/resolver/test_reasoner.py` — schemat dla modelu nie zawiera `nth`
 i zawiera `candidateId`; payload z `candidateId` **przechodzi** (regresja na
 blokera); payload z `nth` (także w `scope`) odrzucony; `feedback` trafia do
-promptu i nie jest oznaczony jako zaufany; atrapa bez parametru `feedback` nadal
-działa. Parametryzacja `("nth", "1")` w
+promptu i nie jest oznaczony jako zaufany; atrapa bez parametru `feedback`
+spełnia protokół. **Uwaga**: ten ostatni test dotyczy wyłącznie protokołu (woła
+atrapę bezpośrednio) — zachowanie, które może się zepsuć, jest testowane
+w `test_resolution.py`, na ścieżce, która feedback realnie buduje.
+Parametryzacja `("nth", "1")` w
 `test_resolve_rejects_coercible_but_schema_invalid_target_fields_twice` traci
 sens (zacznie przechodzić z innego powodu) — zamienić na `exact`.
 
 `tests/unit/resolver/test_resolution.py` — `not_unique` + poprawne `candidateId`
 → `ResolvedTarget` z `pinned`; `PinFail` → re-prompt z feedbackiem, a po
 wyczerpaniu prób `TargetResolutionError` cytujący powód; `candidate_id` spoza
-zbioru odrzucone; `waitFor`/`hidden` **nie** jest przypinany.
+zbioru odrzucone; `waitFor`/`hidden` **nie** jest przypinany; **atrapa
+dwuargumentowa przeżywa ścieżkę, która feedback faktycznie buduje** (namiar
+niejednoznaczny bez `candidateId`) — `TargetResolutionError`, nie `TypeError`.
 
-`tests/unit/recorder/test_compile.py` — `compile_up_to_date` zwraca `False` dla
-sidecara z `nth`; dryf unieważnia reuse; baner ostrzegawczy dla namiaru
-pozycyjnego zawiera liczbę trafień.
+`tests/unit/recorder/test_compile.py` — `needs_positional_recheck` zwraca `True`
+dla sidecara z `nth` (także w `scope`), a `compile_up_to_date` dla tego samego
+sidecara nadal `True` (odpowiada źródłu); stary sidecar bez `dom_path_digest`
+jest przemierzany raz i goi się; dryf unieważnia reuse; baner ostrzegawczy dla
+namiaru pozycyjnego zawiera liczbę trafień.
+
+`tests/unit/recorder/test_render_set.py` — po udanym `run_compile_set`
+scenariusza z `nth`: `ensure_render_set_compiled` **nie rzuca**,
+`render_set_up_to_date` zwraca `True`, a kolejny `run_compile_set` mimo to
+otwiera przeglądarkę. `tests/unit/test_cli.py` — `compile` i `compile-set`
+z zamrożonym `nth` nie kończą pracy komunikatem „nic do skompilowania".
 
 ### Integracyjny
 
@@ -506,9 +566,9 @@ wierszach, pełny cykl `compile` → `render`. Dwa wymagania, bez których test
    stylu" (zgadnięty `nth`, jak robił to model) trafia w zły element, a nowa —
    w element opisany scenariuszem.
 2. **Ścieżka produkcyjna.** Test dryfu musi przejść przez `run_compile`
-   (tę samą bramkę `compile_up_to_date`, co CLI), a nie przez
-   `run_compile_in_browser` — inaczej ominie dokładnie ten bloker, który
-   naprawiamy.
+   (tę samą ścieżkę, co CLI za bramkami `compile_up_to_date` +
+   `needs_positional_recheck`), a nie przez `run_compile_in_browser` — inaczej
+   ominie dokładnie ten bloker, który naprawiamy.
 3. **Dryf tylko w wariancie faktycznie wykrywanym.** Zmiana strony między
    kompilacjami ma przesuwać cel **strukturalnie** (albo go usuwać), a nie
    dokładać jednorodny wiersz — ten drugi wariant z założenia nie daje sygnału

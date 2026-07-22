@@ -11,6 +11,7 @@ from guidebot_recorder.resolver.resolution import (
     MAX_REPROMPT,
     ResolvedTarget,
     TargetAbsent,
+    TargetResolutionError,
     action_for,
     heuristic_expect,
     resolve_step_target,
@@ -406,6 +407,26 @@ async def test_hidden_wait_is_never_pinned(page):
         await resolve_step_target(
             page, Step(wait=WaitUntil(until="znikną przyciski", state="hidden")), "wait", reasoner
         )
+
+    assert reasoner.calls == MAX_REPROMPT
+    assert "matched 3 elements" in str(excinfo.value)
+
+
+async def test_a_legacy_double_survives_the_path_that_actually_builds_feedback(page):
+    """Regresja na blokadę, nie na jej cień: atrapa DOSTAJE feedback do pominięcia.
+
+    Poprzednia wersja tego testu szła ścieżką `not_found`, która feedbacku nie
+    generuje — przechodziła też bez żadnej ochrony w kodzie. Tu namiar trafia
+    w trzy elementy bez `candidateId`, więc `PinFail` powstaje i pętla chce
+    dopytać. Stara atrapa bez parametru `feedback` musi to przeżyć: wołanie
+    dwuargumentowe zamiast `TypeError` lecącego bez bannera `plik:linia`.
+    """
+
+    await page.set_content(_THREE_ROWS)
+    reasoner = StubReasoner(ReasonerResult(action="click", target=_AMBIGUOUS))
+
+    with pytest.raises(TargetResolutionError) as excinfo:
+        await resolve_step_target(page, Step(click="usuń wiersz"), "click", reasoner)
 
     assert reasoner.calls == MAX_REPROMPT
     assert "matched 3 elements" in str(excinfo.value)

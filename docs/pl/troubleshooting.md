@@ -123,6 +123,15 @@ To celowa twarda porażka: niejednoznaczny namiar, który dawniej bywał błędn
 Napraw go tak samo, precyzyjniejszym opisem albo nazwą dostępną kontrolki, tak żeby
 opisowi odpowiadał dokładnie jeden element.
 
+Ten sam błąd ma drugą, mniej oczywistą przyczynę: **element poza kadrem**. Migawka
+kandydatów obejmuje wyłącznie to, co widać w viewporcie, i najwyżej 200 elementów, więc
+kontrolka przewinięta poniżej krawędzi okna nie ma identyfikatora, którym reasoner mógłby
+ją wskazać — a bez niego niejednoznacznego namiaru nie da się już przypiąć. Dawniej
+zgadywany indeks bywał w takiej sytuacji przypadkiem trafiony; teraz krok kończy się
+błędem, zamiast po cichu wskazać inny element. Poprzedź go przewinięciem (`scroll`) albo
+`wait`, żeby cel znalazł się w kadrze — tak samo jak przy pozostałych objawach z tej
+sekcji.
+
 ## `select` trafia w złą listę rozwijaną
 
 Objaw to `option_missing` w komunikacie kompilacji, który — jak każdy komunikat

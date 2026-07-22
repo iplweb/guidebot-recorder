@@ -14,6 +14,7 @@ from guidebot_recorder.recorder.compile import (
     _short,
     _wait_for_new_pages,
     compile_up_to_date,
+    needs_positional_recheck,
     run_compile,
 )
 from guidebot_recorder.recorder.recorder import Recorder
@@ -1078,13 +1079,14 @@ class PickingReasoner:
         )
 
 
-async def test_frozen_positional_index_is_never_up_to_date(tmp_path, page):
+async def test_frozen_positional_index_needs_a_recheck_but_matches_the_source(tmp_path, page):
     """Namiar pozycyjny musi otworzyć przeglądarkę — inaczej dryf jest niewykrywalny.
 
     Odcisk kroku (`compiler_version`, `command_kind`, `compiled_from`,
     `config_hash`, `state`) nie zmienia się od przebudowy strony, a CLI kończy
-    pracę na tej bramce. Bez wyjątku dla `nth` wykrywanie dryfu byłoby martwe na
-    jedynej ścieżce, którą używa człowiek.
+    pracę na bramce kompilacji. Pyta o to jednak osobny predykat: `nth` nie robi
+    sidecara *niezgodnym ze źródłem*, a zlanie obu pytań w `compile_up_to_date`
+    unieruchamiało `render-set` (świeży sidecar wiecznie „nieaktualny").
     """
 
     path = tmp_path / "login.scenario.yaml"
@@ -1093,6 +1095,7 @@ async def test_frozen_positional_index_is_never_up_to_date(tmp_path, page):
 
     # regresja: cache bez `nth` nadal oszczędza uruchomienie przeglądarki
     assert compile_up_to_date(path) is True
+    assert needs_positional_recheck(path) is False
 
     cpath = compiled_path(path)
     compiled = load_compiled(cpath)
@@ -1100,10 +1103,12 @@ async def test_frozen_positional_index_is_never_up_to_date(tmp_path, page):
     pinned = action.model_copy(update={"target": action.target.model_copy(update={"nth": 1})})
     write_compiled(cpath, compiled.model_copy(update={"actions": [None, pinned]}))
 
-    assert compile_up_to_date(path) is False
+    assert needs_positional_recheck(path) is True
+    # ale sidecar nadal odpowiada źródłu — to jest pytanie preflightu renderu
+    assert compile_up_to_date(path) is True
 
 
-async def test_frozen_positional_index_inside_scope_is_never_up_to_date(tmp_path, page):
+async def test_frozen_positional_index_inside_scope_needs_a_recheck(tmp_path, page):
     """`nth` bywa na targecie zagnieżdżonym w `scope` — szukamy rekurencyjnie."""
 
     path = tmp_path / "login.scenario.yaml"
@@ -1123,7 +1128,8 @@ async def test_frozen_positional_index_inside_scope_is_never_up_to_date(tmp_path
         ),
     )
 
-    assert compile_up_to_date(path) is False
+    assert needs_positional_recheck(path) is True
+    assert compile_up_to_date(path) is True
 
 
 async def test_positional_target_is_reused_while_the_page_holds_still(tmp_path, page):
@@ -1142,6 +1148,40 @@ async def test_positional_target_is_reused_while_the_page_holds_still(tmp_path, 
     await run_compile(path, page, second, selects=None)
 
     assert second.calls == 0  # brak dryfu → reuse jak dotąd
+
+
+async def test_legacy_pinned_sidecar_is_remeasured_once_and_then_heals(tmp_path, page):
+    """Stary sidecar z **zgadniętym** `nth` nie może zostać zamrożony na zawsze.
+
+    Brak `dom_path_digest` to podpis artefaktu sprzed tej zmiany — czyli tego,
+    w którym indeks pochodził z arytmetyki modelu na tablicy JSON (zgłoszenie
+    #51). Bezpieczny werdykt to „zmierz jeszcze raz"; po jednym przemierzeniu
+    ścieżka jest zamrożona i kolejne kompilacje porównują ją normalnie.
+    """
+
+    path = tmp_path / "ambig.scenario.yaml"
+    path.write_text(AMBIGUOUS_SCENARIO, encoding="utf-8")
+    await run_compile(path, page, PickingReasoner(), selects=None)
+
+    cpath = compiled_path(path)
+    compiled = load_compiled(cpath)
+    action = compiled.actions[1]
+    legacy = action.model_copy(
+        update={"identity": action.identity.model_copy(update={"dom_path_digest": None})}
+    )
+    write_compiled(cpath, compiled.model_copy(update={"actions": [None, legacy]}))
+
+    second = PickingReasoner()
+    await run_compile(path, page, second, selects=None)
+
+    assert second.calls == 1  # jednorazowe przemierzenie
+    healed = load_compiled(cpath).actions[1]
+    assert healed.identity.dom_path_digest is not None
+
+    third = PickingReasoner()
+    await run_compile(path, page, third, selects=None)
+
+    assert third.calls == 0  # ścieżka już jest — reuse jak dla każdego innego wpisu
 
 
 async def test_positional_drift_invalidates_reuse_and_reresolves(tmp_path, page):

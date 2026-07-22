@@ -108,10 +108,17 @@ _DOM_PATH_JS = r"""(() => {
     const cached = nthOfTypeCache.get(element);
     if (cached !== undefined) return cached;
 
+    // Compared case-insensitively because the segment below is emitted as
+    // `localName.toLowerCase()`: counting `<myTag>` and `<mytag>` as different
+    // tags while writing them as the same one hands both `nth-of-type(1)`, and
+    // therefore one `candidateId` for two elements — the exact non-uniqueness
+    // pinning must not have. (Reachable only via `createElementNS`; the HTML
+    // parser normalises tag names.)
+    const localName = element.localName.toLowerCase();
     let index = 1;
     for (let sibling = element.previousElementSibling; sibling;
          sibling = sibling.previousElementSibling) {
-      if (sibling.localName !== element.localName) continue;
+      if (sibling.localName.toLowerCase() !== localName) continue;
       const siblingIndex = nthOfTypeCache.get(sibling);
       if (siblingIndex !== undefined) {
         index += siblingIndex;
