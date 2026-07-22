@@ -147,7 +147,7 @@ def compose_popup_video(
     # longer instead of showing it shrink into the filler.
     normalised_crop = _normalise_popup_crop(popup_crop, popup_probe.size)
     teardown_tail = (
-        detect_teardown_tail(popup, normalised_crop, probe=popup_probe)
+        detect_teardown_tail(popup, normalised_crop, metadata=popup_probe)
         if normalised_crop is not None
         else 0.0
     )

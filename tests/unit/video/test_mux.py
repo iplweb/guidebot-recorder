@@ -1311,12 +1311,22 @@ def test_detect_content_crop_declines_when_ffmpeg_overruns(
     _make_popup_with_filler(popup, 1.0)
     # `detect_content_crop` degrades to None on ANY failure, so the assertion
     # below also holds when the patch reaches nobody — the test would pass while
-    # proving nothing and quietly shelling out to real ffmpeg. This sentinel is
+    # proving nothing and quietly shelling out to real ffmpeg. The sentinel is
     # what makes the timeout the actual subject: no call, no test.
+    #
+    # It has to be a sentinel on the *ffmpeg* passes specifically. Timing out on
+    # the first `_run` of any kind would fire inside `probe._probe_all`'s ffprobe
+    # — a different module, with a seam of its own — and short-circuit before
+    # crop.py ever runs ffmpeg, so `called` would attest to probe.py's seam and
+    # say nothing about crop.py's. Let ffprobe through to the real runner and
+    # wedge only ffmpeg.
     called: list[list[str]] = []
+    real_run = mux_module.ffmpeg._run
 
     def timing_out(cmd, **kwargs):
         called.append(cmd)
+        if Path(cmd[0]).name != "ffmpeg":
+            return real_run(cmd, **kwargs)
         assert kwargs.get("timeout") == mux_module.CROPDETECT_TIMEOUT, (
             "every detection pass must carry the timeout"
         )
@@ -1325,8 +1335,14 @@ def test_detect_content_crop_declines_when_ffmpeg_overruns(
     monkeypatch.setattr(mux_module.ffmpeg, "_run", timing_out)
 
     # A wedged ffmpeg costs the crop, never the render.
-    assert detect_content_crop(popup) is None
-    assert called, "the patched _run was never reached: the seam is broken"
+    crop = detect_content_crop(popup)
+    # Asserted before the result, so a broken seam reports itself instead of
+    # surfacing as a puzzling "expected None, got a perfectly good rect".
+    assert any(Path(command[0]).name == "ffmpeg" for command in called), (
+        f"crop.py's own ffmpeg pass never reached the patched _run: the seam in "
+        f"guidebot_recorder.video.mux.crop is broken (saw {called})"
+    )
+    assert crop is None
 
 
 def test_detect_content_crop_passes_are_bounded(

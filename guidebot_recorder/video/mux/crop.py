@@ -115,12 +115,16 @@ def detect_content_crop(
     """
     path = Path(path)
     try:
-        probe = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
-        if probe.size is None or probe.duration <= 0:
+        # Not named `probe`: that is the name of the sibling *module*, and the
+        # seam rule says a seam is reached as `probe.probe_duration(...)`. A local
+        # shadowing it would turn the first such call here into an AttributeError
+        # on a `_ProbeResult`.
+        probed = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
+        if probed.size is None or probed.duration <= 0:
             return None
-        padding = _padding_color(path, probe.duration / 2, probe.size)
+        padding = _padding_color(path, probed.duration / 2, probed.size)
         red, green, blue = padding
-        rate = max(1e-3, samples / probe.duration)
+        rate = max(1e-3, samples / probed.duration)
         proc = ffmpeg._run(
             [
                 ffmpeg_bin(),
@@ -156,7 +160,7 @@ def detect_content_crop(
     winner, hits = Counter(rects).most_common(1)[0]
     if hits < max(2, math.ceil(min_agreement * len(rects))):
         return None
-    if (winner[0], winner[1]) == probe.size and (winner[2], winner[3]) == (0, 0):
+    if (winner[0], winner[1]) == probed.size and (winner[2], winner[3]) == (0, 0):
         return None  # nothing to trim
     if (winner[2], winner[3]) != (0, 0):
         # Playwright anchors the popup at the canvas's top-left and pads only to
@@ -219,17 +223,19 @@ def detect_teardown_tail(
     path: Path,
     crop: tuple[int, int, int, int],
     *,
-    probe: _ProbeResult | None = None,
+    metadata: _ProbeResult | None = None,
 ) -> float:
     """Seconds of trailing frames whose window no longer fills *crop*.
 
     A popup's recorded size is not necessarily constant. Chromium can stop
     rasterising the window at the screen's backing scale for the final frames of
     a headed render — the page content is unchanged, but it arrives smaller, so
-    Playwright's padding grows and the fixed crop (sized from the *stable* part
-    of the recording, see ``_recording_scale``) starts exposing filler along its
-    right and bottom edges. In a held-open composite that reads as the popup
-    abruptly shrinking against a grey slab for the last second of the film.
+    Playwright's padding grows and the fixed crop — sized from the *stable* part
+    of the recording, see
+    :func:`~guidebot_recorder.recorder.render._recording_scale` — starts exposing
+    filler along its right and bottom edges. In a held-open composite that reads
+    as the popup abruptly shrinking against a grey slab for the last second of
+    the film.
 
     Detection samples the 2x2 block just inside *crop*'s far corner across every
     frame: while the window fills the crop that block is page content, and the
@@ -243,22 +249,25 @@ def detect_teardown_tail(
     recording all yield ``0.0`` — trim nothing, which is the behaviour that
     predates this.
 
-    *probe* lets a caller that already measured *path* share the result, keeping
+    *metadata* lets a caller that already measured *path* share the result, keeping
     one composition to one ffprobe per artifact (see
-    :func:`~guidebot_recorder.video.mux.probe._probe_all`).
+    :func:`~guidebot_recorder.video.mux.probe._probe_all`). It is not called
+    ``probe``: that is the name of the sibling *module*, which the seam rule says
+    is reached as ``probe.probe_duration(...)``, and a parameter shadowing it
+    would make the first such call in this module fail on a ``_ProbeResult``.
     """
     path = Path(path)
     width, height, x, y = crop
     try:
-        if probe is None:
-            probe = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
-        if probe.size is None or probe.duration <= 0:
+        if metadata is None:
+            metadata = _probe_all(path, timeout=CROPDETECT_TIMEOUT)
+        if metadata.size is None or metadata.duration <= 0:
             return 0.0
-        canvas_width, canvas_height = probe.size
+        canvas_width, canvas_height = metadata.size
         # No padding anywhere means no filler to recognise, so nothing to detect.
-        if (x, y) == (0, 0) and (width, height) == probe.size:
+        if (x, y) == (0, 0) and (width, height) == metadata.size:
             return 0.0
-        filler = _padding_color(path, probe.duration / 2, probe.size)
+        filler = _padding_color(path, metadata.duration / 2, metadata.size)
         corner_x = min(max(0, x + width - 2), max(0, canvas_width - 2))
         corner_y = min(max(0, y + height - 2), max(0, canvas_height - 2))
         raw = ffmpeg._run(
@@ -293,7 +302,7 @@ def detect_teardown_tail(
         trailing += 1
     if trailing == 0:
         return 0.0
-    tail = trailing * probe.duration / frames
-    if tail > TEARDOWN_TAIL_MAX_FRACTION * probe.duration:
+    tail = trailing * metadata.duration / frames
+    if tail > TEARDOWN_TAIL_MAX_FRACTION * metadata.duration:
         return 0.0
     return tail

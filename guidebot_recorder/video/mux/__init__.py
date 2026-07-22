@@ -23,6 +23,14 @@ missing re-export; import the owning submodule instead::
     monkeypatch.setattr(mux_module.ffmpeg, "_run", fake)             # tests
 
 ``ffmpeg`` and ``probe`` are re-exported as *modules* for exactly that reason.
+
+``_probe_all`` looks like it breaks that rule — :mod:`~guidebot_recorder.video.mux.crop`
+and :mod:`~guidebot_recorder.video.mux.compose` import it by name, and this facade
+re-exports it. It is not an oversight: ``_probe_all`` is not a seam, because
+nothing patches it. Nor can it quietly become one, which is what makes leaving it
+alone safe — the moment a test writes ``monkeypatch.setattr(mux_module, "_probe_all", ...)``
+the seam scan picks the name up and ``test_facade_withholds_every_patched_name``
+fails on this very re-export, before the dead patch can leave anything green.
 """
 
 from __future__ import annotations

@@ -20,6 +20,18 @@ package picks the second form for all three of its seams, inside the package and
 out (``video/timeline.py``, ``video/sfx.py``, ``video/audiobed.py``,
 ``recorder/render.py``), so one patch line covers every consumer of a name.
 
+``from X import name`` is only the most obvious way to snapshot a seam's value.
+``alias = X.name`` at module level and ``def f(..., _name=X.name)`` do the same
+thing with no import statement in sight, so the scan below covers all three.
+
+**There is no allowlist, and zero is the right number of entries.** A "harmless"
+re-export is a laundering channel: a module that name-imports a seam becomes
+itself an exporter of an early-bound copy, and every consumer that goes through
+the re-export is invisible to a patch on the defining module *and* to a scan that
+filters on the substring "mux". The one entry this file used to carry
+(``guidebot_recorder.video`` re-exporting ``probe_duration``) bought exactly that
+hole and had no callers; it is gone.
+
 **The seam list is discovered, not written down here.** It is read out of
 ``tests/`` by finding what is actually patched on the mux package, so a seam added
 tomorrow is covered the day it appears — a hardcoded list would rot exactly when
@@ -44,11 +56,6 @@ mux_module = importlib.import_module(PACKAGE_NAME)
 PACKAGE = Path(mux_module.__file__).parent
 SOURCE_ROOT = PACKAGE.parents[1]
 TESTS_ROOT = SOURCE_ROOT.parent / "tests"
-
-#: The one sanctioned name-import of a seam: ``guidebot_recorder.video`` re-exports
-#: ``probe_duration`` as part of its own public API. A re-export is not a call site
-#: and cannot be late-bound, and nothing patches it there.
-ALLOWED_NAME_IMPORTS = {("video/__init__.py", "probe_duration")}
 
 
 def _sources(root: Path) -> list[Path]:
@@ -139,29 +146,56 @@ def test_facade_withholds_every_patched_name() -> None:
         assert name not in mux_module.__all__
 
 
-def test_no_seam_is_imported_by_name() -> None:
+def _seam_attribute(node: ast.expr | None) -> str | None:
+    """The seam name in an ``<anything>.<seam>`` expression, else ``None``."""
+    return node.attr if isinstance(node, ast.Attribute) and node.attr in SEAMS else None
+
+
+def test_no_seam_is_bound_at_import_time() -> None:
+    # Three ways to snapshot a seam's *value* into another module's globals, all
+    # equally fatal and all invisible to a patch on the defining module:
+    # ``from X import seam``, ``alias = X.seam`` at module level, and
+    # ``def f(..., _seam=X.seam)`` — a default is evaluated once, at def time.
     offenders: list[str] = []
     for path in _sources(SOURCE_ROOT):
         relative = path.relative_to(SOURCE_ROOT).as_posix()
-        inside_package = path.parent == PACKAGE
+        inside_package = path.is_relative_to(PACKAGE)
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            # Inside the package the imports are relative (``from .ffmpeg import``),
-            # so ``node.module`` is a bare submodule name and no "mux" appears in
-            # it — filtering on the substring here would pass every in-package
-            # violation, which is the case this guard exists for.
-            if not inside_package and "mux" not in (node.module or ""):
-                continue
-            for alias in node.names:
-                if alias.name not in SEAMS:
+            if isinstance(node, ast.ImportFrom):
+                # Inside the package the imports are relative (``from .ffmpeg import``),
+                # so ``node.module`` is a bare submodule name and no "mux" appears in
+                # it — filtering on the substring here would pass every in-package
+                # violation, which is the case this guard exists for.
+                if not inside_package and "mux" not in (node.module or ""):
                     continue
-                if (relative, alias.name) in ALLOWED_NAME_IMPORTS:
-                    continue
-                offenders.append(
-                    f"{relative}:{node.lineno} imports the seam {alias.name!r} by name; "
-                    f"a patch on the defining module would not reach it. Import the "
-                    f"module instead and call it as an attribute"
-                )
+                for alias in node.names:
+                    if alias.name in SEAMS:
+                        offenders.append(
+                            f"{relative}:{node.lineno} imports the seam {alias.name!r} by "
+                            f"name; a patch on the defining module would not reach it. "
+                            f"Import the module instead and call it as an attribute"
+                        )
+            elif isinstance(node, ast.Assign | ast.AnnAssign):
+                # No module filter here and none possible: ``_run = ffmpeg._run``
+                # names no module the AST can resolve. The attribute name alone is
+                # the signal, and a false positive is a rename away.
+                seam = _seam_attribute(node.value)
+                if seam is not None:
+                    offenders.append(
+                        f"{relative}:{node.lineno} aliases the seam {seam!r} into a "
+                        f"module-level name; the alias is bound at import time, so a "
+                        f"patch on the defining module would not reach it. Keep the "
+                        f"attribute access at the call site"
+                    )
+            elif isinstance(node, ast.arguments):
+                for default in [*node.defaults, *node.kw_defaults]:
+                    seam = _seam_attribute(default)
+                    if seam is not None:
+                        offenders.append(
+                            f"{relative}:{default.lineno} binds the seam {seam!r} as a "
+                            f"parameter default; defaults are evaluated once at def "
+                            f"time, so a patch on the defining module would not reach "
+                            f"it. Read the attribute inside the body"
+                        )
     assert not offenders, "\n".join(offenders)

@@ -6,13 +6,13 @@ Fail-loud subprocess wrappers around ffmpeg/ffprobe. Explicit sample rate 48000.
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
 from guidebot_recorder.video.mux import MuxAudioTrack, mux, mux_audio_tracks
 
-# `probe_duration` is a test seam and the mux facade withholds it on purpose, so
-# it comes from its defining module. This one line is the single sanctioned
-# name-import of a seam: it is a re-export of this package's public API, not a
-# call site, and a re-export cannot be late-bound. Nothing patches it here. Any
-# module that *calls* the seam must go through `probe.probe_duration(...)` —
-# see tests/unit/video/test_mux_seams.py.
-from guidebot_recorder.video.mux.probe import probe_duration
+# `probe_duration` is deliberately NOT re-exported here. It is a test seam, and a
+# re-export would launder it: any module could write
+# `from guidebot_recorder.video import probe_duration`, call it bare, and the
+# `mux_module.probe` patch would reach nobody — while the seam guard stayed green,
+# because `guidebot_recorder.video` contains no "mux" for its scan to notice.
+# Callers import the defining module and call `probe.probe_duration(...)`.
+# See tests/unit/video/test_mux_seams.py.
 
 __all__ = [
     "MuxAudioTrack",
@@ -20,5 +20,4 @@ __all__ = [
     "build_audio_bed",
     "mux",
     "mux_audio_tracks",
-    "probe_duration",
 ]
