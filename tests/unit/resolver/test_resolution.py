@@ -394,6 +394,104 @@ async def test_relaxed_exact_variant_is_the_one_pinned_and_frozen(page):
     assert await resolved.locator.text_content() == "Usuń pozycję 2"
 
 
+#: one button whose accessible name the reasoner only half-copied: the exact
+#: matcher misses ("Usuń" ≠ "Usuń pozycję") and the substring matcher hits *once*,
+#: so the relaxed variant is accepted straight out of validation, no pin involved.
+_ONE_LONG_NAME = "<div><button>Usuń pozycję</button></div>"
+
+#: a `<select>` whose name the exact matcher misses and the substring matcher
+#: finds — but the element it finds does not offer the wanted option. Both target
+#: variants are therefore refused, each for a *different* reason, which is what
+#: makes it possible to tell which of the two rejections the loop kept.
+_LONG_NAMED_SELECT = '<select aria-label="Lista województw"><option>Mazowieckie</option></select>'
+
+
+async def test_relaxed_exact_variant_that_resolves_uniquely_is_the_one_frozen(page):
+    """Characterization: the *successful* half of the relaxed retry, without a pin.
+
+    ``test_relaxed_exact_variant_is_the_one_pinned_and_frozen`` above reaches the
+    same acceptance, but only through `not_unique` → `pin_position`, so what it
+    really pins is the pinning. Nothing pins the plain case the relaxation was
+    written for: exact matched nothing, relaxed matched exactly one element, and
+    *that* variant — `exact=False`, no index — is what gets returned.
+
+    Which matters because the returned target is frozen into the sidecar and
+    replayed at render time. If the retry were reshuffled to hand back the strict
+    variant on a relaxed success, compile would freeze a target that matches
+    nothing and render would resolve a different one; the two phases would
+    disagree silently, and no existing test would notice. The retry is about to
+    be lifted out of `resolve_step_target` into a helper returning a tuple, so
+    the direction has to be nailed down before it moves.
+    """
+
+    await page.set_content(_ONE_LONG_NAME)
+    reasoner = StubReasoner(ReasonerResult(action="click", target=_AMBIGUOUS))
+
+    resolved = await resolve_step_target(page, Step(click="usuń pozycję"), "click", reasoner)
+
+    assert isinstance(resolved, ResolvedTarget)
+    assert reasoner.calls == 1  # relaxing is a retry inside one round, not a re-prompt
+    # the relaxed variant, and nothing else: `exact` flipped, everything else intact
+    assert resolved.target == RoleTarget(role="button", name="Usuń", exact=False)
+    assert resolved.pinned is None  # it resolved uniquely on its own
+    assert await resolved.locator.count() == 1
+    assert await resolved.locator.text_content() == "Usuń pozycję"
+
+
+async def test_failed_relaxed_retry_reports_the_original_rejection_not_the_relaxed_one(page):
+    """Characterization: the other direction — a relaxed retry that also fails is discarded.
+
+    Two things are enforced, and the first is what makes the second mean
+    anything:
+
+    1. the relaxed variant really is produced for this answer and really does
+       reach the option check — asserted by a *positive control*, the same page
+       and the same answer with the option the element does offer, which only
+       resolves through relaxation (the exact name matches nothing);
+    2. with the option it does *not* offer, both variants are refused for
+       different reasons — exact `not_found`, relaxed `option_missing` — and the
+       error reports the *first*: why the target the reasoner actually answered
+       with was refused, not why a variant this code invented behind the
+       reasoner's back was.
+
+    The control is not decoration. The strict rejection this test asserts on is
+    the same string whether or not the relaxed variant is tried, so without the
+    control the whole test stayed green with `variants.append(relaxed)` deleted —
+    it pinned the precedence but not that there were two variants to order.
+
+    Every other test that walks both variants does so with a target whose two
+    rejections carry the identical message ("matched no elements"), so the
+    precedence itself is executed but never observed there: swapping it would
+    keep the whole suite green. Pinned here because the upcoming extraction of
+    the retry into a helper has to carry the precedence out with it, and the
+    error message is the only place it is ever visible.
+    """
+
+    await page.set_content(_LONG_NAMED_SELECT)
+    # `exact=True` by default, and "Lista" ≠ "Lista województw": the strict
+    # variant matches nothing, the relaxed one matches the select.
+    answered = ReasonerResult(action="select", target=RoleTarget(role="combobox", name="Lista"))
+
+    control = await resolve_step_target(
+        page,
+        Step(select=Select(from_="lista województw", option="Mazowieckie")),
+        "select",
+        StubReasoner(answered),
+    )
+    assert isinstance(control, ResolvedTarget)
+    assert control.target == RoleTarget(role="combobox", name="Lista", exact=False)
+
+    step = Step(select=Select(from_="lista województw", option="Śląskie"))
+
+    with pytest.raises(TargetResolutionError) as excinfo:
+        await resolve_step_target(page, step, "select", StubReasoner(answered))
+
+    message = str(excinfo.value)
+    assert "matched no elements" in message  # the rejection of the target as answered
+    assert "no option labelled" not in message  # …and not the relaxed variant's
+    assert "Mazowieckie" not in message
+
+
 async def test_hidden_wait_is_never_pinned(page):
     """A pinned hidden wait would be unremovable — its reuse check can never fail it."""
 

@@ -14,6 +14,7 @@ from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
 from guidebot_recorder.chrome import Chrome
+from guidebot_recorder.desktop import DesktopOverlay
 from guidebot_recorder.models.action import COMPILER_VERSION
 from guidebot_recorder.models.compiled import CompiledScenario
 from guidebot_recorder.models.config import (
@@ -397,12 +398,13 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
 ):
     """Locks in render.py's context init-script ordering contract.
 
-    cursor.js and slide.js rely on reading the real ``window.top`` to decide
-    whether they are running in the top document or a framed site; chrome.js is
-    what shadows ``top`` for frame-bust neutralization. If either ran after
-    chrome.js, it would read the shadowed ``top`` and misidentify its role. This
-    spies on ``install_context`` (rather than asserting on ``window.top``
-    behavior directly) because modern Chromium already makes
+    cursor.js, slide.js and desktop.js rely on reading the real ``window.top``
+    to decide whether they are running in the top document or a framed site;
+    chrome.js is what shadows ``top`` for frame-bust neutralization. If any of
+    them ran after chrome.js, it would read the shadowed ``top`` and
+    misidentify its role — desktop.js would mount the whole desktop *inside*
+    the framed site. This spies on ``install_context`` (rather than asserting
+    on ``window.top`` behavior directly) because modern Chromium already makes
     ``Object.defineProperty(window, "top", ...)`` a no-op for cross-origin
     frames, so a black-box DOM assertion can't distinguish a correct order
     from a swapped one — only the registration order itself can.
@@ -436,6 +438,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     order: list[str] = []
     original_overlay_install = Overlay.install_context
     original_slide_install = SlideOverlay.install_context
+    original_desktop_install = DesktopOverlay.install_context
     original_selects_install = Selects.install_context
     original_chrome_install = Chrome.install_context
 
@@ -447,6 +450,10 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
         order.append("slide")
         return await original_slide_install(self, context)
 
+    async def spy_desktop_install(self, context):
+        order.append("desktop")
+        return await original_desktop_install(self, context)
+
     async def spy_selects_install(self, context):
         order.append("selects")
         return await original_selects_install(self, context)
@@ -457,6 +464,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
 
     monkeypatch.setattr(Overlay, "install_context", spy_overlay_install)
     monkeypatch.setattr(SlideOverlay, "install_context", spy_slide_install)
+    monkeypatch.setattr(DesktopOverlay, "install_context", spy_desktop_install)
     monkeypatch.setattr(Selects, "install_context", spy_selects_install)
     monkeypatch.setattr(Chrome, "install_context", spy_chrome_install)
 
@@ -470,7 +478,7 @@ async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
         await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
         await browser.close()
 
-    assert order == ["overlay", "slide", "selects", "chrome"]
+    assert order == ["overlay", "slide", "desktop", "selects", "chrome"]
 
 
 async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, monkeypatch):
@@ -3429,6 +3437,101 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
         await browser.close()
 
     assert seen == ["slide"], f"expected the full-canvas tab to force slide, got {seen}"
+
+
+# --- P16 popup composition -> P17 time editing ---------------------------------
+
+
+async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monkeypatch):
+    """The compositor runs FIRST and the time editor consumes ITS output.
+
+    Popups are composed on the RECORDING axis: `popup.opened_at` / `closed_at`
+    are raw wall clock, measured against the same anchor the recording was
+    started with. Time editing is what moves the film onto the VIRTUAL axis by
+    inserting held frames. Run the two the other way round -- or thread the
+    intermediate path wrong, so the editor re-reads the raw recording -- and
+    the popup lands at the wrong moment in the finished film.
+
+    Nothing else in the suite notices that, which is the whole reason this test
+    exists. The ordering is stated in one comment in `run_render` and asserted
+    nowhere:
+
+    * `test_compositor_starts_popup_at_verified_visual_frame` and every
+      `compose_popup_video` test in `tests/unit/video/test_mux.py` drive the
+      compositor DIRECTLY on synthetic MP4s -- they never go through
+      `run_render`, so they cannot see either phase's position in it;
+    * `test_a_full_canvas_popup_is_presented_full_frame_not_inset` does spy
+      `compose_popup_video` inside a real render, but records only
+      `kwargs["transition"]` -- not which file went in or out;
+    * `test_hold_frame_film_matches_the_model_exactly` and
+      `test_smallest_legal_settle_still_renders` spy `_apply_timeline_edits`,
+      but record only the `Timeline`, and neither scenario has a popup at all.
+
+    And every downstream guard compares the film's LENGTH against the model --
+    `_apply_timeline_edits`' own frame-count check, the audio beds, the mux
+    duration -- i.e. the model against itself. A swap keeps all of those green,
+    because the film still comes out exactly as long as the timeline says: it
+    just has the popup in the wrong place. Length is not position, so length
+    checks cannot catch this. Only the call order and the paths can.
+
+    The scenario needs BOTH phases to fire: `_write_close_window_scenario`
+    supplies the popup, and its trailing `say` under `LongTts` (3.0s narration
+    against the default 1.0s `holdFrameSettle`) supplies the freeze -- without
+    a freeze the timeline is empty and the time-editing branch is skipped
+    entirely.
+    """
+    import guidebot_recorder.recorder.render as R
+
+    order: list[str] = []
+    composed: list[tuple[Path, Path]] = []
+    edited: list[tuple[Path, Path]] = []
+
+    original_compose = R.compose_popup_video
+    original_edit = R._apply_timeline_edits
+
+    def spy_compose(main, popup, dest, *args, **kwargs):
+        order.append("compose")
+        composed.append((Path(main), Path(dest)))
+        return original_compose(main, popup, dest, *args, **kwargs)
+
+    def spy_edit(source, timeline, dest):
+        order.append("edit")
+        edited.append((Path(source), Path(dest)))
+        return original_edit(source, timeline, dest)
+
+    monkeypatch.setattr(R, "compose_popup_video", spy_compose)
+    monkeypatch.setattr(R, "_apply_timeline_edits", spy_edit)
+
+    path = _write_close_window_scenario(tmp_path)
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await run_compile(path, page, LinkReasoner(), selects=None)
+        await page.context.close()
+        await run_render(path, tmp_path / "out.mp4", LongTts(), tmp_path / "cache", browser)
+        await browser.close()
+
+    assert composed, "the popup was never composed -- the scenario lost its popup"
+    assert edited, (
+        "no time edit ran -- the trailing 3.0s narration produced no freeze, "
+        "so this test would pass vacuously"
+    )
+    assert order == ["compose", "edit"], (
+        "popup composition must run before time editing: the popup's opened_at/"
+        f"closed_at are raw recording-axis wall clock (got {order})"
+    )
+
+    main_webm, composite = composed[0]
+    edit_source, _edit_dest = edited[0]
+    assert edit_source == composite, (
+        "time editing must consume the compositor's output, not the raw "
+        f"recording -- it read {edit_source} while the composite is {composite}"
+    )
+    assert edit_source != main_webm, (
+        "time editing read the raw recording -- the composited popup would be "
+        "dropped from the film entirely"
+    )
 
 
 async def test_window_open_call_is_recorded_even_without_size_features():
