@@ -81,8 +81,9 @@ class SelectDriveError(RuntimeError):
     be rewritten.
 
     The render layer catches this and re-raises it as a ``RenderError`` carrying
-    the index of the failing step. ``RenderError`` lives in ``render.py``, which
-    imports this module, so it cannot be raised from here without a cycle.
+    the index of the failing step. ``RenderError`` lives in
+    ``recorder/render/errors.py``, whose package imports this module, so it cannot
+    be raised from here without a cycle.
     """
 
     def __init__(self, message: str, *, reason: str = UNDRIVABLE) -> None:

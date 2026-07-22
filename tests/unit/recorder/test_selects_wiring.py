@@ -43,9 +43,12 @@ from guidebot_recorder.recorder.render import (
     RenderError,
     _compiled_action_is_current,
     _compiled_from,
-    _render_step,
     run_render,
 )
+
+# `_render_step` is a test seam, so the facade withholds it: import the module
+# that defines it. See the render package docstring.
+from guidebot_recorder.recorder.render._step import _render_step
 from guidebot_recorder.recorder.session import (
     SetupNeedsCompile,
     _manual_finish,

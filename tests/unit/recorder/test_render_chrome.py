@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 
 from guidebot_recorder.models.config import ChromeConfig, Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import Scenario, Step
-from guidebot_recorder.recorder.render import _ensure_visuals, _expect_chrome, _render_step
+from guidebot_recorder.recorder.render import _ensure_visuals, _expect_chrome
+
+# `_render_step` is a test seam, so the facade withholds it: import the module
+# that defines it. See the render package docstring.
+from guidebot_recorder.recorder.render._step import _render_step
 
 
 def test_expect_chrome_tracks_the_legacy_bar() -> None:

@@ -556,7 +556,8 @@ def select_mode(step: Step, cfg: Config) -> str:
 
     Lives with the two models it reads rather than with either phase that
     dispatches on it: it is a pure lookup over ``Step`` and ``Config``, and
-    homing it in ``compile.py`` made ``render.py`` import the compiler for it.
+    homing it in the compile package made the render package import the compiler
+    for it.
     """
 
     if step.select is not None and step.select.mode is not None:

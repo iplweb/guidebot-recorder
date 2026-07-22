@@ -86,8 +86,8 @@ async def test_audio_beds_use_bounded_threads_and_keep_track_order(tmp_path, mon
             with lock:
                 active -= 1
 
-    monkeypatch.setattr(render_module, "_AUDIO_BED_CONCURRENCY", 2)
-    monkeypatch.setattr(render_module, "build_audio_bed", fake_build_audio_bed)
+    monkeypatch.setattr(render_module.audio, "_AUDIO_BED_CONCURRENCY", 2)
+    monkeypatch.setattr(render_module.audio, "build_audio_bed", fake_build_audio_bed)
 
     tracks = await render_module._mux_tracks_for_timeline(
         configs,
@@ -121,14 +121,14 @@ async def test_audio_bed_cancellation_waits_for_running_thread(tmp_path, monkeyp
         out.write_bytes(b"bed")
         finished.set()
 
-    monkeypatch.setattr(render_module, "build_audio_bed", blocking_build)
-    monkeypatch.setattr(render_module, "mux_audio_tracks", lambda *args, **kwargs: None)
-    monkeypatch.setattr(render_module, "_publish_render_artifacts", lambda *args: None)
+    monkeypatch.setattr(render_module.audio, "build_audio_bed", blocking_build)
+    monkeypatch.setattr(render_module.audio, "mux_audio_tracks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(render_module.audio, "_publish_render_artifacts", lambda *args: None)
 
     work = tmp_path / "work"
     work.mkdir()
     task = asyncio.create_task(
-        render_module._assemble_audio_tracks(
+        render_module.audio._assemble_audio_tracks(
             tmp_path / "video.webm",
             [tts],
             {tts.lang: []},

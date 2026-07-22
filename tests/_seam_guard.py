@@ -39,6 +39,15 @@ the second mode — 10 of its 19 patched names are cross-package name-imports �
 guard hardcoding the first mode would flag dozens of *correct* patch sites and push
 the tests into patching shared packages globally.
 
+``recorder.render`` also adds a third shape the first two packages never had: a
+seam one module *deeper* than the package. ``_publish_render_artifacts`` calls
+``os.replace(...)``, so the name resolved at call time is ``replace`` on the ``os``
+object in :mod:`...render.audio`'s globals, and the honest patch target is the
+dotted ``...render.audio.os.replace``. That is the same late-binding rule, one
+level out, so :meth:`SeamGuard._module_chain_offender` accepts it — but only when
+every step of the chain really resolves to a module reachable from the package, so
+an attribute snapshot cannot disguise itself as a module path.
+
 **Liveness must be completeness, not non-emptiness.** ``assert SEAMS`` is
 all-or-nothing: the moment one file adopts a recognised idiom the scan goes
 non-empty and the other eighty sites are silently unscanned, leaving every
@@ -237,13 +246,42 @@ class SeamGuard:
         assert not offenders, "\n".join(offenders)
         assert self.seams, f"no monkeypatch targets found on {self.package} under {self.tests_root}"
 
+    def _module_chain_offender(self, name: str, owner: str, text: str) -> str | None:
+        """Judge a ``<submodule>.<module>[...]`` target, e.g. ``audio.os``.
+
+        A seam can live one module deeper than the package: ``_publish_render_artifacts``
+        calls ``os.replace(...)``, so the name the consumer resolves at call time is
+        ``replace`` on the ``os`` object held in :mod:`...render.audio`'s globals. That is
+        the same late-binding rule this guard exists for, one level further out, and the
+        patch is legitimate exactly when every step of the chain really is a module
+        reachable from the package — anything else is an attribute snapshot dressed up as
+        a module path.
+        """
+        head, _, tail = owner.partition(".")
+        if head not in self.submodules:
+            return f"{name!r} is patched on {text!r}, which is not a submodule of {self.package}"
+        target = getattr(self.module, head, None)
+        for step in tail.split("."):
+            target = getattr(target, step, None)
+            if not isinstance(target, ModuleType):
+                return (
+                    f"{name!r} is patched on {text!r}, whose {step!r} is not a module; "
+                    f"patch the submodule whose globals the consumer reads, so the patch "
+                    f"and the call site land on the same module object"
+                )
+        if not hasattr(target, name):
+            return f"{name!r} is patched on {text!r}, which does not define it"
+        return None
+
     def _target_offender(self, name: str, owner: str, text: str) -> str | None:
-        if owner == FACADE or "." in owner:
+        if owner == FACADE:
             return (
                 f"{name!r} is patched on {text!r}; patch it on the submodule whose globals "
                 f"the consumer reads, so the patch and the call site land on the same "
                 f"module object"
             )
+        if "." in owner:
+            return self._module_chain_offender(name, owner, text)
         if owner not in self.submodules:
             return f"{name!r} is patched on {text!r}, which is not a submodule of {self.package}"
         if not hasattr(getattr(self.module, owner, None), name):

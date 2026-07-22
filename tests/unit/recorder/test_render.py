@@ -31,11 +31,8 @@ from guidebot_recorder.recorder.render import (
     _POPUP_REQUEST_SCRIPT,
     POPUP_BBOX_DEGENERATE_RATIO,
     RenderError,
-    _apply_timeline_edits,
-    _assemble_audio_tracks,
     _build_timeline,
     _mux_tracks_for_timeline,
-    _pace_narration,
     _parse_content_box,
     _parse_window_request,
     _popup_content_box,
@@ -43,10 +40,18 @@ from guidebot_recorder.recorder.render import (
     _popup_window_opened,
     _popup_window_request,
     _prime_visuals,
-    _publish_render_artifacts,
     _resolve_popup_crop,
     run_render,
 )
+
+# Withheld from the facade on purpose (they are test seams), so they are imported
+# from the submodule that defines them. See the render package docstring.
+from guidebot_recorder.recorder.render.audio import (
+    _assemble_audio_tracks,
+    _publish_render_artifacts,
+)
+from guidebot_recorder.recorder.render.narration import _pace_narration
+from guidebot_recorder.recorder.render.timeline import _apply_timeline_edits
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
 from guidebot_recorder.scenario.loader import ScenarioValidationError, load_scenario
@@ -397,7 +402,7 @@ async def test_render_produces_mp4_with_audio(tmp_path):
 async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     tmp_path, monkeypatch
 ):
-    """Locks in render.py's context init-script ordering contract.
+    """Locks in the context init-script ordering contract of ``render/_run.py``.
 
     cursor.js, slide.js and desktop.js rely on reading the real ``window.top``
     to decide whether they are running in the top document or a framed site;
@@ -506,14 +511,17 @@ async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, 
     )
 
     holds: list[float | None] = []
-    original_recorder = render_module.Recorder
+    original_recorder = render_module._run.Recorder
 
     class SpyRecorder(original_recorder):  # type: ignore[misc, valid-type]
         def __init__(self, *args, **kwargs):
             holds.append(kwargs.get("open_hold_ms"))
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(render_module, "Recorder", SpyRecorder)
+    # `Recorder` is constructed in two submodules — the render loop and the
+    # post-popup-close funnel — so replacing it takes both lines.
+    monkeypatch.setattr(render_module._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(render_module.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -555,7 +563,7 @@ async def test_render_produces_one_video_with_multiple_language_tracks(tmp_path,
         await _pace_narration(segments, **kwargs)
 
     monkeypatch.setattr(
-        "guidebot_recorder.recorder.render._pace_narration",
+        "guidebot_recorder.recorder.render.narration._pace_narration",
         observe_narration_wait,
     )
 
@@ -788,7 +796,7 @@ def test_publish_render_artifacts_rolls_back_keyboard_interrupt(tmp_path, monkey
             raise KeyboardInterrupt
         real_replace(source, destination)
 
-    monkeypatch.setattr("guidebot_recorder.recorder.render.os.replace", interrupt_at_master)
+    monkeypatch.setattr("guidebot_recorder.recorder.render.audio.os.replace", interrupt_at_master)
 
     with pytest.raises(KeyboardInterrupt):
         _publish_render_artifacts(
@@ -833,8 +841,8 @@ async def test_assemble_failure_preserves_previous_master_and_complete_bed_set(
             raise RuntimeError("mux failed")
         destination.write_bytes(b"new master")
 
-    monkeypatch.setattr("guidebot_recorder.recorder.render.build_audio_bed", staged_bed)
-    monkeypatch.setattr("guidebot_recorder.recorder.render.mux_audio_tracks", staged_mux)
+    monkeypatch.setattr("guidebot_recorder.recorder.render.audio.build_audio_bed", staged_bed)
+    monkeypatch.setattr("guidebot_recorder.recorder.render.audio.mux_audio_tracks", staged_mux)
 
     with pytest.raises(RuntimeError, match="failed"):
         await _assemble_audio_tracks(
@@ -1086,7 +1094,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
         # attribute the window to the click).
         early_uri = early.resolve().as_uri()
 
-        class EarlyWindowRecorder(R.Recorder):
+        class EarlyWindowRecorder(R._run.Recorder):
             async def click(self, target, *, before_click=None):
                 # Awaiting the context's own page event is what makes this
                 # deterministic: the render has *observed* the window by the time
@@ -1096,7 +1104,10 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
                 await early_window.value
                 await super().click(target, before_click=before_click)
 
-        monkeypatch.setattr(R, "Recorder", EarlyWindowRecorder)
+        # `Recorder` is constructed in two submodules — the render loop and the
+        # post-popup-close funnel — so replacing it takes both lines.
+        monkeypatch.setattr(R._run, "Recorder", EarlyWindowRecorder)
+        monkeypatch.setattr(R.visuals, "Recorder", EarlyWindowRecorder)
 
         with pytest.raises(RenderError, match="przed akcją click"):
             await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
@@ -1142,7 +1153,7 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path, monkeyp
         # every phase it can land in (during the open, during the visual mount,
         # during the narration). The bet is what made this test flaky on CI; the
         # phase this test is about is the one it now pins.
-        real_pace_narration = R._pace_narration
+        real_pace_narration = R.narration._pace_narration
 
         async def close_popup_during_narration(*args, **kwargs):
             for context in browser.contexts:
@@ -1151,7 +1162,7 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path, monkeyp
                         await open_page.close()
             return await real_pace_narration(*args, **kwargs)
 
-        monkeypatch.setattr(R, "_pace_narration", close_popup_during_narration)
+        monkeypatch.setattr(R.narration, "_pace_narration", close_popup_during_narration)
 
         with pytest.raises(RenderError, match="asynchronicznie podczas narracji"):
             await run_render(path, tmp_path / "out.mp4", FakeTts(), tmp_path / "cache", browser)
@@ -1180,18 +1191,21 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     overlay_viewports: list = []
     recorder_kwargs: list = []
 
-    class SpyOverlay(R.Overlay):
+    class SpyOverlay(R._run.Overlay):
         def __init__(self, cursor=None, viewport=None):
             overlay_viewports.append(viewport)
             super().__init__(cursor, viewport)
 
-    class SpyRecorder(R.Recorder):
+    class SpyRecorder(R._run.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
-    monkeypatch.setattr(R, "Overlay", SpyOverlay)
-    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    # `Recorder` is constructed in two submodules — the render loop and the
+    # post-popup-close funnel — so replacing it takes both lines.
+    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1223,12 +1237,15 @@ async def test_render_respects_typing_animate_false(tmp_path, monkeypatch):
 
     recorder_kwargs: list = []
 
-    class SpyRecorder(R.Recorder):
+    class SpyRecorder(R._run.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
-    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+    # `Recorder` is constructed in two submodules — the render loop and the
+    # post-popup-close funnel — so replacing it takes both lines.
+    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1299,13 +1316,13 @@ async def test_render_with_sound_collects_and_mixes_sfx(tmp_path, monkeypatch):
     )
 
     recorded_events: list[list[tuple[str, float]]] = []
-    original_build_sfx_bed = R.build_sfx_bed
+    original_build_sfx_bed = R.audio.build_sfx_bed
 
     def spy_build_sfx_bed(events, *args, **kwargs):
         recorded_events.append(list(events))
         return original_build_sfx_bed(events, *args, **kwargs)
 
-    monkeypatch.setattr(R, "build_sfx_bed", spy_build_sfx_bed)
+    monkeypatch.setattr(R.audio, "build_sfx_bed", spy_build_sfx_bed)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1330,13 +1347,13 @@ async def test_render_sound_off_builds_no_sfx_bed(tmp_path, monkeypatch):
     await _compile_sound_scenario(path, "  sound: {enabled: false}\n")
 
     calls: list = []
-    original_build_sfx_bed = R.build_sfx_bed
+    original_build_sfx_bed = R.audio.build_sfx_bed
 
     def spy_build_sfx_bed(events, *args, **kwargs):
         calls.append(events)
         return original_build_sfx_bed(events, *args, **kwargs)
 
-    monkeypatch.setattr(R, "build_sfx_bed", spy_build_sfx_bed)
+    monkeypatch.setattr(R.audio, "build_sfx_bed", spy_build_sfx_bed)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1357,13 +1374,13 @@ async def test_render_sound_gates_keys_when_disabled(tmp_path, monkeypatch):
     )
 
     recorded_events: list[list[tuple[str, float]]] = []
-    original_build_sfx_bed = R.build_sfx_bed
+    original_build_sfx_bed = R.audio.build_sfx_bed
 
     def spy_build_sfx_bed(events, *args, **kwargs):
         recorded_events.append(list(events))
         return original_build_sfx_bed(events, *args, **kwargs)
 
-    monkeypatch.setattr(R, "build_sfx_bed", spy_build_sfx_bed)
+    monkeypatch.setattr(R.audio, "build_sfx_bed", spy_build_sfx_bed)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1401,7 +1418,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
 
     slide_events: list[tuple[str, dict]] = []
 
-    class SpySlide(R.SlideOverlay):
+    class SpySlide(R._run.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             slide_events.append(("show", dict(card)))
@@ -1419,7 +1436,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
                 )
             )
 
-    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1470,28 +1487,31 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
     overlay_show_calls = 0
     dom_state_before_navigate: list[int] = []
 
-    class SpySlide(R.SlideOverlay):
+    class SpySlide(R._run.SlideOverlay):
         async def hide(self, page):
             nonlocal slide_hide_calls
             slide_hide_calls += 1
             await super().hide(page)
 
-    class SpyOverlay(R.Overlay):
+    class SpyOverlay(R._run.Overlay):
         async def show(self, page):
             nonlocal overlay_show_calls
             overlay_show_calls += 1
             await super().show(page)
 
-    class SpyRecorder(R.Recorder):
+    class SpyRecorder(R._run.Recorder):
         async def navigate(self, url):
             dom_state_before_navigate.append(
                 await self.page.locator("[data-guidebot-slide]").count()
             )
             await super().navigate(url)
 
-    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
-    monkeypatch.setattr(R, "Overlay", SpyOverlay)
-    monkeypatch.setattr(R, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    # `Recorder` is constructed in two submodules — the render loop and the
+    # post-popup-close funnel — so replacing it takes both lines.
+    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1540,21 +1560,21 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
     # check therefore sees a live card; only a post-wait check sees the loss.
     destroyed = {"value": False}
 
-    class MidWaitDestroySlide(R.SlideOverlay):
+    class MidWaitDestroySlide(R._run.SlideOverlay):
         async def token(self, page):
             if destroyed["value"]:
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R, "SlideOverlay", MidWaitDestroySlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", MidWaitDestroySlide)
 
-    original_wait = R._pace_narration
+    original_wait = R.narration._pace_narration
 
     async def destroy_during_wait(segments, **kwargs):
         await original_wait(segments, **kwargs)
         destroyed["value"] = True  # a navigation replaced the document mid-say
 
-    monkeypatch.setattr(R, "_pace_narration", destroy_during_wait)
+    monkeypatch.setattr(R.narration, "_pace_narration", destroy_during_wait)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1603,7 +1623,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
 
     destroyed = {"value": False}
 
-    class GhostNavSlide(R.SlideOverlay):
+    class GhostNavSlide(R._run.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             destroyed["value"] = False  # a repaint restores a truthy token
@@ -1613,15 +1633,15 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
 
-    original_wait = R._pace_narration
+    original_wait = R.narration._pace_narration
 
     async def destroy_during_wait(segments, **kwargs):
         await original_wait(segments, **kwargs)
         destroyed["value"] = True  # a navigation replaced the document mid-say
 
-    monkeypatch.setattr(R, "_pace_narration", destroy_during_wait)
+    monkeypatch.setattr(R.narration, "_pace_narration", destroy_during_wait)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1670,7 +1690,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
 
     slide_ref: dict = {}
 
-    class GhostNavSlide(R.SlideOverlay):
+    class GhostNavSlide(R._run.SlideOverlay):
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
             self._ghost = False
@@ -1688,9 +1708,9 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
 
-    original_render_step = R._render_step
+    original_render_step = R._step._render_step
 
     async def render_step_spy(*args, **kwargs):
         # args[6] is `kind` (see _render_step's signature). A navigation lands
@@ -1701,7 +1721,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
             slide_ref["slide"]._ghost = True
         return result
 
-    monkeypatch.setattr(R, "_render_step", render_step_spy)
+    monkeypatch.setattr(R._step, "_render_step", render_step_spy)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1740,12 +1760,12 @@ async def test_intro_enabled_replaces_bootstrap(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R.SlideOverlay):
+    class SpySlide(R._run.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1781,12 +1801,12 @@ async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R.SlideOverlay):
+    class SpySlide(R._run.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1859,7 +1879,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
     def _role(page) -> str:
         return "popup" if page.url.endswith("popup.html") else "main"
 
-    class SpyOverlay(R.Overlay):
+    class SpyOverlay(R._run.Overlay):
         async def hide(self, page):
             events.append(("hide", _role(page)))
             await super().hide(page)
@@ -1868,7 +1888,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
             events.append(("show", _role(page)))
             await super().show(page)
 
-    monkeypatch.setattr(R, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -2042,13 +2062,13 @@ async def test_run_render_hold_frame_overrides_reach_the_pacing_decision(tmp_pat
     )
 
     pacing_kwargs: list[dict] = []
-    original = R._pace_narration
+    original = R.narration._pace_narration
 
     async def spy(segments, **kwargs):
         pacing_kwargs.append(kwargs)
         await original(segments, **kwargs)
 
-    monkeypatch.setattr(R, "_pace_narration", spy)
+    monkeypatch.setattr(R.narration, "_pace_narration", spy)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -2093,13 +2113,13 @@ async def test_run_render_uses_the_scenario_value_when_no_override_is_given(tmp_
     )
 
     pacing_kwargs: list[dict] = []
-    original = R._pace_narration
+    original = R.narration._pace_narration
 
     async def spy(segments, **kwargs):
         pacing_kwargs.append(kwargs)
         await original(segments, **kwargs)
 
-    monkeypatch.setattr(R, "_pace_narration", spy)
+    monkeypatch.setattr(R.narration, "_pace_narration", spy)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -2149,13 +2169,13 @@ async def test_hold_frame_film_matches_the_model_exactly(tmp_path, monkeypatch):
     )
 
     seen: list[Timeline] = []
-    original = R._apply_timeline_edits
+    original = R.timeline._apply_timeline_edits
 
     def spy(source, timeline, dest):
         seen.append(timeline)
         return original(source, timeline, dest)
 
-    monkeypatch.setattr(R, "_apply_timeline_edits", spy)
+    monkeypatch.setattr(R.timeline, "_apply_timeline_edits", spy)
 
     out = tmp_path / "out.mp4"
     async with async_playwright() as pw:
@@ -2286,13 +2306,13 @@ async def test_smallest_legal_settle_still_renders(tmp_path, monkeypatch):
     )
 
     seen: list[Timeline] = []
-    original = R._apply_timeline_edits
+    original = R.timeline._apply_timeline_edits
 
     def spy(source, timeline, dest):
         seen.append(timeline)
         return original(source, timeline, dest)
 
-    monkeypatch.setattr(R, "_apply_timeline_edits", spy)
+    monkeypatch.setattr(R.timeline, "_apply_timeline_edits", spy)
 
     out = tmp_path / "out.mp4"
     async with async_playwright() as pw:
@@ -2365,13 +2385,13 @@ async def test_hold_frame_narrations_never_overlap(tmp_path, monkeypatch):
     # The offsets actually handed to the audio bed, captured at the boundary
     # where the frame axis becomes seconds.
     captured: list[list[Placed]] = []
-    original = R._assemble_audio_tracks
+    original = R.audio._assemble_audio_tracks
 
     async def spy(video, configs, placed_by_language, total, *args, **kwargs):
         captured.extend(placed_by_language.values())
         return await original(video, configs, placed_by_language, total, *args, **kwargs)
 
-    monkeypatch.setattr(R, "_assemble_audio_tracks", spy)
+    monkeypatch.setattr(R.audio, "_assemble_audio_tracks", spy)
 
     out = tmp_path / "out.mp4"
     async with async_playwright() as pw:
@@ -2398,7 +2418,7 @@ async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypa
 
     `test_hold_frame_narrations_never_overlap` proves the narration clamp
     (`not_before=narration_frame` on the NEXT step's own narration stamp); it
-    never looks at SFX. `sfx_sink` (render.py, the `on_sfx` closure passed to
+    never looks at SFX. `sfx_sink` (render/_run.py, the `on_sfx` closure passed to
     `Recorder`) carries the exact same `not_before=last_freeze_frame + 1`
     clamp, but nothing previously asserted it does anything — the render
     could clamp narration and NOT sound effects and the whole suite would
@@ -2449,22 +2469,22 @@ async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypa
     )
 
     narrations: list[list[Placed]] = []
-    original_assemble = R._assemble_audio_tracks
+    original_assemble = R.audio._assemble_audio_tracks
 
     async def spy_assemble(video, configs, placed_by_language, total, *args, **kwargs):
         narrations.extend(placed_by_language.values())
         return await original_assemble(video, configs, placed_by_language, total, *args, **kwargs)
 
-    monkeypatch.setattr(R, "_assemble_audio_tracks", spy_assemble)
+    monkeypatch.setattr(R.audio, "_assemble_audio_tracks", spy_assemble)
 
     sfx_events: list[list[tuple[str, float]]] = []
-    original_build_sfx_bed = R.build_sfx_bed
+    original_build_sfx_bed = R.audio.build_sfx_bed
 
     def spy_build_sfx_bed(events, *args, **kwargs):
         sfx_events.append(list(events))
         return original_build_sfx_bed(events, *args, **kwargs)
 
-    monkeypatch.setattr(R, "build_sfx_bed", spy_build_sfx_bed)
+    monkeypatch.setattr(R.audio, "build_sfx_bed", spy_build_sfx_bed)
 
     out = tmp_path / "out.mp4"
     async with async_playwright() as pw:
@@ -2567,8 +2587,11 @@ def test_apply_timeline_edits_rejects_a_file_that_disagrees_with_the_model(
     import guidebot_recorder.recorder.render as R
 
     timeline = Timeline.build([TimeEdit(at=10, kind="freeze", frames=25)], source_frames=100)
-    monkeypatch.setattr(R, "apply_time_edits", lambda src, tl, out: None)
-    monkeypatch.setattr(R, "probe_frame_count", lambda path: 123)
+    monkeypatch.setattr(R.timeline, "apply_time_edits", lambda src, tl, out: None)
+    # `probe_frame_count` has a second consumer in `_run` (it sizes the timeline
+    # before the edit runs), so replacing it takes both lines.
+    monkeypatch.setattr(R.timeline, "probe_frame_count", lambda path: 123)
+    monkeypatch.setattr(R._run, "probe_frame_count", lambda path: 123)
 
     with pytest.raises(RenderError) as excinfo:
         _apply_timeline_edits(tmp_path / "src.mp4", timeline, tmp_path / "out.mp4")
@@ -2645,13 +2668,13 @@ async def test_popup_window_request_returns_as_soon_as_one_frame_answers():
     assert hanging.entered.is_set(), "test did not exercise the hanging frame"
     assert elapsed < 0.5, (
         f"lookup waited for the silent frame: took {elapsed:.2f}s "
-        f"(budget is {render_module._POPUP_REQUEST_LOOKUP_TIMEOUT:g}s)"
+        f"(budget is {render_module.popup_detect._POPUP_REQUEST_LOOKUP_TIMEOUT:g}s)"
     )
 
 
 async def test_popup_window_request_survives_a_frame_that_raises(monkeypatch):
     """One exploding probe must not abort the scan — other frames may answer."""
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     opener = _StubOpener(
         [_StubFrame({"width": 420, "height": 300}), _RaisingFrame()],
         main_frame=_RaisingFrame(),
@@ -2672,7 +2695,7 @@ async def test_popup_window_request_takes_the_top_document_when_several_answer()
 
 async def test_popup_window_request_answers_despite_a_frame_that_never_answers(monkeypatch):
     """A dead ad iframe must neither hang the lookup nor hide the real answer."""
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     hanging = _HangingFrame()
     # Reverse order puts the hanging frame ahead of the one holding the answer,
     # so a sequential scan would never reach the answer at all.
@@ -2687,7 +2710,7 @@ async def test_popup_window_request_answers_despite_a_frame_that_never_answers(m
 
 
 async def test_popup_window_request_gives_up_when_only_dead_frames_remain(monkeypatch, capsys):
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
 
     started = time.monotonic()
@@ -2700,7 +2723,7 @@ async def test_popup_window_request_gives_up_when_only_dead_frames_remain(monkey
 
 async def test_popup_window_request_abandons_no_orphan_task(monkeypatch):
     """An abandoned probe must not leave an un-awaited exception behind."""
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
 
     assert await _popup_window_request(opener) is None
@@ -2722,7 +2745,7 @@ async def test_popup_window_request_abandons_no_orphan_task(monkeypatch):
 
 async def test_popup_window_opened_answers_despite_a_frame_that_never_answers(monkeypatch):
     """A dead ad iframe must neither hang the lookup nor hide the real answer."""
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     hanging = _HangingFrame()
     # Reverse order puts the hanging frame ahead of the one holding the answer,
     # so a sequential scan would never reach the answer at all.
@@ -2737,7 +2760,7 @@ async def test_popup_window_opened_answers_despite_a_frame_that_never_answers(mo
 
 
 async def test_popup_window_opened_gives_up_when_only_dead_frames_remain(monkeypatch, capsys):
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
 
     started = time.monotonic()
@@ -2752,7 +2775,7 @@ async def test_popup_window_opened_gives_up_when_only_dead_frames_remain(monkeyp
 
 async def test_popup_window_opened_abandons_no_orphan_task(monkeypatch):
     """An abandoned probe must not leave an un-awaited exception behind."""
-    monkeypatch.setattr(render_module, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_detect, "_POPUP_REQUEST_LOOKUP_TIMEOUT", 0.3)
     opener = _StubOpener([_HangingFrame()], main_frame=_HangingFrame())
 
     assert await _popup_window_opened(opener) is True
@@ -2944,7 +2967,7 @@ def _popup_with_probe(page):
 
 
 async def test_settle_popup_content_box_gives_up_on_a_page_that_never_answers(monkeypatch, capsys):
-    monkeypatch.setattr(render_module, "_POPUP_CONTENT_BOX_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_crop, "_POPUP_CONTENT_BOX_TIMEOUT", 0.3)
     page = _HangingPage()
     popup = _popup_with_probe(page)
 
@@ -2959,7 +2982,7 @@ async def test_settle_popup_content_box_gives_up_on_a_page_that_never_answers(mo
 
 
 async def test_settle_popup_content_box_abandons_no_orphan_task(monkeypatch):
-    monkeypatch.setattr(render_module, "_POPUP_CONTENT_BOX_TIMEOUT", 0.3)
+    monkeypatch.setattr(render_module.popup_crop, "_POPUP_CONTENT_BOX_TIMEOUT", 0.3)
     popup = _popup_with_probe(_SlowPage())
 
     await render_module._settle_popup_content_box(popup)
@@ -3052,7 +3075,7 @@ def test_resolve_popup_crop_falls_back_to_cropdetect(tmp_path, monkeypatch, caps
         seen.append(Path(path))
         return (300, 220, 2, 2)
 
-    monkeypatch.setattr(render_module, "detect_content_crop", fake_detect)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", fake_detect)
 
     crop, level = _resolve_popup_crop(
         window_size=None,
@@ -3068,7 +3091,7 @@ def test_resolve_popup_crop_falls_back_to_cropdetect(tmp_path, monkeypatch, caps
 
 
 def test_resolve_popup_crop_without_any_geometry_emits_no_crop(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: None)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", lambda path: None)
 
     crop, level = _resolve_popup_crop(
         window_size=None,
@@ -3087,7 +3110,7 @@ def test_resolve_popup_crop_does_not_run_cropdetect_when_a_level_answered(tmp_pa
     def forbidden(path):  # pragma: no cover - failure path
         raise AssertionError("cropdetect must stay the last resort")
 
-    monkeypatch.setattr(render_module, "detect_content_crop", forbidden)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", forbidden)
 
     assert (
         _resolve_popup_crop(
@@ -3107,7 +3130,7 @@ def test_resolve_popup_crop_scales_the_window_open_rect_into_recording_pixels(
     # backing scale, so Playwright fits a 500x670 window into the 1376x800 canvas
     # at 1.19x instead of 1:1 — the CSS rect would cut 96px off the right and
     # 130px off the bottom.
-    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: (596, 800, 0, 0))
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", lambda path: (596, 800, 0, 0))
 
     crop, level = _resolve_popup_crop(
         window_size=(500, 670),
@@ -3124,7 +3147,7 @@ def test_resolve_popup_crop_scales_the_window_open_rect_into_recording_pixels(
 
 
 def test_resolve_popup_crop_scales_the_content_box_into_recording_pixels(tmp_path, monkeypatch):
-    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: (1000, 800, 0, 0))
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", lambda path: (1000, 800, 0, 0))
 
     crop, level = _resolve_popup_crop(
         window_size=None,
@@ -3143,7 +3166,7 @@ def test_resolve_popup_crop_scales_the_content_box_into_recording_pixels(tmp_pat
 def test_resolve_popup_crop_keeps_css_pixels_when_the_recording_is_unscaled(tmp_path, monkeypatch):
     # Headless: the popup records 1:1, so ``detect_content_crop`` finds the whole
     # window already trimmed and declines. The CSS rect is then already correct.
-    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: None)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", lambda path: None)
 
     crop, level = _resolve_popup_crop(
         window_size=(500, 670),
@@ -3169,7 +3192,7 @@ def test_resolve_popup_crop_keeps_css_pixels_when_the_recording_is_unscaled(tmp_
 def test_resolve_popup_crop_refuses_a_measurement_that_contradicts_the_viewport(
     tmp_path, monkeypatch, measured
 ):
-    monkeypatch.setattr(render_module, "detect_content_crop", lambda path: measured)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", lambda path: measured)
 
     crop, level = _resolve_popup_crop(
         window_size=(500, 670),
@@ -3190,7 +3213,7 @@ def test_resolve_popup_crop_skips_the_scale_probe_without_a_viewport(tmp_path, m
     def forbidden(path):  # pragma: no cover - failure path
         raise AssertionError("nothing to correct against, so nothing to measure")
 
-    monkeypatch.setattr(render_module, "detect_content_crop", forbidden)
+    monkeypatch.setattr(render_module.popup_crop, "detect_content_crop", forbidden)
 
     crop, _level = _resolve_popup_crop(
         window_size=(500, 670),
@@ -3360,13 +3383,13 @@ async def test_close_window_hands_the_cursor_back_to_its_pre_popup_position(tmp_
     import guidebot_recorder.recorder.render as R
 
     restored: list[tuple[float, float] | None] = []
-    original = R._prepare_main_after_popup_close
+    original = R.visuals._prepare_main_after_popup_close
 
     async def spy(page, overlay, chrome, settle_ms, restore_cursor_to=None):
         restored.append(restore_cursor_to)
         await original(page, overlay, chrome, settle_ms, restore_cursor_to=restore_cursor_to)
 
-    monkeypatch.setattr(R, "_prepare_main_after_popup_close", spy)
+    monkeypatch.setattr(R.visuals, "_prepare_main_after_popup_close", spy)
 
     path = _write_close_window_scenario(tmp_path)
 
@@ -3419,13 +3442,13 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
     import guidebot_recorder.recorder.render as R
 
     seen: list[str | None] = []
-    original = R.compose_popup_video
+    original = R._run.compose_popup_video
 
     def spy(*args, **kwargs):
         seen.append(kwargs.get("transition"))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(R, "compose_popup_video", spy)
+    monkeypatch.setattr(R._run, "compose_popup_video", spy)
 
     path = _write_close_window_scenario(tmp_path, popup_config=False)
 
@@ -3487,8 +3510,8 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
     composed: list[tuple[Path, Path]] = []
     edited: list[tuple[Path, Path]] = []
 
-    original_compose = R.compose_popup_video
-    original_edit = R._apply_timeline_edits
+    original_compose = R._run.compose_popup_video
+    original_edit = R.timeline._apply_timeline_edits
 
     def spy_compose(main, popup, dest, *args, **kwargs):
         order.append("compose")
@@ -3500,8 +3523,8 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
         edited.append((Path(source), Path(dest)))
         return original_edit(source, timeline, dest)
 
-    monkeypatch.setattr(R, "compose_popup_video", spy_compose)
-    monkeypatch.setattr(R, "_apply_timeline_edits", spy_edit)
+    monkeypatch.setattr(R._run, "compose_popup_video", spy_compose)
+    monkeypatch.setattr(R.timeline, "_apply_timeline_edits", spy_edit)
 
     path = _write_close_window_scenario(tmp_path)
 

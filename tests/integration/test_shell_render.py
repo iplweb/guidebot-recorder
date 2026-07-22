@@ -27,7 +27,7 @@ VIEWPORT = {"width": 400, "height": 400}
 
 
 async def _setup_shell(browser, chrome_config: ChromeConfig) -> tuple[Page, Frame, Chrome]:
-    """Reproduce render.py's main-window setup and return (shell page, site frame)."""
+    """Reproduce ``render/_run.py``'s main-window setup; return (shell page, site frame)."""
 
     context = await browser.new_context(
         viewport=VIEWPORT,
@@ -37,9 +37,9 @@ async def _setup_shell(browser, chrome_config: ChromeConfig) -> tuple[Page, Fram
     overlay = Overlay(CursorConfig())
     slide = SlideOverlay()
     chrome = Chrome(chrome_config)
-    # Mirror render.py's init-script order: cursor (overlay) -> slide -> chrome,
+    # Mirror render/_run.py's init-script order: cursor (overlay) -> slide -> chrome,
     # so slide.js's isTop guard reads the real window.top before chrome.js
-    # shadows it (see render.py's cursor/slide-before-chrome contract comment).
+    # shadows it (see render/_run.py's cursor/slide-before-chrome contract comment).
     await overlay.install_context(context)
     await slide.install_context(context)
     await chrome.install_context(context)
@@ -116,7 +116,7 @@ async def test_no_second_bar_or_cursor_inside_the_framed_site(browser) -> None:
     # itself — real Chromium already makes chrome.js's window.top shadowing a
     # no-op for cross-origin frames, so this passes regardless of init-script
     # order; the order contract (cursor/overlay -> slide -> chrome, see
-    # render.py) is separately covered by a registration-order spy test in
+    # render/_run.py) is separately covered by a registration-order spy test in
     # tests/unit/recorder/test_render.py.
     leaked = await site_frame.evaluate(
         """() => ({
