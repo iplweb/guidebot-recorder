@@ -106,14 +106,14 @@ async def test_recompile_reuses_cache_without_rewriting_unchanged_sidecar(
     path = tmp_path / "login.scenario.yaml"
     path.write_text(SCENARIO, encoding="utf-8")
     writes = 0
-    original_write = compile_module.write_compiled
+    original_write = compile_module.run.write_compiled
 
     def count_write(*args, **kwargs):
         nonlocal writes
         writes += 1
         return original_write(*args, **kwargs)
 
-    monkeypatch.setattr(compile_module, "write_compiled", count_write)
+    monkeypatch.setattr(compile_module.run, "write_compiled", count_write)
 
     await run_compile(path, page, MockReasoner(), selects=None)
     assert writes == 1  # fresh resolve checkpoint; navigate does not rewrite the sidecar
@@ -177,14 +177,14 @@ async def test_targetless_compile_still_writes_final_aligned_sidecar(tmp_path, p
         encoding="utf-8",
     )
     writes = 0
-    original_write = compile_module.write_compiled
+    original_write = compile_module.run.write_compiled
 
     def count_write(*args, **kwargs):
         nonlocal writes
         writes += 1
         return original_write(*args, **kwargs)
 
-    monkeypatch.setattr(compile_module, "write_compiled", count_write)
+    monkeypatch.setattr(compile_module.run, "write_compiled", count_write)
 
     await run_compile(path, page, MockReasoner(), selects=None)
 

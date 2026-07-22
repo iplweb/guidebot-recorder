@@ -633,7 +633,7 @@ async def test_compile_select_drive_failure_points_at_the_line_to_edit(
     async def fake_resolve(root, step_in, kind, reasoner):
         return _resolved_select()
 
-    monkeypatch.setattr(compile_module, "resolve_step_target", fake_resolve)
+    monkeypatch.setattr(compile_module.step, "resolve_step_target", fake_resolve)
 
     with pytest.raises(RuntimeError) as excinfo:
         await compile_module._compile_step(
@@ -679,7 +679,7 @@ async def test_compile_resolver_verdicts_point_at_the_line_to_edit(
             "The <select> has no option labelled 'Mazowieckie'; it offers: 'Śląskie'.)"
         )
 
-    monkeypatch.setattr(compile_module, "resolve_step_target", refusing_resolve)
+    monkeypatch.setattr(compile_module.step, "resolve_step_target", refusing_resolve)
 
     with pytest.raises(RuntimeError) as excinfo:
         await compile_module._compile_step(
@@ -720,7 +720,7 @@ async def test_a_reasoner_exception_is_not_mistaken_for_a_resolver_verdict(
     async def signalling_resolve(root, step_in, kind, reasoner):
         raise SetupNeedsCompile("uruchom najpierw `guidebot compile`")
 
-    monkeypatch.setattr(compile_module, "resolve_step_target", signalling_resolve)
+    monkeypatch.setattr(compile_module.step, "resolve_step_target", signalling_resolve)
 
     with pytest.raises(SetupNeedsCompile):
         await compile_module._compile_step(
@@ -829,7 +829,7 @@ async def _run_compile_select(
     async def fake_resolve(root, step_in, kind, reasoner):
         return _resolved_select()
 
-    monkeypatch.setattr(compile_module, "resolve_step_target", fake_resolve)
+    monkeypatch.setattr(compile_module.step, "resolve_step_target", fake_resolve)
 
     await compile_module._compile_step(
         page,
@@ -884,7 +884,7 @@ async def test_compile_waits_for_the_widget_before_resolving(
 
     order: list[str] = []
     original_wait = Selects.wait_ready
-    original_resolve = compile_module.resolve_step_target
+    original_resolve = compile_module.step.resolve_step_target
 
     async def spy_wait(self, frame, timeout=15.0):
         order.append("ready")
@@ -895,7 +895,7 @@ async def test_compile_waits_for_the_widget_before_resolving(
         return await original_resolve(root, step, kind, reasoner)
 
     monkeypatch.setattr(Selects, "wait_ready", spy_wait)
-    monkeypatch.setattr(compile_module, "resolve_step_target", spy_resolve)
+    monkeypatch.setattr(compile_module.step, "resolve_step_target", spy_resolve)
 
     path = tmp_path / "wybor.scenario.yaml"
     path.write_text(_scenario_yaml(selects_block="  selects: {settleMs: 20}\n"), encoding="utf-8")
