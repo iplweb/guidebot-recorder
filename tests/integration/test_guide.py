@@ -254,7 +254,7 @@ async def test_guide_select_actually_executes_and_unlocks_next_step(tmp_path):
     `select` step used to fall through `classify()`'s fallback and render a
     page without ever calling `locator.select_option`, silently leaving the
     DOM one step behind everything downstream. `compile` performs the select
-    for real (see `recorder/compile.py::_compile_step`), so it always reveals
+    for real (see `recorder/compile/step.py::_compile_step`), so it always reveals
     the field and always succeeds — this test's discriminating power is
     entirely in the `guide` phase:
 

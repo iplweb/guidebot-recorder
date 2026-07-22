@@ -399,7 +399,7 @@ async def reuse_is_valid(page: Page | Frame, cached: CachedAction) -> bool:
     """Validate a cached target and its independent, frozen identity.
 
     Thin boolean wrapper around :func:`reuse_failure`, kept for its existing
-    callers (``recorder/render.py`` and ``recorder/compile.py``), which only
+    callers (``recorder/render.py`` and ``recorder/compile/step.py``), which only
     need a yes/no answer and must not observe any behavior change.
     """
 
