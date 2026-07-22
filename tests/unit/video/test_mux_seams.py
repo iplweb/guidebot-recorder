@@ -151,51 +151,68 @@ def _seam_attribute(node: ast.expr | None) -> str | None:
     return node.attr if isinstance(node, ast.Attribute) and node.attr in SEAMS else None
 
 
+def _import_offenders(node: ast.ImportFrom, where: str, *, inside_package: bool) -> list[str]:
+    """``from X import seam`` — the value is copied into this module's globals."""
+    # Inside the package the imports are relative (``from .ffmpeg import``), so
+    # ``node.module`` is a bare submodule name and no "mux" appears in it —
+    # filtering on the substring here would pass every in-package violation,
+    # which is the case this guard exists for.
+    if not inside_package and "mux" not in (node.module or ""):
+        return []
+    return [
+        f"{where}:{node.lineno} imports the seam {alias.name!r} by name; a patch on "
+        f"the defining module would not reach it. Import the module instead and call "
+        f"it as an attribute"
+        for alias in node.names
+        if alias.name in SEAMS
+    ]
+
+
+def _alias_offenders(node: ast.Assign | ast.AnnAssign, where: str) -> list[str]:
+    """``alias = X.seam`` — bound once, at import time."""
+    # No module filter here and none possible: ``_run = ffmpeg._run`` names no
+    # module the AST can resolve. The attribute name alone is the signal, and a
+    # false positive is a rename away.
+    seam = _seam_attribute(node.value)
+    if seam is None:
+        return []
+    return [
+        f"{where}:{node.lineno} aliases the seam {seam!r} into a module-level name; "
+        f"the alias is bound at import time, so a patch on the defining module would "
+        f"not reach it. Keep the attribute access at the call site"
+    ]
+
+
+def _default_offenders(node: ast.arguments, where: str) -> list[str]:
+    """``def f(..., _seam=X.seam)`` — a default is evaluated once, at def time."""
+    return [
+        f"{where}:{default.lineno} binds the seam {seam!r} as a parameter default; "
+        f"defaults are evaluated once at def time, so a patch on the defining module "
+        f"would not reach it. Read the attribute inside the body"
+        for default in [*node.defaults, *node.kw_defaults]
+        if (seam := _seam_attribute(default)) is not None
+    ]
+
+
+def _binding_offenders(path: Path) -> list[str]:
+    """Every import-time snapshot of a seam's value in one source file."""
+    where = path.relative_to(SOURCE_ROOT).as_posix()
+    inside_package = path.is_relative_to(PACKAGE)
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+        if isinstance(node, ast.ImportFrom):
+            offenders += _import_offenders(node, where, inside_package=inside_package)
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            offenders += _alias_offenders(node, where)
+        elif isinstance(node, ast.arguments):
+            offenders += _default_offenders(node, where)
+    return offenders
+
+
 def test_no_seam_is_bound_at_import_time() -> None:
     # Three ways to snapshot a seam's *value* into another module's globals, all
-    # equally fatal and all invisible to a patch on the defining module:
-    # ``from X import seam``, ``alias = X.seam`` at module level, and
-    # ``def f(..., _seam=X.seam)`` — a default is evaluated once, at def time.
-    offenders: list[str] = []
-    for path in _sources(SOURCE_ROOT):
-        relative = path.relative_to(SOURCE_ROOT).as_posix()
-        inside_package = path.is_relative_to(PACKAGE)
-        tree = ast.parse(path.read_text(), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                # Inside the package the imports are relative (``from .ffmpeg import``),
-                # so ``node.module`` is a bare submodule name and no "mux" appears in
-                # it — filtering on the substring here would pass every in-package
-                # violation, which is the case this guard exists for.
-                if not inside_package and "mux" not in (node.module or ""):
-                    continue
-                for alias in node.names:
-                    if alias.name in SEAMS:
-                        offenders.append(
-                            f"{relative}:{node.lineno} imports the seam {alias.name!r} by "
-                            f"name; a patch on the defining module would not reach it. "
-                            f"Import the module instead and call it as an attribute"
-                        )
-            elif isinstance(node, ast.Assign | ast.AnnAssign):
-                # No module filter here and none possible: ``_run = ffmpeg._run``
-                # names no module the AST can resolve. The attribute name alone is
-                # the signal, and a false positive is a rename away.
-                seam = _seam_attribute(node.value)
-                if seam is not None:
-                    offenders.append(
-                        f"{relative}:{node.lineno} aliases the seam {seam!r} into a "
-                        f"module-level name; the alias is bound at import time, so a "
-                        f"patch on the defining module would not reach it. Keep the "
-                        f"attribute access at the call site"
-                    )
-            elif isinstance(node, ast.arguments):
-                for default in [*node.defaults, *node.kw_defaults]:
-                    seam = _seam_attribute(default)
-                    if seam is not None:
-                        offenders.append(
-                            f"{relative}:{default.lineno} binds the seam {seam!r} as a "
-                            f"parameter default; defaults are evaluated once at def "
-                            f"time, so a patch on the defining module would not reach "
-                            f"it. Read the attribute inside the body"
-                        )
+    # equally fatal and all invisible to a patch on the defining module. One
+    # helper per form, above — the guard is itself held to the complexity limit
+    # it exists to help enforce.
+    offenders = [o for path in _sources(SOURCE_ROOT) for o in _binding_offenders(path)]
     assert not offenders, "\n".join(offenders)
