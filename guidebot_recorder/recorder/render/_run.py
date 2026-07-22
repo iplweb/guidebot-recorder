@@ -49,27 +49,18 @@ from tqdm import tqdm
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
-from guidebot_recorder.desktop import DesktopOverlay, resolve_icon
-from guidebot_recorder.diagnostics import step_banner
-from guidebot_recorder.models.action import COMPILER_VERSION, CachedAction, PendingAction
-from guidebot_recorder.models.config import config_hash
-from guidebot_recorder.models.scenario import FlatStep
+from guidebot_recorder.desktop import DesktopOverlay
+from guidebot_recorder.models.action import CachedAction, PendingAction
 from guidebot_recorder.overlay.overlay import Overlay
-from guidebot_recorder.recorder._debug import (
-    pause_for_inspection,
-    redact_exception,
-    scenario_sensitive_values,
-)
+from guidebot_recorder.recorder._debug import pause_for_inspection, redact_exception
 from guidebot_recorder.recorder.recorder import Recorder
 from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.resolver.reasoner import Reasoner
 from guidebot_recorder.resolver.resolution import ResolvedTarget
 from guidebot_recorder.resolver.validate import reuse_is_valid
-from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, write_compiled
-from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.selects import SelectsNotReadyError, install_selects
 from guidebot_recorder.slide import SlideOverlay
-from guidebot_recorder.tts.base import Segment, TtsCache, TtsProvider
+from guidebot_recorder.tts.base import Segment, TtsProvider
 from guidebot_recorder.video.audiobed import Placed
 from guidebot_recorder.video.mux import FadeSpec, compose_popup_video
 
@@ -87,8 +78,9 @@ from guidebot_recorder.video.timeline import (
 from . import _step, audio, narration, visuals
 from . import timeline as timeline_module
 from .errors import RenderError, _OptionalAbsent
-from .narration import _narration, _presynthesize_narration, _stamp_frame
+from .narration import _stamp_frame
 from .pages import _active_page, _expect_chrome
+from .plan import _prepare_render
 from .popup_crop import _popup_fills_canvas, _resolve_popup_crop, _settle_popup_content_box
 from .popup_detect import _POPUP_REQUEST_SCRIPT, _popup_window_opened
 from .popup_session import (
@@ -98,7 +90,7 @@ from .popup_session import (
     _sync_popup_close,
     _unexpected_pages,
 )
-from .reuse import _compiled_action_is_current, _resolve_pending_target
+from .reuse import _resolve_pending_target
 from .timeline import _build_timeline
 from .visuals import _ensure_visuals, _hand_cursor_to_popup, _play_desktop_opener, _prime_visuals
 
@@ -125,115 +117,34 @@ async def run_render(
     dump_timeline: bool = False,
     reasoner: Reasoner | None = None,
 ) -> None:
-    path = Path(path)
-    out_mp4 = Path(out_mp4)
-    out_mp4.parent.mkdir(parents=True, exist_ok=True)
-
-    scenario = load_scenario(path, env)
-    sensitive_values = scenario_sensitive_values(scenario, scenario_env_references(path, env))
-    cfg = scenario.config
-    # Caller-side overrides (the CLI flags). ``None`` means "use whatever the
-    # scenario configured" — the scenario is loaded here, so an override applied
-    # to a Config built by the caller would be discarded.
-    if hold_frame is not None:
-        cfg.hold_frame_for_narration = hold_frame
-    if hold_frame_settle is not None:
-        cfg.hold_frame_settle = hold_frame_settle
-    audio_configs = [cfg.tts, *cfg.audio_tracks]
-    providers = {tts.provider for tts in audio_configs}
-    if len(providers) != 1:
-        raise RenderError(
-            "jeden render obsługuje obecnie jeden provider TTS; "
-            f"skonfigurowano: {', '.join(sorted(providers))}"
-        )
-
-    cpath = compiled_path(path)
-    try:
-        compiled = load_compiled(cpath)
-    except FileNotFoundError as exc:
-        raise RenderError(f"brak pliku compiled ({cpath.name}) — uruchom `compile`") from exc
-    if compiled.source != path.name:
-        raise RenderError(
-            f"compiled pochodzi z innego scenariusza ({compiled.source}) — uruchom `compile`"
-        )
-    # Flat indexing: a `when:` block contributes its synthetic gate step followed by
-    # its children, so `actions`, narration segments and every `krok {index}` message
-    # index the same linear execution order.
-    flat = scenario.flat_steps()
-    flat_steps = [entry.step for entry in flat]
-    if len(compiled.actions) != len(flat):
-        raise RenderError("compiled niezgodny z liczbą kroków — uruchom `compile`")
-    if compiled.compiler_version != COMPILER_VERSION or any(
-        action is not None and action.fingerprint.compiler_version != COMPILER_VERSION
-        for action in compiled.actions
-    ):
-        raise RenderError("compiled ma starszą wersję — uruchom `compile`")
-    scenario_hash = config_hash(cfg)
-
-    def step_message(
-        entry: FlatStep, entry_index: int, message: str, *, warning: bool = False
-    ) -> str:
-        """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
-
-        return step_banner(
-            index=entry_index,
-            total=len(flat),
-            location=entry.location,
-            source=scenario.source,
-            message=message,
-            warning=warning,
-            sensitive=sensitive_values,
-        )
-
-    for index, (entry, action) in enumerate(zip(flat, compiled.actions, strict=True)):
-        if not _compiled_action_is_current(entry.step, action, scenario_hash):
-            raise RenderError(
-                step_message(entry, index, "compiled jest nieaktualny — uruchom `compile`")
-            )
-        if isinstance(action, PendingAction) and entry.branch is None and not entry.step.optional:
-            # A pending entry is only ever written for a branch (gate + children)
-            # or an `optional: true` step; anywhere else the sidecar is corrupt.
-            raise RenderError(
-                step_message(
-                    entry, index, "wpis oczekujący na kroku obowiązkowym — uruchom `compile`"
-                )
-            )
-
-    # Desktop icons are resolved here, before recording: an unknown built-in or a
-    # missing file is an authoring error and must fail loud up front, not after
-    # minutes of render. Relative icon paths resolve against the scenario file's
-    # directory. Keyed by flat-step index for the render loop to read back.
-    desktop_payloads: dict[int, dict[str, str]] = {}
-    for index, step in enumerate(flat_steps):
-        if step.desktop is not None:
-            desktop_payloads[index] = {
-                "color": cfg.desktop.color,
-                "label": step.desktop.label,
-                **resolve_icon(step.desktop, base_dir=path.parent),
-            }
-
-    # --- Faza 0: pre-synteza całej narracji (fail-loud przed nagrywaniem) ---
-    cache = TtsCache(cache_dir)
-    narration_count = sum(_narration(step) is not None for step in flat_steps)
-    presynth = tqdm(
-        total=narration_count * len(audio_configs),
-        desc="tts",
-        unit="segment",
-        disable=not verbose,
+    plan = await _prepare_render(
+        path,
+        out_mp4,
+        tts_provider,
+        cache_dir,
+        env=env,
+        hold_frame=hold_frame,
+        hold_frame_settle=hold_frame_settle,
+        verbose=verbose,
     )
-    try:
-        segments = await _presynthesize_narration(
-            flat_steps,
-            audio_configs,
-            cache,
-            tts_provider,
-            on_progress=presynth.update,
-        )
-    finally:
-        presynth.close()
+    # Read-only aliases onto the frozen plan. The plan is the single source of
+    # truth; these exist so the phases below still read as prose rather than as
+    # `plan.` repeated three hundred times.
+    cfg = plan.cfg
+    scenario = plan.scenario
+    flat = plan.flat
+    compiled = plan.compiled
+    audio_configs = plan.audio_configs
+    segments = plan.segments
+    sensitive_values = plan.sensitive_values
+    scenario_hash = plan.scenario_hash
+    desktop_payloads = plan.desktop_payloads
+    step_message = plan.step_message
+    path = plan.path
+    out_mp4 = plan.out_mp4
 
     # --- Render z nagrywaniem wideo (viewport z config — patrz compile) ---
-    work = out_mp4.parent / ".guidebot_video" / out_mp4.stem
+    work = plan.work
     work.mkdir(parents=True, exist_ok=True)
     # The context viewport and video size stay at the configured dimensions so the
     # output MP4 keeps its size and popups are geometrically untouched; the shell
@@ -433,18 +344,6 @@ async def run_render(
     #: branch whose gate turned out to be absent — every step of it is skipped
     skipped_branch: int | None = None
 
-    def note_skip(entry: FlatStep, entry_index: int, reason: str, *, gate: bool) -> None:
-        """Odnotuj pominięty krok opcjonalny — banner z `plik:linia`."""
-
-        what = "bramka" if gate else "krok opcjonalny"
-        tqdm.write(step_message(entry, entry_index, f"{what} pominięty — {reason}", warning=True))
-
-    def persist_resolved(entry_index: int, resolved_action: CachedAction) -> None:
-        """Fold a render-time resolution back into the sidecar (full atomic rewrite)."""
-
-        compiled.actions[entry_index] = resolved_action
-        write_compiled(cpath, compiled)
-
     bar = tqdm(total=len(flat), desc="render", unit="krok", disable=not verbose)
     try:
         for index, entry in enumerate(flat):
@@ -590,7 +489,7 @@ async def run_render(
                 except _OptionalAbsent as absent:
                     if not optional:
                         raise RenderError(step_message(entry, index, str(absent))) from None
-                    note_skip(entry, index, str(absent), gate=entry.is_gate)
+                    plan.note_skip(entry, index, str(absent), gate=entry.is_gate)
                     if entry.is_gate:
                         skipped_branch = entry.branch
                     bar.update(1)
@@ -713,7 +612,7 @@ async def run_render(
                     resolved=resolved,
                     optional=optional,
                     scenario_hash=scenario_hash,
-                    on_resolved=persist_resolved,
+                    on_resolved=plan.persist_resolved,
                 )
                 if opened is not None:
                     popup = opened
@@ -759,7 +658,7 @@ async def run_render(
             except _OptionalAbsent as absent:
                 # Only a cached gate reaches here (its `waitFor` timed out); every
                 # other absence signal was already settled by the probe above.
-                note_skip(entry, index, str(absent), gate=entry.is_gate)
+                plan.note_skip(entry, index, str(absent), gate=entry.is_gate)
                 if entry.is_gate:
                     skipped_branch = entry.branch
             except Exception as exc:
