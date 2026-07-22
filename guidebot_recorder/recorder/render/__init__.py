@@ -24,14 +24,21 @@ keeps working after the split into submodules:
     timeline.py       observed freezes → validated model → the edited file
     audio.py          audio beds, muxing, and the two-phase artifact publish
     reuse.py          the compiled-sidecar contract as render reads it
-    clock.py          the recording axis: freezes, SFX and narration placements
-    plan.py           everything a render decides before a browser exists
-    loop.py           replaying one flat step, and the loop that drives them
+
+Phase 3 added the four that carry ``run_render``'s three lifetimes, plus the two
+that spend them::
+
+    plan.py           _RenderPlan — everything decided before a browser exists
+    stage.py          _Stage — what is on screen now, and the ONE order the
+                      role-gated init scripts may be registered in
+    clock.py          _Clock — the recording axis, and why ``on_sfx`` is a bound
+                      method rather than a value
+    loop.py           replaying one flat step; the absence probe is a seam, not a
+                      comment
     post.py           recording -> composed -> virtual -> mastered, in that order
-    stage.py          what is on screen now, and the one order the init scripts
-                      may be registered in
-    _step.py          _render_step (opaque; phase 3 decomposes it)
-    _run.py           run_render — the order the phases run in
+                      and no other
+    _step.py          _render_step — two dispatches on two different keys
+    _run.py           run_render — nothing but the order the phases run in
 
 It also, on purpose, **withholds every name the tests patch**. Nineteen names plus
 ``os.replace`` are this package's test seams, and five of them
@@ -61,9 +68,11 @@ are opposites:
 
 Ten of the nineteen are the second kind, which is why this package's guard cannot
 be the one ``video.mux`` uses. Two names have consumers in two submodules at once —
-``Recorder`` (``visuals`` and ``_run``) and ``probe_frame_count`` (``timeline`` and
-``_run``) — and each needs **two** patch lines; one line silently stops covering
-the other path. ``tests/unit/recorder/test_render_seams.py`` enforces all of it.
+``Recorder`` (``visuals`` and ``loop``) and ``probe_frame_count`` (``timeline`` and
+``post``) — and each needs **two** patch lines; one line silently stops covering
+the other path. ``_run`` itself holds **no** seam any more: every one of them moved
+to the submodule that constructs or calls it.
+``tests/unit/recorder/test_render_seams.py`` enforces all of it.
 
 The submodules are re-exported as *modules* for exactly that reason, using the
 redundant-alias form. The private helpers below (``_PopupSession``,
