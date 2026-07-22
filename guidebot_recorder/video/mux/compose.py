@@ -1,28 +1,26 @@
-"""The popup composition entry point: validation, the shared cut, mode dispatch.
+"""The popup composition entry point: mode dispatch, and the hard cut itself.
 
-:func:`compose_popup_video` owns everything the three presentation modes have in
-common — timestamp validation against the main recording, the encoder-startup and
-teardown-tail bookkeeping, and the single ``[popup_cut]`` trim/tpad chain all
-three consume. It then either emits the hard cut itself or hands the shared work
-to :mod:`guidebot_recorder.video.mux.floating` or
+:func:`compose_popup_video` is the only way in. It hands the interval to
+:mod:`guidebot_recorder.video.mux.plan`, which validates it and builds the
+``[popup_cut]`` chain all three presentation modes consume, then picks a mode: it
+emits the hard cut here, or hands the plan to
+:mod:`guidebot_recorder.video.mux.floating` or
 :mod:`guidebot_recorder.video.mux.slide`, which assemble their own filtergraphs.
 
-The two composite modules are separate files rather than one: together with this
-one they are the bulk of the package, and each is a self-contained filtergraph
-whose comments only make sense next to their own filter chain.
+The two composite modules are separate files rather than one: together they are
+the bulk of the package, and each is a self-contained filtergraph whose comments
+only make sense next to their own filter chain. The cut stays here because it is
+the mode with no cosmetics — it is the concat the plan already implies.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Literal
 
-from . import ffmpeg
-from .crop import _normalise_popup_crop, detect_teardown_tail
-from .ffmpeg import ffmpeg_bin
+from . import composite
 from .floating import _compose_floating
-from .probe import _check_sources, _probe_all
+from .plan import PopupPlan, plan_popup_cut
 from .slide import _compose_slide
 
 
@@ -86,118 +84,20 @@ def compose_popup_video(
     ``float`` only (``cut``/``slide`` show the popup full-frame by design) and is
     optional — omit it and the filtergraph is byte-identical to before.
     """
-    main, popup, out = Path(main), Path(popup), Path(out)
-    _check_sources(main, popup)
-
-    opened_at = float(opened_at)
-    closed_at = float(closed_at)
-    visual_ready_delay = float(visual_ready_delay)
-    if not all(math.isfinite(value) for value in (opened_at, closed_at, visual_ready_delay)):
-        raise ValueError("popup timestamps must be finite")
-    if opened_at < 0:
-        raise ValueError(f"opened_at must be >= 0, got {opened_at}")
-    if closed_at <= opened_at:
-        raise ValueError(f"closed_at must be greater than opened_at, got {opened_at}..{closed_at}")
-    if visual_ready_delay < 0:
-        raise ValueError(f"visual_ready_delay must be >= 0, got {visual_ready_delay}")
-
-    main_probe = _probe_all(main)
-    main_duration = main_probe.duration
-    # Container durations are frame-rounded.  Accept a sub-frame overshoot from
-    # the monotonic browser clock, but fail loudly on a genuinely invalid range.
-    tolerance = 0.05
-    if opened_at > main_duration + tolerance:
-        raise ValueError(f"opened_at ({opened_at}) is past main video duration ({main_duration})")
-    if closed_at > main_duration + tolerance:
-        raise ValueError(f"closed_at ({closed_at}) is past main video duration ({main_duration})")
-    opened_at = min(opened_at, main_duration)
-    closed_at = min(closed_at, main_duration)
-    raw_popup_span = closed_at - opened_at
-    if raw_popup_span <= 0:
-        raise ValueError("popup interval has no encoded video frames")
-    if visual_ready_delay >= raw_popup_span:
-        raise ValueError("visual-ready delay consumes the whole popup interval")
-    # One probe of the popup, shared by everything below that needs its geometry
-    # or its length — see `probe._probe_all` on why results are not cached
-    # globally.
-    popup_probe = _probe_all(popup)
-    popup_duration = popup_probe.duration
-    encoder_startup_gap = max(0.0, raw_popup_span - popup_duration)
-    # Page events precede the popup encoder's first frame. Real Chromium startup
-    # can take a couple of seconds; permit that floor or 15% on longer intervals,
-    # while rejecting a mismatch large enough to describe a different timeline.
-    max_startup_gap = max(2.0, raw_popup_span * 0.15)
-    if encoder_startup_gap > max_startup_gap:
-        raise ValueError(
-            f"popup encoder startup gap ({encoder_startup_gap}) exceeds limit ({max_startup_gap})"
-        )
-
-    # Playwright resets each WebM's PTS to zero, so container duration cannot
-    # reveal which early raw frames preceded the verified visual-ready point.
-    # Conservatively trim the full wall-clock prime delay from the source. This
-    # may discard a few already-good frames, but guarantees that tpad can only
-    # clone a post-prime frame.
-    popup_source_start = visual_ready_delay
-    opened_at += visual_ready_delay
-    popup_span = closed_at - opened_at
-    # The mirror image of the prime delay above: frames the recording carries at
-    # the *end* that no longer match the crop (see ``detect_teardown_tail``).
-    # Dropped from the source and paid back below by cloning the last good frame,
-    # so the composite keeps its length and simply holds the popup a moment
-    # longer instead of showing it shrink into the filler.
-    normalised_crop = _normalise_popup_crop(popup_crop, popup_probe.size)
-    teardown_tail = (
-        detect_teardown_tail(popup, normalised_crop, metadata=popup_probe)
-        if normalised_crop is not None
-        else 0.0
+    plan = plan_popup_cut(
+        main,
+        popup,
+        out,
+        opened_at,
+        closed_at,
+        visual_ready_delay=visual_ready_delay,
+        popup_crop=popup_crop,
     )
-    popup_recorded = popup_duration - popup_source_start
-    popup_available = popup_recorded - teardown_tail
-    if popup_span <= 0 or popup_available <= 0:
-        raise ValueError("popup has no verified encoded video frames")
-    # The startup gap stays measured against what the recording actually holds:
-    # it describes frames that were never encoded, and is paid at the *start* by
-    # cloning forward. The teardown tail is the opposite — frames that exist but
-    # must not be shown — so it is paid at the *end*, cloning the last good frame.
-    startup_gap = max(0.0, popup_span - popup_recorded)
-    popup_cut_duration = min(popup_span, popup_available)
-    tail_gap = max(0.0, popup_span - startup_gap - popup_cut_duration)
-
-    has_pre = opened_at > tolerance
-    has_tail = main_duration - closed_at > tolerance
-
-    # The reused popup cut: identical trim/tpad math, hoisted once and shared by
-    # all three modes. Only the consumer differs (concat in cut, the scaled
-    # overlay in float, the full-size sliding overlay in slide).
-    popup_filter = (
-        f"[1:v]settb=AVTB,setpts=PTS-STARTPTS,"
-        f"trim=start={popup_source_start:.6f}:"
-        f"end={popup_source_start + popup_cut_duration:.6f},"
-        "setpts=PTS-STARTPTS"
-    )
-    if startup_gap > tolerance:
-        popup_filter += f",tpad=start_mode=clone:start_duration={startup_gap:.6f}"
-    if tail_gap > tolerance:
-        popup_filter += f",tpad=stop_mode=clone:stop_duration={tail_gap:.6f}"
-    popup_filter += (
-        f",trim=duration={popup_span:.6f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[popup_cut]"
-    )
-
     mode = transition if transition is not None else ("float" if floating else "cut")
 
     if mode == "float":
         _compose_floating(
-            popup_crop=normalised_crop,
-            main=main,
-            popup=popup,
-            out=out,
-            opened_at=opened_at,
-            closed_at=closed_at,
-            main_duration=main_duration,
-            popup_span=popup_span,
-            popup_filter=popup_filter,
-            has_pre=has_pre,
-            has_tail=has_tail,
+            plan,
             scale=scale,
             corner_radius=corner_radius,
             shadow=shadow,
@@ -206,84 +106,56 @@ def compose_popup_video(
             open_ms=open_ms,
             close_ms=close_ms,
             hold_open_at_end=hold_open_at_end,
-            rate=main_probe.fps,
         )
         return
 
     if mode == "slide":
-        _compose_slide(
-            main=main,
-            popup=popup,
-            out=out,
-            opened_at=opened_at,
-            closed_at=closed_at,
-            main_duration=main_duration,
-            popup_span=popup_span,
-            popup_filter=popup_filter,
-            has_pre=has_pre,
-            has_tail=has_tail,
-            slide_ms=slide_ms,
-            hold_open_at_end=hold_open_at_end,
-            rate=main_probe.fps,
-            size=main_probe.size,
-        )
+        _compose_slide(plan, slide_ms=slide_ms, hold_open_at_end=hold_open_at_end)
         return
 
+    _compose_cut(plan)
+
+
+def _compose_cut(plan: PopupPlan) -> None:
+    """Assemble and run the hard cut: ``main[:opened] + popup + main[closed:]``.
+
+    The mode with no cosmetics at all. Unlike the two composite modes it does not
+    normalise the main input to CFR: every segment it emits is verbatim main, so
+    there is no colour base or backdrop whose length a variable frame rate could
+    leave short.
+    """
     filters: list[str] = []
     main_sources: dict[str, str] = {}
-    if has_pre and has_tail:
+    if plan.has_pre and plan.has_tail:
         filters.append("[0:v]settb=AVTB,setpts=PTS-STARTPTS,split=2[main_pre_src][main_tail_src]")
         main_sources = {"pre": "[main_pre_src]", "tail": "[main_tail_src]"}
-    elif has_pre:
+    elif plan.has_pre:
         main_sources = {"pre": "[0:v]"}
-    elif has_tail:
+    elif plan.has_tail:
         main_sources = {"tail": "[0:v]"}
 
     labels: list[str] = []
-    if has_pre:
+    if plan.has_pre:
         source = main_sources["pre"]
-        normalize = "" if has_tail else "settb=AVTB,setpts=PTS-STARTPTS,"
+        normalize = "" if plan.has_tail else "settb=AVTB,setpts=PTS-STARTPTS,"
         filters.append(
-            f"{source}{normalize}trim=start=0:end={opened_at:.6f},"
+            f"{source}{normalize}trim=start=0:end={plan.opened_at:.6f},"
             "setpts=PTS-STARTPTS,setsar=1,format=yuv420p[main_pre]"
         )
         labels.append("[main_pre]")
 
-    # The shared [popup_cut] built once above (hoisted for cut/float/slide).
-    filters.append(popup_filter)
+    # The shared [popup_cut] the plan built (hoisted for cut/float/slide).
+    filters.append(plan.popup_filter)
     labels.append("[popup_cut]")
 
-    if has_tail:
+    if plan.has_tail:
         source = main_sources["tail"]
-        normalize = "" if has_pre else "settb=AVTB,setpts=PTS-STARTPTS,"
+        normalize = "" if plan.has_pre else "settb=AVTB,setpts=PTS-STARTPTS,"
         filters.append(
-            f"{source}{normalize}trim=start={closed_at:.6f},"
+            f"{source}{normalize}trim=start={plan.closed_at:.6f},"
             "setpts=PTS-STARTPTS,setsar=1,format=yuv420p[main_tail]"
         )
         labels.append("[main_tail]")
 
-    if len(labels) == 1:
-        filters.append(f"{labels[0]}null[outv]")
-    else:
-        filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0[outv]")
-
-    ffmpeg._run_to_output(
-        [
-            ffmpeg_bin(),
-            "-y",
-            "-i",
-            str(main),
-            "-i",
-            str(popup),
-            "-filter_complex",
-            ";".join(filters),
-            "-map",
-            "[outv]",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-        ],
-        out,
-    )
+    filters.append(composite.concat_or_null(labels))
+    composite.encode(plan, filters)
