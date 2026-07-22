@@ -2,14 +2,18 @@
 
 Input material is generated with ffmpeg's ``testsrc``/``sine`` lavfi sources, so
 the tests need no fixtures on disk. They are skipped when ffmpeg/ffprobe are not
-installed (no shared conftest by design).
+installed (no shared conftest by design — the shared builders, the marker block
+and the ffmpeg spy come from the explicitly imported ``_mux_helpers``).
+
+These tests judge the *picture*: they sample pixels and stream metadata out of a
+real render. The exact filtergraph and argv each call emits are pinned separately,
+by string equality, in ``test_mux_filtergraph.py`` and ``test_mux_argv.py``.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -26,16 +30,19 @@ from guidebot_recorder.video.mux import (
     mux_preencoded,
 )
 from guidebot_recorder.video.mux.probe import probe_duration
+from tests.unit.video._mux_helpers import (
+    FFMPEG,
+    _make_audio,
+    _make_color_video,
+    _make_popup_with_filler,
+    _make_popup_with_teardown_tail,
+    capture_ffmpeg_args,
+    filtergraph_of,
+)
 
 mux_module = importlib.import_module("guidebot_recorder.video.mux")
 
-pytestmark = [
-    pytest.mark.ffmpeg,
-    pytest.mark.skipif(
-        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-        reason="ffmpeg/ffprobe not installed",
-    ),
-]
+pytestmark = FFMPEG
 
 
 def _make_video(path: Path, seconds: float) -> None:
@@ -54,46 +61,6 @@ def _make_video(path: Path, seconds: float) -> None:
             "yuv420p",
             "-t",
             str(seconds),
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-def _make_audio(path: Path, seconds: float) -> None:
-    """Write a mono WAV tone of *seconds* duration."""
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:duration={seconds}:sample_rate=48000",
-            "-t",
-            str(seconds),
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
-def _make_color_video(path: Path, color: str, seconds: float) -> None:
-    """Write a solid-colour H.264 video."""
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c={color}:duration={seconds}:size=320x240:rate=25",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
             str(path),
         ],
         check=True,
@@ -978,6 +945,54 @@ def test_compose_popup_video_transition_float_matches_floating(tmp_path: Path) -
     _assert_dimmed_green(_sample_region_rgb(out, 1.5, _BORDER))
 
 
+@pytest.mark.parametrize(
+    ("transition", "message"),
+    [
+        (
+            "float",
+            "floating composite duration (1.000s) is short of main (3.000s); "
+            "the CFR backdrop came out empty",
+        ),
+        (
+            "slide",
+            "slide composite duration (1.000s) is short of main (3.000s); "
+            "the CFR base came out empty",
+        ),
+    ],
+)
+def test_composite_that_came_out_short_names_its_mode_and_its_empty_filter(
+    transition: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fail-loud guard on a composite that lost its middle segment.
+
+    Both modes share one guard and differ only in the two words that say *which*
+    CFR filter came out empty — the pointer to the cause. Asserted on the exact
+    string, because a guard that fires with the other mode's wording sends the
+    next reader to the wrong filtergraph, and nothing about the failure would
+    look wrong. Provoked by replacing the encode: an input that really produces
+    an empty backdrop depends on how the encoder handles a sparse VFR source,
+    which is not what this is testing.
+    """
+    main = tmp_path / "main.mp4"
+    popup = tmp_path / "popup.mp4"
+    out = tmp_path / "composite.mp4"
+    _make_main_color_timeline(main)
+    _make_color_video(popup, "yellow", 1.0)
+
+    def short_encode(plan, filters: list[str]) -> None:
+        _make_color_video(plan.out, "black", 1.0)
+
+    monkeypatch.setattr(mux_module.composite, "encode", short_encode)
+
+    with pytest.raises(ValueError) as excinfo:
+        compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, transition=transition)
+
+    assert str(excinfo.value) == message
+
+
 # --- popup crop (the recorded popup canvas is the *main* viewport) -----------
 # Playwright's record_video_size is context-level, so the popup records onto a
 # full-viewport canvas: its real window sits top-left and the rest is filler.
@@ -990,60 +1005,10 @@ def test_compose_popup_video_transition_float_matches_floating(tmp_path: Path) -
 _CROPPED_RIGHT = "16:16:186:112"
 
 
-def _make_popup_with_filler(path: Path, seconds: float) -> None:
-    """Write a 320x240 popup whose real window is only the top-left 160x120.
-
-    Mimics a popup recorded onto the main window's canvas: yellow content in the
-    top-left corner, grey filler everywhere else.
-    """
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=0x808080:duration={seconds}:size=320x240:rate=25",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=yellow:duration={seconds}:size=160x120:rate=25",
-            "-filter_complex",
-            "[0:v][1:v]overlay=x=0:y=0,format=yuv420p[outv]",
-            "-map",
-            "[outv]",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-
 def _popup_chain(filters: str) -> str:
     """Return the ``[popup_cut]`` consumer link of a filtergraph."""
     (chain,) = [part for part in filters.split(";") if part.startswith("[popup_cut]")]
     return chain
-
-
-def _capture_filtergraph(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record the ``-filter_complex`` of every ffmpeg run, then run it for real.
-
-    Running it too keeps the assertions honest: a filtergraph that matches the
-    expected string but that ffmpeg rejects still fails the test.
-    """
-    seen: list[str] = []
-    real_run = mux_module.ffmpeg._run_to_output
-
-    def spy_run(cmd: list[str], out: Path) -> None:
-        seen.append(cmd[cmd.index("-filter_complex") + 1])
-        real_run(cmd, out)
-
-    monkeypatch.setattr(mux_module.ffmpeg, "_run_to_output", spy_run)
-    return seen
 
 
 def test_compose_popup_video_float_crops_popup_to_its_content(tmp_path: Path) -> None:
@@ -1088,14 +1053,14 @@ def test_compose_popup_video_float_crop_precedes_scale_and_is_even(
     out = tmp_path / "composite.mp4"
     _make_main_color_timeline(main)
     _make_popup_with_filler(popup, 1.0)
-    seen = _capture_filtergraph(monkeypatch)
+    seen = capture_ffmpeg_args(monkeypatch)
 
     # Odd numbers everywhere: yuv420p needs even dimensions, so they must snap down.
     compose_popup_video(
         main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(161, 121, 3, 5)
     )
 
-    chain = _popup_chain(seen[0])
+    chain = _popup_chain(filtergraph_of(seen[0]))
     assert "crop=160:120:2:4," in chain
     assert chain.index("crop=") < chain.index("scale=")
 
@@ -1108,11 +1073,11 @@ def test_compose_popup_video_float_without_crop_emits_no_crop_filter(
     out = tmp_path / "composite.mp4"
     _make_main_color_timeline(main)
     _make_popup_with_filler(popup, 1.0)
-    seen = _capture_filtergraph(monkeypatch)
+    seen = capture_ffmpeg_args(monkeypatch)
 
     compose_popup_video(main, popup, out, opened_at=1.0, closed_at=2.0, floating=True)
 
-    assert "crop=" not in _popup_chain(seen[0])
+    assert "crop=" not in _popup_chain(filtergraph_of(seen[0]))
 
 
 def test_compose_popup_video_float_full_frame_crop_is_a_no_op(
@@ -1123,7 +1088,7 @@ def test_compose_popup_video_float_full_frame_crop_is_a_no_op(
     out = tmp_path / "composite.mp4"
     _make_main_color_timeline(main)
     _make_popup_with_filler(popup, 1.0)
-    seen = _capture_filtergraph(monkeypatch)
+    seen = capture_ffmpeg_args(monkeypatch)
 
     # A popup whose requested window is at least the whole canvas must not gain a
     # redundant crop filter.
@@ -1131,7 +1096,7 @@ def test_compose_popup_video_float_full_frame_crop_is_a_no_op(
         main, popup, out, opened_at=1.0, closed_at=2.0, floating=True, popup_crop=(400, 300, 0, 0)
     )
 
-    assert "crop=" not in _popup_chain(seen[0])
+    assert "crop=" not in _popup_chain(filtergraph_of(seen[0]))
 
 
 def test_compose_popup_video_cut_ignores_popup_crop(
@@ -1142,7 +1107,7 @@ def test_compose_popup_video_cut_ignores_popup_crop(
     out = tmp_path / "composite.mp4"
     _make_main_color_timeline(main)
     _make_popup_with_filler(popup, 1.0)
-    seen = _capture_filtergraph(monkeypatch)
+    seen = capture_ffmpeg_args(monkeypatch)
 
     # cut/slide show the popup full-frame; cropping is a float-only cosmetic.
     compose_popup_video(
@@ -1155,7 +1120,7 @@ def test_compose_popup_video_cut_ignores_popup_crop(
         popup_crop=(160, 120, 0, 0),
     )
 
-    assert "crop=" not in seen[0]
+    assert "crop=" not in filtergraph_of(seen[0])
 
 
 def test_compose_popup_video_rejects_out_of_frame_crop(tmp_path: Path) -> None:
@@ -1415,57 +1380,6 @@ def test_mux_preencoded_adds_audio_without_changing_video_codec(tmp_path: Path) 
     assert _video_codec(out) == "h264"
     assert _stream_types(out) == ["video", "audio"]
     assert probe_duration(out) == pytest.approx(2.0, abs=0.4)
-
-
-def _make_popup_with_teardown_tail(
-    path: Path,
-    *,
-    good_seconds: float = 0.8,
-    tail_seconds: float = 0.2,
-    window: tuple[int, int] = (200, 150),
-    shrunk: tuple[int, int] | None = (150, 110),
-) -> None:
-    """Write a popup recording whose window shrinks for its final frames.
-
-    Mimics a headed render's teardown: the page content is unchanged but Chromium
-    stops rasterising the window at the screen's backing scale, so Playwright's
-    mid-grey padding grows and a crop sized from the stable part starts exposing
-    filler. ``shrunk=None`` writes a recording that never shrinks.
-    """
-    inputs: list[str] = []
-    parts: list[str] = []
-    sizes = [(window, good_seconds)]
-    if shrunk is not None:
-        sizes.append((shrunk, tail_seconds))
-    for index, ((width, height), seconds) in enumerate(sizes):
-        inputs += [
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=white:duration={seconds}:size={width}x{height}:rate=25",
-        ]
-        # 0x808080 is the mid-grey Chromium pads a popup's canvas with.
-        parts.append(f"[{index}:v]pad=320:240:0:0:0x808080[p{index}]")
-    concat = "".join(f"[p{i}]" for i in range(len(sizes)))
-    parts.append(f"{concat}concat=n={len(sizes)}:v=1:a=0,format=yuv420p[outv]")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            *inputs,
-            "-filter_complex",
-            ";".join(parts),
-            "-map",
-            "[outv]",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
 
 
 def test_detect_teardown_tail_measures_the_trailing_shrunken_frames(tmp_path):
