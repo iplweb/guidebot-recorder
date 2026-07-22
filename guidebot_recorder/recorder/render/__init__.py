@@ -27,6 +27,7 @@ keeps working after the split into submodules:
     clock.py          the recording axis: freezes, SFX and narration placements
     plan.py           everything a render decides before a browser exists
     loop.py           replaying one flat step, and the loop that drives them
+    post.py           recording -> composed -> virtual -> mastered, in that order
     stage.py          what is on screen now, and the one order the init scripts
                       may be registered in
     _step.py          _render_step (opaque; phase 3 decomposes it)
@@ -90,6 +91,7 @@ from . import plan as plan
 from . import popup_crop as popup_crop
 from . import popup_detect as popup_detect
 from . import popup_session as popup_session
+from . import post as post
 from . import reuse as reuse
 from . import stage as stage
 from . import tasks as tasks

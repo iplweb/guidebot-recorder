@@ -2591,7 +2591,7 @@ def test_apply_timeline_edits_rejects_a_file_that_disagrees_with_the_model(
     # `probe_frame_count` has a second consumer in `post` (it sizes the timeline
     # before the edit runs), so replacing it takes both lines.
     monkeypatch.setattr(R.timeline, "probe_frame_count", lambda path: 123)
-    monkeypatch.setattr(R._run, "probe_frame_count", lambda path: 123)
+    monkeypatch.setattr(R.post, "probe_frame_count", lambda path: 123)
 
     with pytest.raises(RenderError) as excinfo:
         _apply_timeline_edits(tmp_path / "src.mp4", timeline, tmp_path / "out.mp4")
@@ -3442,13 +3442,13 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
     import guidebot_recorder.recorder.render as R
 
     seen: list[str | None] = []
-    original = R._run.compose_popup_video
+    original = R.post.compose_popup_video
 
     def spy(*args, **kwargs):
         seen.append(kwargs.get("transition"))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(R._run, "compose_popup_video", spy)
+    monkeypatch.setattr(R.post, "compose_popup_video", spy)
 
     path = _write_close_window_scenario(tmp_path, popup_config=False)
 
@@ -3510,7 +3510,7 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
     composed: list[tuple[Path, Path]] = []
     edited: list[tuple[Path, Path]] = []
 
-    original_compose = R._run.compose_popup_video
+    original_compose = R.post.compose_popup_video
     original_edit = R.timeline._apply_timeline_edits
 
     def spy_compose(main, popup, dest, *args, **kwargs):
@@ -3523,7 +3523,7 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
         edited.append((Path(source), Path(dest)))
         return original_edit(source, timeline, dest)
 
-    monkeypatch.setattr(R._run, "compose_popup_video", spy_compose)
+    monkeypatch.setattr(R.post, "compose_popup_video", spy_compose)
     monkeypatch.setattr(R.timeline, "_apply_timeline_edits", spy_edit)
 
     path = _write_close_window_scenario(tmp_path)
