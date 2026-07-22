@@ -18,7 +18,7 @@ that module first; this file only says what is specific to ``video.mux``.
 to its second row for every one of them — consumers are rewired to ``mod.name(...)``
 and the tests patch the *defining* module — inside the package and out
 (``video/timeline.py``, ``video/sfx.py``, ``video/audiobed.py``,
-``recorder/render.py``), so one patch line covers every consumer of a name.
+``recorder/render/``), so one patch line covers every consumer of a name.
 ``SeamGuard.assert_patch_targets`` derives that mode from the definition site
 rather than assuming it, which is why the sibling package can hold the opposite
 rule without a second implementation.

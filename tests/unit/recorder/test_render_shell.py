@@ -10,7 +10,11 @@ import pytest
 from guidebot_recorder.chrome import SHELL_URL
 from guidebot_recorder.models.config import ChromeConfig, Config, TtsConfig, Viewport, site_viewport
 from guidebot_recorder.models.scenario import Scenario, Step
-from guidebot_recorder.recorder.render import _render_step, navigate_pill_mode
+from guidebot_recorder.recorder.render import navigate_pill_mode
+
+# `_render_step` is a test seam, so the facade withholds it: import the module
+# that defines it. See the render package docstring.
+from guidebot_recorder.recorder.render._step import _render_step
 
 # --- Config matrix (navigate_pill_mode) ------------------------------------
 

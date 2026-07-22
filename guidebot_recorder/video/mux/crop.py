@@ -232,10 +232,10 @@ def detect_teardown_tail(
     a headed render — the page content is unchanged, but it arrives smaller, so
     Playwright's padding grows and the fixed crop — sized from the *stable* part
     of the recording, see
-    :func:`~guidebot_recorder.recorder.render._recording_scale` — starts exposing
-    filler along its right and bottom edges. In a held-open composite that reads
-    as the popup abruptly shrinking against a grey slab for the last second of
-    the film.
+    :func:`~guidebot_recorder.recorder.render.popup_crop._recording_scale` — starts
+    exposing filler along its right and bottom edges. In a held-open composite
+    that reads as the popup abruptly shrinking against a grey slab for the last
+    second of the film.
 
     Detection samples the 2x2 block just inside *crop*'s far corner across every
     frame: while the window fills the crop that block is page content, and the

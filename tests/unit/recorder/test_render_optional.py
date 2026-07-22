@@ -159,7 +159,7 @@ def narration_spy(monkeypatch):
         # steps narrate, not how long they hold), so no freeze is emitted.
         return None
 
-    monkeypatch.setattr("guidebot_recorder.recorder.render._pace_narration", observe)
+    monkeypatch.setattr("guidebot_recorder.recorder.render.narration._pace_narration", observe)
     return waited
 
 
@@ -226,14 +226,14 @@ async def test_skipped_branch_drops_its_narration_from_the_audio_bed(
 ):
     import guidebot_recorder.recorder.render as render_module
 
-    original = render_module.build_audio_bed
+    original = render_module.audio.build_audio_bed
     placed: list[int] = []
 
     def spy(placements, total, out):
         placed.append(len(placements))
         return original(placements, total, out)
 
-    monkeypatch.setattr(render_module, "build_audio_bed", spy)
+    monkeypatch.setattr(render_module.audio, "build_audio_bed", spy)
 
     path = tmp_path / "gate.scenario.yaml"
     path.write_text(_branch_scenario(PLAIN_PAGE), encoding="utf-8")
@@ -483,13 +483,13 @@ async def test_hold_frame_narrations_inside_taken_branch_never_overlap(
     # where the frame axis becomes seconds — same capture point as
     # `test_hold_frame_narrations_never_overlap`.
     captured: list[list[Placed]] = []
-    original = R._assemble_audio_tracks
+    original = R.audio._assemble_audio_tracks
 
     async def spy(video, configs, placed_by_language, total, *args, **kwargs):
         captured.extend(placed_by_language.values())
         return await original(video, configs, placed_by_language, total, *args, **kwargs)
 
-    monkeypatch.setattr(R, "_assemble_audio_tracks", spy)
+    monkeypatch.setattr(R.audio, "_assemble_audio_tracks", spy)
 
     out = tmp_path / "out.mp4"
     await run_render(path, out, TwoSecondTts(), tmp_path / "cache", browser)

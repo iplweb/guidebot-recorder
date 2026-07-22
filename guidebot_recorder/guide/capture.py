@@ -57,7 +57,7 @@ _REUSE_REASON_PL = {
 def scenario_resolve_url(scenario, url: str | None) -> str:
     """Resolve a possibly-relative navigate URL against the scenario base_url.
 
-    Mirrors ``render._resolve_url`` (render.py:1474-1478): relative URLs are
+    Mirrors ``_resolve_url`` in ``recorder/render/reuse.py``: relative URLs are
     joined onto ``config.base_url`` with ``urljoin`` only when a base is
     configured; an absolute URL, or the absence of a base, passes through
     unchanged. ``url`` is defensively allowed to be ``None`` (navigate steps

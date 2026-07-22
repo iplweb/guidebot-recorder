@@ -1,15 +1,15 @@
 """Tests for the seam-guard machinery itself — the parts nothing else exercises yet.
 
-``tests/unit/video/test_mux_seams.py`` and ``tests/unit/recorder/test_compile_seams.py``
-drive :mod:`tests._seam_scan` and :mod:`tests._seam_guard` against two real
-packages, and between them they
+``tests/unit/video/test_mux_seams.py``, ``tests/unit/recorder/test_compile_seams.py``
+and ``tests/unit/recorder/test_render_seams.py`` drive :mod:`tests._seam_scan` and
+:mod:`tests._seam_guard` against three real packages. The first two, between them,
 cover one discovery idiom (``importlib.import_module``), one patch shape
-(``<alias>.<submodule>``) and one consumer per seam. ``recorder.render`` — phase 1c
-— has none of those properties: it is patched through three *other* idioms, most of
-its seams are defined outside the package, and two of them will have two consumers
-after the split. A guard whose new capabilities are never exercised is a guard that
-discovers nothing on the day it matters, so they are exercised here, on synthetic
-input and on the real ``render`` surface.
+(``<alias>.<submodule>``) and one consumer per seam. ``recorder.render`` has none of
+those properties: it is patched through three *other* idioms, most of its seams are
+defined outside the package, two of them have two consumers, and one reaches through
+a stdlib module (``audio.os.replace``). A guard whose capabilities are never
+exercised is a guard that discovers nothing on the day it matters, so the machinery
+itself is exercised here, on synthetic input and on the real ``render`` surface.
 
 Needs nothing but source: no ffmpeg, no browser, no network.
 """
@@ -104,20 +104,23 @@ def test_evidence_carries_the_binding_statement_not_only_the_target_text() -> No
 
 
 # --------------------------------------------------------------------------- #
-# (f) the render simulation — the capability phase 1c inherits
+# (f) the render surface — the capability phase 1c needed, on the split package
 # --------------------------------------------------------------------------- #
 
 RENDER_GUARD = SeamGuard.build(RENDER)
 
 
-def test_the_render_surface_is_discovered_before_the_split() -> None:
-    # `render.py` is still one module, so `package_dir` is the directory the split
-    # will create and holds no files yet. Discovery does not care: it works off the
-    # dotted name, which is why this measurement is available *before* 1c starts.
-    assert not RENDER_GUARD.package_dir.exists()
+def test_the_whole_render_surface_stays_discoverable() -> None:
+    # Discovery works off the dotted name, which is why this measurement was
+    # available *before* 1c split the file and still is after. `package_dir` is now
+    # the real package and every submodule in it is visible to the structural half.
+    assert RENDER_GUARD.package_dir.is_dir()
+    assert {"_run", "_step", "audio", "narration", "popup_crop", "timeline", "visuals"} <= set(
+        RENDER_GUARD.submodules
+    )
 
     # The old importlib-only scan found 0 of these. Floors, not exact counts —
-    # 1c will move sites around and the point is that they stay visible.
+    # later phases will move sites around and the point is that they stay visible.
     sites = RENDER_GUARD.own_sites
     assert len(sites) >= 60, f"only {len(sites)} render patch sites discovered"
     assert len(RENDER_GUARD.seams) >= 19, sorted(RENDER_GUARD.seams)
@@ -130,31 +133,39 @@ def test_the_render_surface_is_discovered_before_the_split() -> None:
 
 def test_no_render_patch_site_anywhere_is_unclassified() -> None:
     # The real deliverable for 1c: the list below must stay empty. Anything in it
-    # is a patch the guard cannot see, and therefore a seam 1c could break in
-    # silence. `completeness_offenders` is what `assert_scan_complete` raises on.
+    # is a patch the guard cannot see, and therefore a seam a later phase could
+    # break in silence. `completeness_offenders` is what `assert_scan_complete`
+    # raises on.
     assert RENDER_GUARD.completeness_offenders() == []
 
 
 def test_render_is_dominated_by_the_mode_mux_does_not_implement() -> None:
-    # 10 of the patched names are not defined in render.py at all — they are
-    # cross-package name-imports (`Overlay`, `Recorder`, `probe_frame_count`, ...).
-    # A mux-shaped guard would call every one of their patch sites a violation.
-    imported = {
-        name
-        for name in RENDER_GUARD.seams
-        if name in _name_imports(RENDER_GUARD.source_root / "recorder" / "render.py")
-    }
-    assert len(imported) >= 10, sorted(imported)
+    # 10 of the patched names are not defined in the render package at all — they
+    # are cross-package name-imports (`Overlay`, `Recorder`, `probe_frame_count`,
+    # ...) held by the submodule that consumes them. A mux-shaped guard would call
+    # every one of their patch sites a violation.
+    outside = {name for name in RENDER_GUARD.seams if RENDER_GUARD.consumers.get(name)}
+    assert len(outside) >= 10, sorted(outside)
+    assert not any(RENDER_GUARD.defined_inside(name) for name in outside)
 
 
-def _name_imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text())
-    return {
-        alias.asname or alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-    }
+def test_render_really_has_the_two_consumer_shape() -> None:
+    # Rule 3 is exercised on synthetic input below because it had no real subject
+    # when it was written. It has one now, and this is what stops the synthetic
+    # test from drifting away from the package it was written for.
+    two = {name for name, homes in RENDER_GUARD.consumers.items() if len(homes) > 1}
+    assert two == {"Recorder", "probe_frame_count"}, sorted(two)
+
+
+def test_a_seam_may_live_one_module_deeper_than_the_package() -> None:
+    # `_publish_render_artifacts` commits the master MP4 with `os.replace`, so the
+    # honest patch target names `audio`'s own `os` global. The chain rule accepts
+    # that; it must still reject a chain whose steps are not modules.
+    assert RENDER_GUARD.patch_owners["replace"] == {"audio.os"}
+    assert RENDER_GUARD._module_chain_offender("replace", "audio.os", "<target>") is None
+    assert "not a module" in str(
+        RENDER_GUARD._module_chain_offender("replace", "audio.RenderError", "<target>")
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -165,10 +176,11 @@ def _name_imports(path: Path) -> set[str]:
 def _synthetic(consumer_sources: dict[str, str], patched_on: list[str]) -> SeamGuard:
     """A guard over an imaginary package, so rule 3 can be provoked on demand.
 
-    No package in the repo has a two-consumer seam yet — that shape arrives with
-    the render split — and a rule that has never fired is a rule nobody has
-    checked. Building the dataclass directly keeps the check honest without
-    waiting for 1c or writing a throwaway package to disk.
+    ``recorder.render`` now has two of them (``Recorder``, ``probe_frame_count``),
+    but a rule is only checked once it has been made to *fail*, and provoking that
+    on a real package would mean deleting a patch line from a real test. Building
+    the dataclass directly keeps the negative case honest without writing a
+    throwaway package to disk.
     """
     files = tuple(
         SourceFile(
@@ -233,8 +245,9 @@ def test_patching_every_consumer_satisfies_the_rule() -> None:
 
 
 def test_a_single_consumer_seam_needs_only_one_patch_line() -> None:
-    # Today's shape for both compile seams. The rule must stay quiet here, or it
-    # would fire on every correctly-patched package in the repo.
+    # Today's shape for both compile seams and for eight of render's ten
+    # outside-defined ones. The rule must stay quiet here, or it would fire on
+    # every correctly-patched package in the repo.
     guard = _synthetic(
         {"run": TWO_CONSUMERS["run"], "popup": "\n"},
         patched_on=["run"],

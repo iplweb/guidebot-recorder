@@ -13,7 +13,11 @@ import pytest
 from guidebot_recorder.models.config import Config, HighlightConfig, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import ResolvedHighlight, Scenario, Step
 from guidebot_recorder.models.target import RoleTarget
-from guidebot_recorder.recorder.render import RenderError, _render_step
+from guidebot_recorder.recorder.render import RenderError
+
+# `_render_step` is a test seam, so the facade withholds it: import the module
+# that defines it. See the render package docstring.
+from guidebot_recorder.recorder.render._step import _render_step
 from guidebot_recorder.resolver.resolution import ResolvedTarget
 
 

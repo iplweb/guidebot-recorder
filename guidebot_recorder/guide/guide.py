@@ -58,7 +58,7 @@ async def run_guide(
     scan_for_blockers(flat, compiled.actions)
 
     cfg = scenario.config
-    # Same context recipe as run_render (render.py ~1705-1734), minus
+    # Same context recipe as run_render (recorder/render/_run.py), minus
     # record_video_dir/record_video_size: PDF capture never records video.
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
