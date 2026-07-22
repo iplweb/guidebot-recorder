@@ -53,7 +53,7 @@ from guidebot_recorder.resolver.positional import pinned_drifted
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.resolver.validate import build_locator, reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
-from guidebot_recorder.video.mux import probe_duration
+from guidebot_recorder.video.mux.probe import probe_duration
 
 pytestmark = pytest.mark.integration
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from guidebot_recorder.video.mux import SAMPLE_RATE, _run_to_output, ffmpeg_bin
+from guidebot_recorder.video.mux import SAMPLE_RATE, ffmpeg, ffmpeg_bin
 
 # The assets retain ample source headroom, then are balanced here before the
 # scenario-wide ``sound.volume`` attenuation.  A mouse click is sparse and must cut
@@ -108,7 +108,7 @@ def build_sfx_bed(
         "-t",
         f"{total:.6f}",
     ]
-    _run_to_output(cmd, out)
+    ffmpeg._run_to_output(cmd, out)
 
 
 def mix_sfx_into_bed(narration_bed: Path, sfx_bed: Path, out: Path, total: float) -> None:
@@ -137,4 +137,4 @@ def mix_sfx_into_bed(narration_bed: Path, sfx_bed: Path, out: Path, total: float
         "-t",
         f"{total:.6f}",
     ]
-    _run_to_output(cmd, out)
+    ffmpeg._run_to_output(cmd, out)

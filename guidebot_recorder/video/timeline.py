@@ -24,13 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from guidebot_recorder.video.mux import (
-    _run,
-    _run_to_output,
-    ffmpeg_bin,
-    ffprobe_bin,
-    probe_duration,
-)
+from guidebot_recorder.video.mux import ffmpeg, ffmpeg_bin, ffprobe_bin, probe
 
 FPS = 25
 """Frames per second of a Playwright screencast.
@@ -262,7 +256,7 @@ def probe_frame_count(path: Path) -> int:
     the frame interval, which would mean the input is not the CFR material the
     whole time model assumes.
     """
-    duration = probe_duration(path)
+    duration = probe.probe_duration(path)
     exact = duration * FPS
     frames = int(round(exact))
     if abs(exact - frames) > 0.1:
@@ -280,7 +274,7 @@ def assert_recording_fps(path: Path) -> None:
     different value means the recorder changed under us. Silently re-quantising
     the audio timeline onto a new grid would turn that into a subtle desync.
     """
-    proc = _run(
+    proc = ffmpeg._run(
         [
             ffprobe_bin(),
             "-v",
@@ -337,4 +331,4 @@ def apply_time_edits(src: Path, timeline: Timeline, out: Path) -> None:
         "-movflags",
         "+faststart",
     ]
-    _run_to_output(cmd, out)
+    ffmpeg._run_to_output(cmd, out)

@@ -22,15 +22,20 @@ Polecenia pomiarowe:
 ```bash
 git fetch && git status -sb          # najpierw: czy w ogóle jestem na aktualnym drzewie?
 
+# UWAGA: zakres MUSI obejmować tests/. CI robi `ruff check .`, więc bramka
+# obejmie testy — pomiar skanujący tylko guidebot_recorder/ jest ślepy na
+# połowę repo i przepuści naruszenia aż do fazy 6.
 uvx ruff check --isolated --select C901 \
-    --config 'lint.mccabe.max-complexity=10' --output-format concise guidebot_recorder
+    --config 'lint.mccabe.max-complexity=10' --output-format concise guidebot_recorder tests
 
 for f in $(git ls-files 'guidebot_recorder/*.py' 'tests/*.py'); do
   n=$(wc -l < "$f"); [ "$n" -gt 600 ] && printf '%6d  %s\n' "$n" "$f"
 done | sort -rn
 ```
 
-Stan na `9e28c90`: **15 funkcji** ponad CC 10, **20 plików** ponad 600 linii — **4 kod** (`render.py` 3012, `recorder.py` 1328, `mux.py` 1300, `compile.py` 1027), **14 testów** (od 3615 do `test_cli.py` 601), **2 JS**.
+Stan: **16 funkcji** ponad CC 10 — 15 w `guidebot_recorder/` plus **`_read_png` (CC 14) w `tests/integration/test_guide_select_reveal.py:119`**, przypisane do fazy 5. Ta szesnasta była niewidoczna, dopóki polecenie pomiarowe skanowało wyłącznie `guidebot_recorder/`.
+
+**20 plików** ponad 600 linii — **4 kod** (`render.py` 3012, `recorder.py` 1328, `mux.py` 1300, `compile.py` 1027), **14 testów** (od 3615 do `test_cli.py` 601), **2 JS**.
 
 Rozkład złożoności jest skrajnie nierówny i to determinuje podział na fazy:
 
@@ -109,7 +114,48 @@ from .ffmpeg import _run      # ❌ wartość związana przy imporcie
 _run([...])                   #    żaden patch tego nie dosięgnie
 ```
 
-Reguła jest pilnowana **testem-strażnikiem na AST**, nie dyscypliną.
+Reguła jest pilnowana **testem-strażnikiem na AST**, nie dyscypliną. Źródłem prawdy dla listy szwów w strażniku są **rzeczywiste cele podmiany w `tests/`**, wyliczane skanem, a nie lista wpisana na sztywno — inaczej strażnik zgnije przy pierwszym nowym szwie, czyli dokładnie wtedy, gdy jest potrzebny.
+
+#### Niezmiennik, który zastępuje nieostre „przecelować na moduł-właściciela"
+
+Zwrot „moduł-właściciel" jest dwuznaczny (miejsce **definicji** czy nowy dom **konsumenta**?) i w tej postaci prowadzi do cichej awarii. Obowiązuje sformułowanie jednoznaczne:
+
+> **Test musi podmieniać ten moduł, którego globalne odczytuje konsument w momencie wywołania.**
+
+Wybór jest **parą sprzężoną**, podejmowaną osobno dla każdej nazwy:
+
+| konsument | test podmienia |
+|---|---|
+| zostaje przy `from X import nazwa` | moduł **konsumenta** |
+| przepięty na `mod.nazwa(...)` | moduł **definiujący** |
+
+Pomieszanie wariantów — podmiana w module definiującym, gdy konsument związał nazwę przy imporcie — **chybia po cichu**. Dlatego pierwszym artefaktem każdego podziału jest **tabela per nazwa**: podmieniana nazwa → funkcja(-e) konsumujące → moduł po podziale → nowy cel podmiany.
+
+**Nazwa o konsumentach w dwóch modułach po podziale wymaga dwóch linii podmiany.** Jedna przestaje wystarczać, a druga ścieżka przechwytywania znika bez śladu. W `render.py` taką nazwą jest `Recorder` (konsumowany przez `run_render` **i** `_prepare_main_after_popup_close`) oraz `probe_frame_count`.
+
+#### Reguła wstrzymywania dotyczy powierzchni testowej, nie produkcyjnej
+
+Wcześniejsza wersja tej reguły mówiła po prostu „nie re-eksportuj tego, co testy podmieniają" — i była **błędna**, bo ignorowała konsumentów produkcyjnych. Dla `mux.py` wszystkie trzy podmieniane nazwy są importowane przez kod produkcyjny:
+
+```
+_run            ← video/timeline.py
+_run_to_output  ← video/sfx.py, video/audiobed.py, video/timeline.py
+probe_duration  ← video/__init__.py, recorder/render.py, video/timeline.py
+```
+
+Wstrzymanie ich z fasady bez dalszych działań **wywala pięć modułów produkcyjnych przy imporcie**. Poprawnie:
+
+1. Reguła wstrzymywania rządzi powierzchnią **testową**.
+2. Konsumentów produkcyjnych wstrzymanej nazwy przecelowujemy w tym samym commicie na **moduł definiujący** (`mux.ffmpeg`, `mux.probe`).
+3. Jeżeli nazwa jest szwem testowym, konsument produkcyjny też musi wołać **przez obiekt modułu** — inaczej patch nie dosięgnie np. `video/timeline.py`.
+
+#### Zmierzone przecięcia (importowane ∩ podmieniane)
+
+| moduł | importowane | podmieniane | przecięcie |
+|---|---|---|---|
+| `recorder/render.py` | 24 | 20 | **5** — `_apply_timeline_edits`, `_assemble_audio_tracks`, `_pace_narration`, `_publish_render_artifacts`, `_render_step` |
+| `video/mux.py` | 10 | 3 | **1** — `probe_duration` (wstrzymanie wymusza przecelowanie ~11 importów w ~10 plikach testowych **plus** konsumenci produkcyjni wyżej) |
+| `recorder/compile.py` | 7 | 2 | **∅** — fasada bezpieczna; importy produkcyjne dotyczą wyłącznie nazw niepodmienianych |
 
 ### 3. Refaktoring systematycznie przenosi kod, którego nie pokrywają testy
 
@@ -162,11 +208,23 @@ Każda faza = jeden PR.
 
 **Kolejność NIE jest dowolna.** Faza 0 poprzedza wszystko. Faza 6 musi być ostatnia dla Pythona (inaczej blokuje własne PR-y — patrz D5). Fazy 1 i 2 obie dotykają `render.py`, więc nie mogą iść równolegle: `_mux_tracks_for_timeline` z fazy 2 mieszka w pliku, który faza 1 zamienia w pakiet — po fazie 1 jego ścieżka jest inna. Fazy 4 (recorder) i 5 (testy) są niezależne od 1–3 i od siebie.
 
-Zalecana sekwencja: **0 → 1 → 2 → 3 → 6**, z 4 i 5 wpuszczonymi w dowolnym miejscu po 0.
+**Faza 5 NIE jest swobodna.** Dzieli pliki testowe „lustrzanie do podziału źródeł" — a lustro nie istnieje przed fazą 1, zaś odpowiednik `test_recorder_select.py` (1501 linii) wymaga fazy 4. Do tego faza 1 przepisuje dziesiątki miejsc podmiany w `test_render.py`, czyli w pliku, który faza 5 dzieli.
+
+Zalecana sekwencja: **0 → 1 → 2 → 3 → 4 → 5 → 6**, przy czym 4 może wejść w dowolnym miejscu po 0.
+
+**Faza 1 dzieli się na trzy PR-y, po jednym na plik źródłowy** — jest zbyt duża jako jeden. Kolejność rosnącego ryzyka:
+
+| PR | cel | miejsca podmiany | przecięcie |
+|---|---|---|---|
+| **1a** | `mux.py` 1300 | 6 | 1 |
+| **1b** | `compile.py` 1027 | 7 | 0 |
+| **1c** | `render.py` 3012 | ~64 | 5 |
+
+Trzy fasady są niezależne. Mały PR 1a ćwiczy **cały mechanizm** — fasadę, wstrzymywanie, przecięcie, strażnika AST, przepięcie szwów — przy mniej więcej dziesiątej części powierzchni podmian `render.py`. Strażnik AST powstaje w 1a i jest rozszerzany w kolejnych.
 
 ### Faza 0 — pomiar i siatka bezpieczeństwa (bez zmian produkcyjnych) — ✅ WYKONANA
 
-Zrealizowana 2026-07-22 na gałęzi `cleanup/faza-0-siatka-bezpieczenstwa`, +378 linii w 5 plikach testowych, zero zmian w kodzie produkcyjnym.
+Zrealizowana 2026-07-22, zmergowana jako PR #58: **+473 / −7 linii** w 5 plikach testowych (dwa commity — `7a932cb` plus `3d657aa` z poprawkami po recenzji), zero zmian w kodzie produkcyjnym.
 
 Co zostało zabezpieczone:
 
@@ -184,6 +242,21 @@ Co zostało zabezpieczone:
 > Faza obejmuje też edycję dziesiątek miejsc podmiany w `test_render.py` (3615 linii) i `test_mux.py` (1583). **To najbardziej ryzykowny PR całej serii**, nie rozgrzewka.
 
 Przeniesienie samowystarczalnych grup pomocniczych do podmodułów. Logika bez zmian; `git diff -M` ma pokazywać przeniesienia wszędzie poza przepięciem szwów.
+
+**Docelowy układ `recorder/compile/`** (PR 1b) — do zweryfikowania pomiarem, ale nie do wymyślania od zera w trakcie:
+
+```
+__init__.py   fasada (__all__ musi zostać bajtowo identyczne — test asertuje
+              "install_selects" not in compile_module.__all__)
+state.py      obiekty stanu pętli kompilacji
+pages.py      stałe okna popupu, obserwacja stron, _wait_for_new_pages, _prepare_popup
+cache.py      _load_prior_actions, compile_up_to_date, _fingerprint_matches, _can_reuse
+describe.py   _short, _target_desc, _warn_absent, _resolve_url
+step.py       _compile_step i jego pomocnicy
+run.py        run_compile, run_compile_in_browser
+```
+
+Szwy: `write_compiled` (konsumowany w `run.py`) i `resolve_step_target` (w `step.py`). Przecięcie importowane ∩ podmieniane jest **puste**, więc fasada `compile.py` jest bezpieczna — wstrzymujemy tylko te dwie nazwy i przecelowujemy 9 miejsc w 2 plikach testowych, wszystkie padające głośno.
 
 `compile.py` (1027 linii) wchodzi do tej fazy, bo **żadna inna go nie sprowadza pod limit**: faza 3 zbija jego complexity, ale dekompozycja przez obiekt stanu zwykle najpierw *dodaje* linie. Bez tego bramka z fazy 6 wywala się na pliku, którego nikt nie zaplanował dzielić — dokładnie to, czemu D5 ma zapobiegać.
 
