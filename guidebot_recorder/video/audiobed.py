@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from guidebot_recorder.video.mux import SAMPLE_RATE, _run_to_output, ffmpeg_bin
+from guidebot_recorder.video.mux import SAMPLE_RATE, ffmpeg, ffmpeg_bin
 
 
 @runtime_checkable
@@ -96,4 +96,4 @@ def build_audio_bed(placed: list[Placed], total: float, out: Path) -> None:
         "-t",
         f"{total:.6f}",
     ]
-    _run_to_output(cmd, out)
+    ffmpeg._run_to_output(cmd, out)

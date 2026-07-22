@@ -19,7 +19,7 @@ from guidebot_recorder.recorder.render_set import run_compile_set, run_render_se
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.render_set import load_render_set
-from guidebot_recorder.video.mux import probe_duration
+from guidebot_recorder.video.mux.probe import probe_duration
 
 pytestmark = [
     pytest.mark.integration,

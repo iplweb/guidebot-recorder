@@ -75,7 +75,7 @@ def _overall_peak_level_db(path: Path) -> float:
 
 def test_mix_sfx_into_bed_no_clip_and_duration(tmp_path):
     from guidebot_recorder.video.audiobed import Placed, build_audio_bed
-    from guidebot_recorder.video.mux import probe_duration
+    from guidebot_recorder.video.mux.probe import probe_duration
     from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
 
     total = 3.0
@@ -100,7 +100,7 @@ def test_mix_sfx_into_bed_no_clip_and_duration(tmp_path):
 
 
 def test_build_sfx_bed_length_and_bounded_inputs(tmp_path):
-    from guidebot_recorder.video.mux import probe_duration
+    from guidebot_recorder.video.mux.probe import probe_duration
     from guidebot_recorder.video.sfx import build_sfx_bed
 
     out = tmp_path / "sfx.wav"

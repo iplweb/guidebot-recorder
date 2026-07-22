@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
-from guidebot_recorder.video.mux import probe_duration
+from guidebot_recorder.video.mux.probe import probe_duration
 
 pytestmark = [
     pytest.mark.ffmpeg,

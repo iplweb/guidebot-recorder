@@ -4,9 +4,11 @@ Projekt: `docs/superpowers/specs/2026-07-22-code-cleanup-design.md`
 
 Każda faza = jeden PR = jedno wklejenie. **Preambuła obowiązuje w każdej fazie** — wklej ją razem z fazą.
 
-**Kolejność nie jest dowolna:** `0 → 1 → 2 → 3 → 6`. Fazy 4 i 5 wchodzą w dowolnym miejscu po 0. Faza 6 **musi** być ostatnia dla Pythona. Fazy 1 i 2 obie dotykają `render.py` i nie mogą iść równolegle.
+**Kolejność nie jest dowolna:** `0 → 1 → 2 → 3 → 4 → 5 → 6`. Faza 4 może wejść w dowolnym miejscu po 0; **faza 5 nie** — dzieli pliki testowe lustrzanie do podziału źródeł, a lustro powstaje dopiero w fazach 1 i 4. Faza 6 musi być ostatnia dla Pythona. Fazy 1 i 2 obie dotykają `render.py` i nie mogą iść równolegle.
 
-**Status: Faza 0 jest wykonana** (gałąź `cleanup/faza-0-siatka-bezpieczenstwa`). Zaczynaj od Fazy 1.
+**Faza 1 dzieli się na trzy PR-y**, po jednym na plik źródłowy, w kolejności rosnącego ryzyka: **1a `mux.py`** (6 miejsc podmiany), **1b `compile.py`** (7), **1c `render.py`** (~64). Trzy fasady są niezależne. Mały PR 1a ćwiczy cały mechanizm przy dziesiątej części powierzchni podmian `render.py`; strażnik AST powstaje w 1a i jest rozszerzany w kolejnych.
+
+**Status:** Faza 0 zmergowana (PR #58). Faza 1a w toku.
 
 ---
 
@@ -27,8 +29,11 @@ ZANIM COKOLWIEK ZROBISZ
 3. Zmierz stan sam. Nie ufaj żadnym liczbom w specu ani w tym prompcie —
    są ilustracją skali, nie kontraktem:
 
+   # zakres MUSI obejmować tests/ — CI robi `ruff check .`, więc bramka
+   # obejmie testy. Pomiar tylko po guidebot_recorder/ jest ślepy na pół repo
+   # (tak przeoczono _read_png w tests/integration/test_guide_select_reveal.py)
    uvx ruff check --isolated --select C901 \
-       --config 'lint.mccabe.max-complexity=10' --output-format concise guidebot_recorder
+       --config 'lint.mccabe.max-complexity=10' --output-format concise guidebot_recorder tests
 
    for f in $(git ls-files 'guidebot_recorder/*.py' 'tests/*.py'); do
      n=$(wc -l < "$f"); [ "$n" -gt 600 ] && printf '%6d  %s\n' "$n" "$f"
@@ -73,7 +78,41 @@ PUŁAPKA SZWÓW TESTOWYCH — przeczytaj, zanim podzielisz jakikolwiek plik
   TESTÓW — głośno i natychmiast. Re-eksport gubiłby zabezpieczenie dla ~15
   miejsc podmiany najczęściej patchowanych nazw w suite. Wybieramy ImportError.
 
-  Zanim zaczniesz, policz to przecięcie sam dla swojego modułu.
+  Zanim zaczniesz, policz to przecięcie sam dla swojego modułu. Zmierzone:
+      render.py  24 importowane / 20 podmieniane / przecięcie 5
+      mux.py     10 / 3 / przecięcie 1 (probe_duration)
+      compile.py  7 / 2 / przecięcie 0
+
+  UWAGA — REGUŁA WSTRZYMYWANIA DOTYCZY POWIERZCHNI TESTOWEJ, NIE PRODUKCYJNEJ.
+  Wcześniejsza wersja mówiła po prostu "nie re-eksportuj tego, co podmieniane"
+  i była BŁĘDNA: dla mux wszystkie trzy podmieniane nazwy (_run,
+  _run_to_output, probe_duration) importuje KOD PRODUKCYJNY (video/timeline.py,
+  video/sfx.py, video/audiobed.py, video/__init__.py, recorder/render.py).
+  Samo wstrzymanie wywala pięć modułów przy imporcie.
+  Poprawnie:
+    1. wstrzymujesz nazwę z fasady (powierzchnia testowa),
+    2. konsumentów PRODUKCYJNYCH przecelowujesz w tym samym commicie
+       na moduł definiujący (mux.ffmpeg, mux.probe),
+    3. jeśli nazwa jest szwem, konsument produkcyjny też woła przez obiekt
+       modułu — inaczej patch nie dosięgnie np. video/timeline.py.
+
+  I NIEZMIENNIK, KTÓRY ZASTĘPUJE NIEOSTRE "przecelować na moduł-właściciela"
+  (to sformułowanie jest dwuznaczne: definicja czy nowy dom konsumenta?):
+
+      TEST MUSI PODMIENIAĆ TEN MODUŁ, KTÓREGO GLOBALNE ODCZYTUJE KONSUMENT
+      W MOMENCIE WYWOŁANIA.
+
+  Wybór jest PARĄ SPRZĘŻONĄ, osobno dla każdej nazwy:
+      konsument zostaje przy `from X import nazwa`  -> test podmienia MODUŁ KONSUMENTA
+      konsument przepięty na `mod.nazwa(...)`       -> test podmienia MODUŁ DEFINIUJĄCY
+  Pomieszanie ich CHYBIA PO CICHU.
+
+  Nazwa o konsumentach w DWÓCH modułach po podziale wymaga DWÓCH linii
+  podmiany (w render.py: `Recorder` i `probe_frame_count`).
+
+  PIERWSZYM ARTEFAKTEM TEJ FAZY jest tabela per nazwa:
+      podmieniana nazwa -> funkcja konsumująca -> moduł po podziale -> nowy cel
+  Zrób ją PRZED przenoszeniem kodu.
 
   Dzięki temu nieprzeniesiony patch daje natychmiastowy AttributeError
   (zweryfikowane: monkeypatch.setattr na nieistniejącym atrybucie rzuca).
@@ -390,8 +429,13 @@ NIEZMIENNIKI KOLEJNOŚCI — po refaktoringu mają być TRUDNIEJSZE do złamania
 nie łatwiejsze. Dla każdego napisz w PR, jak go chronisz:
   - cursor/slide/desktop PRZED chrome.js → jedna funkcja, której ciałem JEST
     kolejność, plus asercja runtime na liście zarejestrowanych
-  - kompozycja popupu PRZED edycją czasu → osobne typy dla filmu na osi
-    nagrania i wirtualnej; zamiana kolejności staje się błędem typu
+  - kompozycja popupu PRZED edycją czasu → chroni to TEST Z FAZY 0
+    (test_popup_is_composed_before_time_editing_and_feeds_it), NIE typy.
+    Osobne typy dla filmu na osi nagrania i wirtualnej dodaj dla czytelności
+    wywołań, ale NIE zakładaj, że "zamiana kolejności staje się błędem typu"
+    — repo nie ma type-checkera, więc w czasie wykonania nic tego nie wymusi.
+    (Poprzednia wersja tego punktu tak twierdziła i przeczyła sekcji
+    "UWAGA O TYPACH" kilka linii wyżej.)
   - monotoniczność last_freeze_frame → jedyny czytelnik i pisarz w _Clock
   - sonda nieobecności PRZED narracją → szew między "czy ten krok w ogóle
     się wydarzy" a "wykonaj go"
@@ -499,6 +543,11 @@ przed "_", więc kolejność "najważniejszy pierwszy" ocaleje.
 Komentarze odsyłające do sąsiedniej sekcji ("unlike the geometry lookup above",
 "the ceiling section 9 just established") przepisz na jawne odwołania do pliku
 — po podziale są nieczytelne.
+
+DODATKOWO W TEJ FAZIE: `_read_png` w tests/integration/test_guide_select_reveal.py:119
+ma CC 14. To jedyne naruszenie complexity poza guidebot_recorder/ i żadna inna
+faza go nie obejmuje — a CI robi `ruff check .`, więc bramka z fazy 6 się na nim
+wywali. Rozłóż je albo zastąp (np. Pillow, jeśli jest już zależnością — sprawdź).
 
 Trzymaj razem, mimo naturalnych szwów:
   - dwa bloki testów odporności na zawieszenie (drugi ma sens tylko obok pierwszego)

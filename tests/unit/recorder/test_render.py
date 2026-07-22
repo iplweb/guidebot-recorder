@@ -54,7 +54,8 @@ from guidebot_recorder.selects import Selects
 from guidebot_recorder.slide import SlideOverlay
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
-from guidebot_recorder.video.mux import MuxAudioTrack, compose_popup_video, probe_duration
+from guidebot_recorder.video.mux import MuxAudioTrack, compose_popup_video
+from guidebot_recorder.video.mux.probe import probe_duration
 from guidebot_recorder.video.timeline import TimeEdit, Timeline, probe_frame_count
 
 pytestmark = [

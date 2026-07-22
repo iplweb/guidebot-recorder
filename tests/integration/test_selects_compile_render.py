@@ -34,7 +34,7 @@ from guidebot_recorder.resolver.validate import build_locator, reuse_is_valid
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.selects import install_selects
-from guidebot_recorder.video.mux import probe_duration
+from guidebot_recorder.video.mux.probe import probe_duration
 
 pytestmark = [
     pytest.mark.integration,

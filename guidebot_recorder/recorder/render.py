@@ -85,14 +85,18 @@ from guidebot_recorder.tts.base import (
     cache_key,
 )
 from guidebot_recorder.video.audiobed import Placed, build_audio_bed
+
+# `probe_duration` is a test seam: the mux facade withholds it and the call must
+# stay late-bound, so its defining module is imported below instead. Aliased
+# because `probe` is already used as a local name elsewhere in this module.
 from guidebot_recorder.video.mux import (
     FadeSpec,
     MuxAudioTrack,
     compose_popup_video,
     detect_content_crop,
     mux_audio_tracks,
-    probe_duration,
 )
+from guidebot_recorder.video.mux import probe as mux_probe
 from guidebot_recorder.video.sfx import build_sfx_bed, mix_sfx_into_bed
 from guidebot_recorder.video.timeline import (
     TimeEdit,
@@ -2606,7 +2610,7 @@ async def run_render(
             transition = "slide"
             if verbose:
                 tqdm.write("popup wypełnia kadr — wymuszam przejście `slide` zamiast `float`")
-        closed_at = probe_duration(main_webm) if popup_open_at_end else popup.closed_at
+        closed_at = mux_probe.probe_duration(main_webm) if popup_open_at_end else popup.closed_at
         assert closed_at is not None
         composite = work / f"{out_mp4.stem}.composite.mp4"
         compose_popup_video(

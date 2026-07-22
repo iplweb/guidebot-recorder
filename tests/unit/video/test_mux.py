@@ -24,8 +24,8 @@ from guidebot_recorder.video.mux import (
     mux,
     mux_audio_tracks,
     mux_preencoded,
-    probe_duration,
 )
+from guidebot_recorder.video.mux.probe import probe_duration
 
 mux_module = importlib.import_module("guidebot_recorder.video.mux")
 
@@ -363,10 +363,10 @@ def test_atomic_output_preserves_previous_artifact_after_ffmpeg_failure(
         Path(cmd[-1]).write_bytes(b"partial")
         raise RuntimeError("ffmpeg failed")
 
-    monkeypatch.setattr(mux_module, "_run", fail_after_partial_write)
+    monkeypatch.setattr(mux_module.ffmpeg, "_run", fail_after_partial_write)
 
     with pytest.raises(RuntimeError, match="ffmpeg failed"):
-        mux_module._run_to_output(["ffmpeg", "-y"], out)
+        mux_module.ffmpeg._run_to_output(["ffmpeg", "-y"], out)
 
     assert out.read_bytes() == b"previous-good-artifact"
     assert list(tmp_path.glob(".out.*.mp4")) == []
@@ -515,13 +515,13 @@ def test_mux_audio_tracks_reuses_known_video_duration(
     _make_video(video, 1.0)
     _make_audio(audio, 1.0)
     probed: list[Path] = []
-    original_probe = mux_module.probe_duration
+    original_probe = mux_module.probe.probe_duration
 
     def recording_probe(path: Path) -> float:
         probed.append(Path(path))
         return original_probe(path)
 
-    monkeypatch.setattr(mux_module, "probe_duration", recording_probe)
+    monkeypatch.setattr(mux_module.probe, "probe_duration", recording_probe)
 
     mux_audio_tracks(
         video,
@@ -799,14 +799,14 @@ def test_slide_composition_probes_each_artifact_once(
     _make_main_color_timeline(main)
     _make_color_video(popup, "yellow", 1.0)
     probed_paths: list[Path] = []
-    original_run = mux_module._run
+    original_run = mux_module.ffmpeg._run
 
     def recording_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         if Path(cmd[0]).name == "ffprobe":
             probed_paths.append(Path(cmd[-1]))
         return original_run(cmd, **kwargs)
 
-    monkeypatch.setattr(mux_module, "_run", recording_run)
+    monkeypatch.setattr(mux_module.ffmpeg, "_run", recording_run)
 
     compose_popup_video(
         main,
@@ -1036,13 +1036,13 @@ def _capture_filtergraph(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     expected string but that ffmpeg rejects still fails the test.
     """
     seen: list[str] = []
-    real_run = mux_module._run_to_output
+    real_run = mux_module.ffmpeg._run_to_output
 
     def spy_run(cmd: list[str], out: Path) -> None:
         seen.append(cmd[cmd.index("-filter_complex") + 1])
         real_run(cmd, out)
 
-    monkeypatch.setattr(mux_module, "_run_to_output", spy_run)
+    monkeypatch.setattr(mux_module.ffmpeg, "_run_to_output", spy_run)
     return seen
 
 
@@ -1309,17 +1309,24 @@ def test_detect_content_crop_declines_when_ffmpeg_overruns(
 ) -> None:
     popup = tmp_path / "popup.mp4"
     _make_popup_with_filler(popup, 1.0)
+    # `detect_content_crop` degrades to None on ANY failure, so the assertion
+    # below also holds when the patch reaches nobody — the test would pass while
+    # proving nothing and quietly shelling out to real ffmpeg. This sentinel is
+    # what makes the timeout the actual subject: no call, no test.
+    called: list[list[str]] = []
 
     def timing_out(cmd, **kwargs):
+        called.append(cmd)
         assert kwargs.get("timeout") == mux_module.CROPDETECT_TIMEOUT, (
             "every detection pass must carry the timeout"
         )
         raise subprocess.TimeoutExpired(cmd, mux_module.CROPDETECT_TIMEOUT)
 
-    monkeypatch.setattr(mux_module, "_run", timing_out)
+    monkeypatch.setattr(mux_module.ffmpeg, "_run", timing_out)
 
     # A wedged ffmpeg costs the crop, never the render.
     assert detect_content_crop(popup) is None
+    assert called, "the patched _run was never reached: the seam is broken"
 
 
 def test_detect_content_crop_passes_are_bounded(
@@ -1328,17 +1335,21 @@ def test_detect_content_crop_passes_are_bounded(
     popup = tmp_path / "popup.mp4"
     _make_popup_with_filler(popup, 1.0)
     timeouts: list[float | None] = []
-    real_run = mux_module._run
+    real_run = mux_module.ffmpeg._run
 
     def spy_run(cmd, **kwargs):
         timeouts.append(kwargs.get("timeout"))
         return real_run(cmd, **kwargs)
 
-    monkeypatch.setattr(mux_module, "_run", spy_run)
+    monkeypatch.setattr(mux_module.ffmpeg, "_run", spy_run)
 
     assert detect_content_crop(popup) == (160, 120, 0, 0)
-    # Both the padding sample and the cropdetect pass, not just one of them.
-    assert timeouts and all(value == mux_module.CROPDETECT_TIMEOUT for value in timeouts), timeouts
+    # Three passes carry the budget, not just one of them: the ffprobe, the
+    # padding sample and the cropdetect run. Counting them is what makes this
+    # test notice a broken seam — the crop degrades to a plain result whether the
+    # spy was reached or not, so only the tally distinguishes the two.
+    assert len(timeouts) >= 3, timeouts
+    assert all(value == mux_module.CROPDETECT_TIMEOUT for value in timeouts), timeouts
 
 
 def test_detect_content_crop_result_feeds_compose_popup_video(tmp_path: Path) -> None:
