@@ -41,6 +41,57 @@ from .errors import RenderError
 _AUDIO_BED_CONCURRENCY = max(1, min(4, os.cpu_count() or 1))
 
 
+def _assert_narration_fits(
+    configs: list[TtsConfig],
+    placed_by_language: dict[str, list[Placed]],
+    total: float,
+) -> None:
+    """No track may run past the picture. Checked before a single bed is built."""
+
+    for tts in configs:
+        for placement in placed_by_language[tts.lang]:
+            if placement.offset + placement.segment.duration > total:
+                raise RenderError(
+                    f"narracja {tts.lang} wykracza poza nagranie wideo — render przerwany"
+                )
+
+
+async def _gather_tracks(tasks: list[asyncio.Task[MuxAudioTrack]]) -> list[MuxAudioTrack]:
+    """Collect every bed, draining the workers if the caller is cancelled.
+
+    Moved out of :func:`_mux_tracks_for_timeline` verbatim. Cancelling an asyncio
+    wrapper cannot stop a running thread or its ffmpeg child, and the staging
+    ``TemporaryDirectory`` is unwound by the caller the moment this returns — so
+    the shield/drain below is what keeps ffmpeg from writing into a deleted path.
+    Do not tidy it.
+    """
+
+    gathered = asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        results = await asyncio.shield(gathered)
+    except asyncio.CancelledError:
+        # Do not start queued ffmpeg work after cancellation, but let workers
+        # already inside to_thread finish before TemporaryDirectory can unwind.
+        for task in tasks:
+            task.cancel()
+        while not gathered.done():
+            try:
+                await asyncio.shield(gathered)
+            except asyncio.CancelledError:
+                continue
+        if not gathered.cancelled():
+            gathered.result()
+        raise
+    tracks: list[MuxAudioTrack] = []
+    # gather preserves config order. It also waits for all ffmpeg workers before
+    # an error leaves the staging directory, avoiding writes into deleted paths.
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        tracks.append(result)
+    return tracks
+
+
 async def _mux_tracks_for_timeline(
     configs: list[TtsConfig],
     placed_by_language: dict[str, list[Placed]],
@@ -56,12 +107,7 @@ async def _mux_tracks_for_timeline(
     naming ``_publish_render_artifacts`` relies on.
     """
 
-    for tts in configs:
-        for placement in placed_by_language[tts.lang]:
-            if placement.offset + placement.segment.duration > total:
-                raise RenderError(
-                    f"narracja {tts.lang} wykracza poza nagranie wideo — render przerwany"
-                )
+    _assert_narration_fits(configs, placed_by_language, total)
 
     semaphore = asyncio.Semaphore(_AUDIO_BED_CONCURRENCY)
 
@@ -102,30 +148,7 @@ async def _mux_tracks_for_timeline(
                 raise
 
     tasks = [asyncio.create_task(build_bounded(index, tts)) for index, tts in enumerate(configs)]
-    gathered = asyncio.gather(*tasks, return_exceptions=True)
-    try:
-        results = await asyncio.shield(gathered)
-    except asyncio.CancelledError:
-        # Do not start queued ffmpeg work after cancellation, but let workers
-        # already inside to_thread finish before TemporaryDirectory can unwind.
-        for task in tasks:
-            task.cancel()
-        while not gathered.done():
-            try:
-                await asyncio.shield(gathered)
-            except asyncio.CancelledError:
-                continue
-        if not gathered.cancelled():
-            gathered.result()
-        raise
-    tracks: list[MuxAudioTrack] = []
-    # gather preserves config order. It also waits for all ffmpeg workers before
-    # an error leaves the staging directory, avoiding writes into deleted paths.
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
-        tracks.append(result)
-    return tracks
+    return await _gather_tracks(tasks)
 
 
 def _publish_render_artifacts(
