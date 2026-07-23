@@ -155,6 +155,146 @@ def _make_popup_with_teardown_tail(
     )
 
 
+def _make_video(path: Path, seconds: float) -> None:
+    """Write an H.264 mp4 (video only) of *seconds* duration from ``testsrc``."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size=320x240:rate=25",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-t",
+            str(seconds),
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _make_main_color_timeline(path: Path) -> None:
+    """Write red (0-1s), green (1-2s), then blue (2-3s)."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:duration=1:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x00ff00:duration=1:size=320x240:rate=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:duration=1:size=320x240:rate=25",
+            "-filter_complex",
+            "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[outv]",
+            "-map",
+            "[outv]",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+# Regions of the 320x240 frame: the popup centre and a left border strip that
+# floating mode leaves as (dimmed) backdrop at scale=0.72.
+_CENTER = "40:40:140:100"
+_BORDER = "10:240:0:0"
+
+
+def _sample_rgb(path: Path, at: float) -> tuple[int, int, int]:
+    """Decode one frame and return its average RGB colour."""
+    return _sample_region_rgb(path, at, None)
+
+
+def _sample_region_rgb(path: Path, at: float, crop: str | None) -> tuple[int, int, int]:
+    """Decode one frame (optionally cropped to *crop*) and average it to one RGB.
+
+    *crop* is an ffmpeg ``crop`` spec ``w:h:x:y`` selecting a region before the
+    1x1 area downscale, so callers can probe the composite's centre (popup) vs.
+    its border (dimmed main) independently.
+    """
+    vf = "scale=1:1:flags=area" if crop is None else f"crop={crop},scale=1:1:flags=area"
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-ss",
+            str(at),
+            "-frames:v",
+            "1",
+            "-vf",
+            vf,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert len(proc.stdout) == 3
+    return tuple(proc.stdout)
+
+
+def _assert_rgb(actual: tuple[int, int, int], expected: tuple[int, int, int]) -> None:
+    assert actual == pytest.approx(expected, abs=20)
+
+
+def _assert_dimmed_green(rgb: tuple[int, int, int]) -> None:
+    """Assert *rgb* reads as backdrop green darkened by the dim ramp."""
+    red, green, blue = rgb
+    assert green > 50, f"backdrop should still be visibly green: {rgb}"
+    assert green < 210, f"backdrop should be dimmed, not full green: {rgb}"
+    assert red < 70 and blue < 70, f"backdrop should be green-dominant: {rgb}"
+
+
+def _assert_yellow(rgb: tuple[int, int, int]) -> None:
+    red, green, blue = rgb
+    assert red > 170 and green > 170 and blue < 90, f"expected popup yellow: {rgb}"
+
+
+def _video_codec(path: Path) -> str:
+    """Return the ``codec_name`` of the first video stream (via ffprobe)."""
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
 def capture_ffmpeg_args(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Record the argv of every ffmpeg run, then run it for real.
 

@@ -29,7 +29,7 @@ from guidebot_recorder.scenario.compiled import compiled_path, load_compiled, wr
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.tts.base import Segment
 from guidebot_recorder.video.audiobed import Placed
-from tests.unit.recorder.test_render import FakeTts, TwoSecondTts
+from tests.unit.recorder._render_helpers import FakeTts, TwoSecondTts
 
 pytestmark = [
     pytest.mark.ffmpeg,

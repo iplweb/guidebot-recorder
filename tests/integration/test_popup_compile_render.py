@@ -2,32 +2,34 @@
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
 from playwright.async_api import async_playwright
 
-from guidebot_recorder.models.config import TtsConfig
-from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.compile import run_compile
 from guidebot_recorder.recorder.render import run_render
-from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.video.mux.probe import probe_duration
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.ffmpeg,
-    pytest.mark.skipif(
-        shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
-        reason="ffmpeg/ffprobe niedostępne",
-    ),
-]
+from ._popup_e2e import (
+    FIXTURE,
+    FLOATING_SCENARIO_TEMPLATE,
+    PYTESTMARK,
+    FakeTts,
+    NoCallsReasoner,
+    PopupReasoner,
+    _audio_streams,
+    _decode_audio_stream,
+    _has_audio_signal,
+    _is_chrome_gray,
+    _is_main_blue,
+    _is_popup_yellow,
+    _rgb_at,
+    _rgb_at_pixel,
+    _stream_types,
+)
 
-FIXTURE = Path(__file__).parent / "fixtures" / "popup-main.html"
+pytestmark = PYTESTMARK
 
 SCENARIO_TEMPLATE = """\
 config:
@@ -65,23 +67,6 @@ steps:
   - wait: 0.4
 """
 
-FLOATING_SCENARIO_TEMPLATE = """\
-config:
-  title: Popup logowania (floating)
-  viewport: {{width: 640, height: 480}}
-  tts: {{provider: fake, voice: v, lang: pl-PL}}
-  chrome: {{enabled: true, showUrl: true, typeOnNavigate: false}}
-  popup: {{floating: true, scale: 0.72, backdropDim: 0.5}}
-steps:
-  - navigate: "{url}"
-  - wait: 0.4
-  - teach: "Otwórz popup logowania"
-  - teach: "przełącz się na popup i wpisz w pole email tekst koparka@poczta.wp.pl"
-  - wait: 0.4
-  - click: "Zamknij popup logowania"
-  - click: "Zakończ na stronie głównej"
-"""
-
 
 SLIDE_SCENARIO_TEMPLATE = """\
 config:
@@ -99,234 +84,6 @@ steps:
   - click: "Zamknij popup logowania"
   - click: "Zakończ na stronie głównej"
 """
-
-
-class PopupReasoner:
-    def __init__(self) -> None:
-        self.calls = 0
-        self.popup_candidates_seen = False
-
-    async def resolve(self, instruction, candidates):
-        self.calls += 1
-        if "Otwórz" in instruction:
-            return ReasonerResult(
-                "click", RoleTarget(role="button", name="Otwórz logowanie", exact=True)
-            )
-        if "koparka@" in instruction:
-            self.popup_candidates_seen = any(
-                candidate.role == "textbox" and candidate.name == "E-mail"
-                for candidate in candidates
-            )
-            return ReasonerResult(
-                "type",
-                RoleTarget(role="textbox", name="E-mail", exact=True),
-                input_text="koparka@poczta.wp.pl",
-            )
-        if "Zamknij" in instruction:
-            return ReasonerResult(
-                "click", RoleTarget(role="button", name="Zamknij logowanie", exact=True)
-            )
-        return ReasonerResult(
-            "click",
-            RoleTarget(role="button", name="Zakończ na stronie głównej", exact=True),
-        )
-
-
-class NoCallsReasoner:
-    async def resolve(self, instruction, candidates):  # pragma: no cover - failure path
-        raise AssertionError(f"cache should resolve {instruction!r} without Reasoner")
-
-
-class FakeTts:
-    adapter_version = 1
-
-    async def synth(self, text: str, tts: TtsConfig, out: Path) -> float:
-        duration = 0.4
-        frequency = {"pl-PL": 440, "en-US": 880}.get(tts.lang, 660)
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                f"sine=frequency={frequency}:duration={duration}:sample_rate=48000",
-                "-t",
-                str(duration),
-                str(out),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        return duration
-
-
-def _stream_types(path: Path) -> list[str]:
-    output = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type",
-            "-of",
-            "csv=p=0",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    return [line.strip() for line in output.splitlines() if line.strip()]
-
-
-def _audio_streams(path: Path) -> list[dict]:
-    output = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a",
-            "-show_entries",
-            "stream_tags=language,handler_name:stream_disposition=default",
-            "-of",
-            "json",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    return json.loads(output)["streams"]
-
-
-def _decode_audio_stream(path: Path, index: int) -> bytes:
-    return subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-map",
-            f"0:a:{index}",
-            "-ac",
-            "1",
-            "-ar",
-            "8000",
-            "-f",
-            "s16le",
-            "pipe:1",
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
-
-
-def _rgb_at(path: Path, seconds: float) -> tuple[int, int, int]:
-    raw = subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-ss",
-            f"{seconds:.6f}",
-            "-i",
-            str(path),
-            "-frames:v",
-            "1",
-            "-vf",
-            "scale=1:1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "pipe:1",
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
-    assert len(raw) == 3
-    return raw[0], raw[1], raw[2]
-
-
-def _rgb_at_pixel(
-    path: Path,
-    seconds: float,
-    x: int = 620,
-    y: int = 20,
-) -> tuple[int, int, int]:
-    raw = subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-ss",
-            f"{seconds:.6f}",
-            "-i",
-            str(path),
-            "-frames:v",
-            "1",
-            "-vf",
-            f"crop=2:2:{x}:{y},scale=1:1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "pipe:1",
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
-    assert len(raw) == 3
-    return raw[0], raw[1], raw[2]
-
-
-def _has_audio_signal(path: Path, start: float, seconds: float = 0.1) -> bool:
-    raw = subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-ss",
-            f"{start:.6f}",
-            "-t",
-            f"{seconds:.6f}",
-            "-i",
-            str(path),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "8000",
-            "-f",
-            "s16le",
-            "pipe:1",
-        ],
-        check=True,
-        capture_output=True,
-    ).stdout
-    samples = [
-        int.from_bytes(raw[index : index + 2], "little", signed=True)
-        for index in range(0, len(raw) - 1, 2)
-    ]
-    return bool(samples) and max(map(abs, samples)) > 100
-
-
-def _is_main_blue(rgb: tuple[int, int, int]) -> bool:
-    red, green, blue = rgb
-    return blue > 120 and blue > red + 60 and blue > green + 60
-
-
-def _is_popup_yellow(rgb: tuple[int, int, int]) -> bool:
-    red, green, blue = rgb
-    return red > 120 and green > 120 and blue < 100
-
-
-def _is_chrome_gray(rgb: tuple[int, int, int]) -> bool:
-    red, green, blue = rgb
-    return abs(red - green) < 20 and abs(green - blue) < 20 and red > 180
 
 
 async def test_popup_compile_reuse_and_render_composite(tmp_path: Path) -> None:
@@ -566,98 +323,3 @@ async def test_floating_popup_frame_is_cropped_to_the_requested_window(tmp_path:
             "it was not cropped to the requested 320x240 window"
         )
     assert popup_on_screen, "expected the floating popup to be on screen at some point"
-
-
-# --- the fallback chain, on real recordings ---------------------------------
-# A featureless ``window.open(url, name)`` states no geometry at all, so level 1
-# has nothing to say and the popup fills the whole recording canvas. What the
-# frame should then be depends on the popup itself, and the two cases below are
-# the two honest answers.
-
-FEATURELESS_CARD_FIXTURE = Path(__file__).parent / "fixtures" / "popup-main-featureless-card.html"
-FEATURELESS_FULL_BLEED_FIXTURE = Path(__file__).parent / "fixtures" / "popup-main-featureless.html"
-
-
-async def test_featureless_popup_is_cropped_to_its_content(tmp_path: Path) -> None:
-    """No ``window.open`` features: the popup's own content decides the frame.
-
-    The popup is a 300px card on an unpainted page, so levels 2 and 3 both see a
-    ~300x290 window at the origin (verified: the DOM box and cropdetect agree
-    within a pixel). Cropped, it scales to ~216x208 and spans x≈212..428;
-    uncropped it would span x≈90..550, exactly the bug this chain closes.
-    """
-
-    path = tmp_path / "featureless-popup.scenario.yaml"
-    path.write_text(
-        FLOATING_SCENARIO_TEMPLATE.format(url=FEATURELESS_CARD_FIXTURE.resolve().as_uri()),
-        encoding="utf-8",
-    )
-
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-
-        compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner(), selects=None)
-        await compile_page.context.close()
-
-        out = tmp_path / "featureless-popup.mp4"
-        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
-        await browser.close()
-
-    duration = probe_duration(out)
-    assert duration > 0
-
-    popup_on_screen = False
-    for fraction in range(1, 40):
-        seconds = duration * fraction / 40
-        if not _is_popup_yellow(_rgb_at_pixel(out, seconds, x=300, y=240)):
-            continue  # popup not fully on screen yet (or already closed)
-        popup_on_screen = True
-        outside = _rgb_at_pixel(out, seconds, x=140, y=110)
-        assert _is_main_blue(outside), (
-            f"the popup frame reaches (140, 110) at {seconds:.2f}s ({outside}) — "
-            "a featureless popup was not cropped to its content"
-        )
-    assert popup_on_screen, "expected the floating popup to be on screen at some point"
-
-
-async def test_full_bleed_featureless_popup_renders_uncropped(tmp_path: Path) -> None:
-    """The documented limitation, pinned: full-bleed content cannot be cropped.
-
-    The popup paints its own page background, so its window genuinely *is* the
-    whole canvas: level 2 declines (a painted ``body``), and level 3 declines too
-    (the ink it can see does not start at the canvas origin, so it is not a
-    window inside padding). Cropping to the ink would cut the popup's background
-    away — this test exists to prove we render the full canvas instead of
-    inventing a frame.
-    """
-
-    path = tmp_path / "full-bleed-popup.scenario.yaml"
-    path.write_text(
-        FLOATING_SCENARIO_TEMPLATE.format(url=FEATURELESS_FULL_BLEED_FIXTURE.resolve().as_uri()),
-        encoding="utf-8",
-    )
-
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-
-        compile_page = await browser.new_page()
-        await run_compile(path, compile_page, PopupReasoner(), selects=None)
-        await compile_page.context.close()
-
-        out = tmp_path / "full-bleed-popup.mp4"
-        await run_render(path, out, FakeTts(), tmp_path / "cache", browser)
-        await browser.close()
-
-    duration = probe_duration(out)
-    assert duration > 0
-
-    # Uncropped, the full-canvas popup scales to ~460x345 and reaches (140, 110):
-    # the popup's own yellow, not the dimmed backdrop a cropped frame would leave.
-    reached_uncropped_extent = any(
-        _is_popup_yellow(_rgb_at_pixel(out, duration * fraction / 40, x=140, y=110))
-        for fraction in range(1, 40)
-    )
-    assert reached_uncropped_extent, (
-        "expected the full-bleed popup to be framed at full canvas size"
-    )
