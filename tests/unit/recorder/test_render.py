@@ -402,7 +402,7 @@ async def test_render_produces_mp4_with_audio(tmp_path):
 async def test_run_render_registers_overlay_then_slide_then_chrome_init_scripts(
     tmp_path, monkeypatch
 ):
-    """Locks in the context init-script ordering contract of ``render/_run.py``.
+    """Locks in the context init-script ordering contract of ``render/stage.py``.
 
     cursor.js, slide.js and desktop.js rely on reading the real ``window.top``
     to decide whether they are running in the top document or a framed site;
@@ -511,7 +511,7 @@ async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, 
     )
 
     holds: list[float | None] = []
-    original_recorder = render_module._run.Recorder
+    original_recorder = render_module.loop.Recorder
 
     class SpyRecorder(original_recorder):  # type: ignore[misc, valid-type]
         def __init__(self, *args, **kwargs):
@@ -520,7 +520,7 @@ async def test_render_passes_the_configured_open_hold_to_the_recorder(tmp_path, 
 
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(render_module._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(render_module.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(render_module.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1094,7 +1094,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
         # attribute the window to the click).
         early_uri = early.resolve().as_uri()
 
-        class EarlyWindowRecorder(R._run.Recorder):
+        class EarlyWindowRecorder(R.loop.Recorder):
             async def click(self, target, *, before_click=None):
                 # Awaiting the context's own page event is what makes this
                 # deterministic: the render has *observed* the window by the time
@@ -1106,7 +1106,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
 
         # `Recorder` is constructed in two submodules — the render loop and the
         # post-popup-close funnel — so replacing it takes both lines.
-        monkeypatch.setattr(R._run, "Recorder", EarlyWindowRecorder)
+        monkeypatch.setattr(R.loop, "Recorder", EarlyWindowRecorder)
         monkeypatch.setattr(R.visuals, "Recorder", EarlyWindowRecorder)
 
         with pytest.raises(RenderError, match="przed akcją click"):
@@ -1191,20 +1191,20 @@ async def test_render_wires_viewport_and_typing_animation(tmp_path, monkeypatch)
     overlay_viewports: list = []
     recorder_kwargs: list = []
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         def __init__(self, cursor=None, viewport=None):
             overlay_viewports.append(viewport)
             super().__init__(cursor, viewport)
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1237,14 +1237,14 @@ async def test_render_respects_typing_animate_false(tmp_path, monkeypatch):
 
     recorder_kwargs: list = []
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         def __init__(self, *a, **k):
             recorder_kwargs.append(k)
             super().__init__(*a, **k)
 
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1418,7 +1418,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
 
     slide_events: list[tuple[str, dict]] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             slide_events.append(("show", dict(card)))
@@ -1436,7 +1436,7 @@ async def test_slide_step_paints_card_and_hides_layers(tmp_path, monkeypatch):
                 )
             )
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1487,30 +1487,30 @@ async def test_teach_or_navigate_after_slide_dismisses_card(tmp_path, monkeypatc
     overlay_show_calls = 0
     dom_state_before_navigate: list[int] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def hide(self, page):
             nonlocal slide_hide_calls
             slide_hide_calls += 1
             await super().hide(page)
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         async def show(self, page):
             nonlocal overlay_show_calls
             overlay_show_calls += 1
             await super().show(page)
 
-    class SpyRecorder(R._run.Recorder):
+    class SpyRecorder(R.loop.Recorder):
         async def navigate(self, url):
             dom_state_before_navigate.append(
                 await self.page.locator("[data-guidebot-slide]").count()
             )
             await super().navigate(url)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
     # `Recorder` is constructed in two submodules — the render loop and the
     # post-popup-close funnel — so replacing it takes both lines.
-    monkeypatch.setattr(R._run, "Recorder", SpyRecorder)
+    monkeypatch.setattr(R.loop, "Recorder", SpyRecorder)
     monkeypatch.setattr(R.visuals, "Recorder", SpyRecorder)
 
     async with async_playwright() as pw:
@@ -1560,13 +1560,13 @@ async def test_navigation_destroying_card_mid_say_fails_loud(tmp_path, monkeypat
     # check therefore sees a live card; only a post-wait check sees the loss.
     destroyed = {"value": False}
 
-    class MidWaitDestroySlide(R._run.SlideOverlay):
+    class MidWaitDestroySlide(R.stage.SlideOverlay):
         async def token(self, page):
             if destroyed["value"]:
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", MidWaitDestroySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", MidWaitDestroySlide)
 
     original_wait = R.narration._pace_narration
 
@@ -1623,7 +1623,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
 
     destroyed = {"value": False}
 
-    class GhostNavSlide(R._run.SlideOverlay):
+    class GhostNavSlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             await super().show(page, card)
             destroyed["value"] = False  # a repaint restores a truthy token
@@ -1633,7 +1633,7 @@ async def test_slide_after_card_destroyed_during_say_fails_loud(tmp_path, monkey
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", GhostNavSlide)
 
     original_wait = R.narration._pace_narration
 
@@ -1690,7 +1690,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
 
     slide_ref: dict = {}
 
-    class GhostNavSlide(R._run.SlideOverlay):
+    class GhostNavSlide(R.stage.SlideOverlay):
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
             self._ghost = False
@@ -1708,7 +1708,7 @@ async def test_slide_dismiss_fails_loud_when_card_destroyed_after_say(tmp_path, 
                 return 0
             return await super().token(page)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", GhostNavSlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", GhostNavSlide)
 
     original_render_step = R._step._render_step
 
@@ -1760,12 +1760,12 @@ async def test_intro_enabled_replaces_bootstrap(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1801,12 +1801,12 @@ async def test_intro_disabled_bootstrap_unchanged(tmp_path, monkeypatch):
 
     show_calls: list[dict] = []
 
-    class SpySlide(R._run.SlideOverlay):
+    class SpySlide(R.stage.SlideOverlay):
         async def show(self, page, card):
             show_calls.append(dict(card))
             await super().show(page, card)
 
-    monkeypatch.setattr(R._run, "SlideOverlay", SpySlide)
+    monkeypatch.setattr(R.stage, "SlideOverlay", SpySlide)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -1879,7 +1879,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
     def _role(page) -> str:
         return "popup" if page.url.endswith("popup.html") else "main"
 
-    class SpyOverlay(R._run.Overlay):
+    class SpyOverlay(R.stage.Overlay):
         async def hide(self, page):
             events.append(("hide", _role(page)))
             await super().hide(page)
@@ -1888,7 +1888,7 @@ async def test_render_hands_cursor_over_to_popup_and_back(tmp_path, monkeypatch)
             events.append(("show", _role(page)))
             await super().show(page)
 
-    monkeypatch.setattr(R._run, "Overlay", SpyOverlay)
+    monkeypatch.setattr(R.stage, "Overlay", SpyOverlay)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -2418,9 +2418,9 @@ async def test_sfx_after_a_freeze_never_lands_inside_the_hold(tmp_path, monkeypa
 
     `test_hold_frame_narrations_never_overlap` proves the narration clamp
     (`not_before=narration_frame` on the NEXT step's own narration stamp); it
-    never looks at SFX. `sfx_sink` (render/_run.py, the `on_sfx` closure passed to
-    `Recorder`) carries the exact same `not_before=last_freeze_frame + 1`
-    clamp, but nothing previously asserted it does anything — the render
+    never looks at SFX. `_Clock.note_sfx` (render/clock.py, the bound method
+    handed to `Recorder(on_sfx=...)`) carries the exact same
+    `not_before=last_freeze_frame + 1` clamp, but nothing asserts it does anything — the render
     could clamp narration and NOT sound effects and the whole suite would
     stay green, since `test_render_with_sound_collects_and_mixes_sfx` only
     checks the events list is non-empty, never an offset.
@@ -2588,10 +2588,10 @@ def test_apply_timeline_edits_rejects_a_file_that_disagrees_with_the_model(
 
     timeline = Timeline.build([TimeEdit(at=10, kind="freeze", frames=25)], source_frames=100)
     monkeypatch.setattr(R.timeline, "apply_time_edits", lambda src, tl, out: None)
-    # `probe_frame_count` has a second consumer in `_run` (it sizes the timeline
+    # `probe_frame_count` has a second consumer in `post` (it sizes the timeline
     # before the edit runs), so replacing it takes both lines.
     monkeypatch.setattr(R.timeline, "probe_frame_count", lambda path: 123)
-    monkeypatch.setattr(R._run, "probe_frame_count", lambda path: 123)
+    monkeypatch.setattr(R.post, "probe_frame_count", lambda path: 123)
 
     with pytest.raises(RenderError) as excinfo:
         _apply_timeline_edits(tmp_path / "src.mp4", timeline, tmp_path / "out.mp4")
@@ -3442,13 +3442,13 @@ async def test_a_full_canvas_popup_is_presented_full_frame_not_inset(tmp_path, m
     import guidebot_recorder.recorder.render as R
 
     seen: list[str | None] = []
-    original = R._run.compose_popup_video
+    original = R.post.compose_popup_video
 
     def spy(*args, **kwargs):
         seen.append(kwargs.get("transition"))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(R._run, "compose_popup_video", spy)
+    monkeypatch.setattr(R.post, "compose_popup_video", spy)
 
     path = _write_close_window_scenario(tmp_path, popup_config=False)
 
@@ -3510,7 +3510,7 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
     composed: list[tuple[Path, Path]] = []
     edited: list[tuple[Path, Path]] = []
 
-    original_compose = R._run.compose_popup_video
+    original_compose = R.post.compose_popup_video
     original_edit = R.timeline._apply_timeline_edits
 
     def spy_compose(main, popup, dest, *args, **kwargs):
@@ -3523,7 +3523,7 @@ async def test_popup_is_composed_before_time_editing_and_feeds_it(tmp_path, monk
         edited.append((Path(source), Path(dest)))
         return original_edit(source, timeline, dest)
 
-    monkeypatch.setattr(R._run, "compose_popup_video", spy_compose)
+    monkeypatch.setattr(R.post, "compose_popup_video", spy_compose)
     monkeypatch.setattr(R.timeline, "_apply_timeline_edits", spy_edit)
 
     path = _write_close_window_scenario(tmp_path)
