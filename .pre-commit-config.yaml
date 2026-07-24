@@ -13,3 +13,14 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: check-file-length
+        name: check file length (≤ 600 lines)
+        entry: python scripts/check_file_length.py
+        language: python
+        # Scope is .py only for now, across guidebot_recorder/ and tests/ (CI's
+        # C901 gate is `ruff check .`, which also covers both). Add |\.js$ here
+        # once selects.js / cursor.js are split (phase 7) — not before, or it
+        # would fire on the still-unsplit .js files.
+        files: ^(guidebot_recorder|tests|scripts)/.*\.py$

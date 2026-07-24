@@ -61,10 +61,14 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "C901"]  # C901 = cyclomatic complexity (bramka: ≤ 10)
 ignore = ["UP040"]  # `type` keyword alias — pomijamy, by nie ruszać wnętrz modułów
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["E501"]  # długie stringi z danymi/HTML w fixture'ach testowych
 "guidebot_recorder/resolver/reasoner.py" = ["E501"]  # przykłady framed JSON w prompcie (jednolinijkowe)
 "guidebot_recorder/cli.py" = ["B008"]  # typer.Option(...) w domyślnych argumentach to idiom typera
+# UWAGA: żadnego wpisu C901 tutaj — próg CC 10 obowiązuje bezwyjątkowo (patrz CLAUDE.md, faza 6).
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
