@@ -34,8 +34,15 @@ from guidebot_recorder.selects.visibility import shape_prelude
 # The widget body plus the one thing it is not self-contained without: the
 # shared "is this select already enhanced?" predicate, which the Python
 # controller prepends for exactly the same reason (``selects/visibility.py``).
-SELECTS_JS = shape_prelude() + files("guidebot_recorder.selects").joinpath("selects.js").read_text(
-    "utf-8"
+#
+# The body is one IIFE stored as three contiguous fragments (``selects.js`` plus
+# ``selects_options.js`` and ``selects_observer.js``); they must be concatenated
+# in this order to reconstruct the script, exactly as ``Selects`` does.
+_SELECTS_PKG = files("guidebot_recorder.selects")
+SELECTS_JS = shape_prelude() + (
+    _SELECTS_PKG.joinpath("selects.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_options.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_observer.js").read_text("utf-8")
 )
 
 

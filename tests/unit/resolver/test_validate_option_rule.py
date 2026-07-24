@@ -34,8 +34,13 @@ async def page() -> AsyncIterator[Page]:
         yield browser_page
 
 
-_SELECTS_JS = shape_prelude() + files("guidebot_recorder.selects").joinpath("selects.js").read_text(
-    "utf-8"
+# The body is one IIFE stored as three contiguous fragments, concatenated in
+# this order exactly as ``Selects`` does.
+_SELECTS_PKG = files("guidebot_recorder.selects")
+_SELECTS_JS = shape_prelude() + (
+    _SELECTS_PKG.joinpath("selects.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_options.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_observer.js").read_text("utf-8")
 )
 
 #: Options carrying no ``label`` attribute, so ``HTMLOptionElement.label`` is

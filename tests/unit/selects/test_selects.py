@@ -76,7 +76,14 @@ def test_every_consumer_reads_the_same_already_enhanced_predicate() -> None:
     from guidebot_recorder.recorder.select import _js as recorder_js
     from guidebot_recorder.resolver import widget as widget_module
 
-    widget_body = files("guidebot_recorder.selects").joinpath("selects.js").read_text("utf-8")
+    pkg = files("guidebot_recorder.selects")
+    # The body is one IIFE stored as three contiguous fragments; read them all,
+    # or a stray copy of the rule in a later fragment would go unseen.
+    widget_body = (
+        pkg.joinpath("selects.js").read_text("utf-8")
+        + pkg.joinpath("selects_options.js").read_text("utf-8")
+        + pkg.joinpath("selects_observer.js").read_text("utf-8")
+    )
 
     assert SELECT_SHAPE_JS in recorder_js._SHIM_STATE_JS
     assert widget_module.select_shape is select_shape
