@@ -51,7 +51,17 @@ class Overlay:
             self.pos: tuple[float, float] = (viewport.width / 2, viewport.height / 2)
         else:
             self.pos = (0.0, 0.0)
-        body = files("guidebot_recorder.overlay").joinpath("cursor.js").read_text(encoding="utf-8")
+        # ``cursor.js`` is one IIFE with a shared closure, so it splits only into
+        # contiguous source fragments glued back in order — never into separate
+        # modules. These two concatenate, byte for byte, into the original file,
+        # and the order is load-bearing: the role-gating early return lives in the
+        # first fragment and must stay ahead of everything. ``cursor_effects.js``
+        # continues the closure with the ripple/encircle/highlight effects and the
+        # public API.
+        pkg = files("guidebot_recorder.overlay")
+        body = pkg.joinpath("cursor.js").read_text(encoding="utf-8") + pkg.joinpath(
+            "cursor_effects.js"
+        ).read_text(encoding="utf-8")
         # Prepend the appearance config as a global the injected script reads.
         # Timing (speed/min/max) stays Python-side in _glide_duration.
         appearance = {

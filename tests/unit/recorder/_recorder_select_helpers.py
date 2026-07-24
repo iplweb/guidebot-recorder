@@ -37,9 +37,14 @@ from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.selects.visibility import shape_prelude
 
 # Body plus the shared "already enhanced?" predicate the Python controller
-# prepends in production (``selects/visibility.py``).
-SELECTS_JS = shape_prelude() + files("guidebot_recorder.selects").joinpath("selects.js").read_text(
-    "utf-8"
+# prepends in production (``selects/visibility.py``). The body is one IIFE stored
+# as three contiguous fragments, concatenated in this order exactly as
+# ``Selects`` does.
+_SELECTS_PKG = files("guidebot_recorder.selects")
+SELECTS_JS = shape_prelude() + (
+    _SELECTS_PKG.joinpath("selects.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_options.js").read_text("utf-8")
+    + _SELECTS_PKG.joinpath("selects_observer.js").read_text("utf-8")
 )
 
 

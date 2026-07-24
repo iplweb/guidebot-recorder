@@ -89,7 +89,19 @@ class Selects:
 
     def __init__(self, config: SelectsConfig | None = None) -> None:
         self.config = config or SelectsConfig()
-        body = files("guidebot_recorder.selects").joinpath("selects.js").read_text(encoding="utf-8")
+        # ``selects.js`` is one IIFE whose functions share a single closure, so it
+        # cannot be split into independently-loaded modules — only into contiguous
+        # source fragments glued back in order. These three concatenate, byte for
+        # byte, into the original file; the order is load-bearing and must not
+        # change. ``selects_options.js`` continues the closure with the option-row,
+        # geometry and interaction code; ``selects_observer.js`` continues it with
+        # the classification pass, the mutation observer and the public API.
+        pkg = files("guidebot_recorder.selects")
+        body = (
+            pkg.joinpath("selects.js").read_text(encoding="utf-8")
+            + pkg.joinpath("selects_options.js").read_text(encoding="utf-8")
+            + pkg.joinpath("selects_observer.js").read_text(encoding="utf-8")
+        )
         # camelCase keys: the prelude is read by JavaScript, not by pydantic.
         # ``open_hold_ms`` stays Python-side — it paces the recorder's second
         # beat and the widget has no use for it.

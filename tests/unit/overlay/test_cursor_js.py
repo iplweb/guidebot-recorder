@@ -26,7 +26,13 @@ async def page() -> AsyncIterator[Page]:
             await b.close()
 
 
-CURSOR_JS = files("guidebot_recorder.overlay").joinpath("cursor.js").read_text("utf-8")
+# One IIFE stored as two contiguous fragments (``cursor.js`` +
+# ``cursor_effects.js``); concatenate in this order to reconstruct the script,
+# exactly as ``Overlay`` does.
+_CURSOR_PKG = files("guidebot_recorder.overlay")
+CURSOR_JS = _CURSOR_PKG.joinpath("cursor.js").read_text("utf-8") + _CURSOR_PKG.joinpath(
+    "cursor_effects.js"
+).read_text("utf-8")
 
 
 async def _inject(page: Page, cfg: dict) -> None:
