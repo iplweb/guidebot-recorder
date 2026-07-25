@@ -16,6 +16,8 @@ from guidebot_recorder.models.target import RoleTarget
 from guidebot_recorder.recorder.compile import run_compile, run_compile_in_browser
 from guidebot_recorder.resolver.reasoner import ReasonerResult
 
+from ._frame_spy import record_frames
+
 pytestmark = pytest.mark.integration
 
 FIXTURE = Path(__file__).parent / "fixtures" / "app.html"
@@ -288,7 +290,7 @@ async def test_guide_select_actually_executes_and_unlocks_next_step(tmp_path):
     assert count == 3
 
 
-async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_path):
+async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_path, monkeypatch):
     """Drive `capture_pages` directly against a live `Page` (bypassing
     `run_guide`, which only returns a page count and closes the context, so it
     cannot show any live-DOM effect).
@@ -321,6 +323,8 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
     url = SELECT_SCROLL_FIXTURE.resolve().as_uri()
     path = tmp_path / "select-scroll-direct.scenario.yaml"
     path.write_text(DIRECT_CAPTURE_SCENARIO_TEMPLATE.format(url=url), encoding="utf-8")
+
+    painted = record_frames(monkeypatch)
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -371,7 +375,9 @@ async def test_capture_pages_executes_select_and_scroll_on_the_live_page(tmp_pat
     select_page = pages[1]
     assert select_page.kind == "step"
     assert select_page.screenshot is not None
-    assert any(annotation.kind == "frame" for annotation in select_page.annotations)
+    # The outline is painted into the page (so the cursor stays on top of it),
+    # not returned as an annotation — so the spy is where it now shows up.
+    assert len(painted) == 1
 
 
 async def test_option_that_vanished_after_compile_fails_as_a_sentence_not_a_timeout(tmp_path):
