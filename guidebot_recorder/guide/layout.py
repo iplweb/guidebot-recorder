@@ -16,9 +16,16 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
         page-break-after: always; align-items: start; }
 .page:last-child { page-break-after: auto; }
 .shot { position: relative; width: 100%; border: 1px solid #ddd; border-radius: 6px;
-        overflow: hidden; }
-.shot img { width: 100%; display: block; }
-.shot svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+        overflow: hidden; display: flex; align-items: center; justify-content: center;
+        background: #eceef2; }
+/* The still and its annotation layer share one box, so the SVG's viewBox
+   coordinates and the image's pixels line up. That box is `.plate`, not `.shot`:
+   a popup still does not fill `.shot`, and an overlay pinned to `.shot` would sit
+   off the picture by the width of the letterbox margin. At `width: 100%` (every
+   main-window page) the two boxes coincide and this renders as it always did. */
+.plate { position: relative; width: 100%; }
+.plate img { width: 100%; display: block; }
+.plate svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .side { padding-top: 2mm; }
 .side .heading { font-size: 20px; font-weight: 700; margin: 0 0 4mm; }
 .side .body { font-size: 16px; line-height: 1.5; white-space: pre-wrap; }
@@ -91,14 +98,42 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
     return "".join(parts)
 
 
+def _letterbox(page: GuidePage) -> tuple[str, str]:
+    """Inline styles that centre a smaller still on the page's canvas.
+
+    Returns ``(shot_style, plate_style)``, both empty when the still already fills
+    the canvas — which is every main-window page, so the common case adds no
+    markup at all. A popup opens at its own size, and the two sizes differing is
+    the only signal that it is one (see :class:`GuidePage`).
+
+    ``.shot`` gets the canvas aspect ratio rather than a pixel height so it keeps
+    scaling with the print column, and ``.plate`` is sized as a percentage of it —
+    the same ratio the still has to the canvas, so the picture lands unscaled
+    relative to its neighbours and a 600px-wide popup reads as narrower than the
+    1376px window it came from, which is the honest depiction.
+    """
+
+    shot, canvas = page.screenshot_size, page.canvas_size
+    if not shot or not canvas or shot == canvas or not all(canvas):
+        return "", ""
+    width = round(100 * shot[0] / canvas[0], 3)
+    height = round(100 * shot[1] / canvas[1], 3)
+    return (
+        f' style="aspect-ratio:{canvas[0]}/{canvas[1]}"',
+        f' style="width:{width}%;height:{height}%"',
+    )
+
+
 def _shot_page(page: GuidePage) -> str:
     uri = Path(page.screenshot).absolute().as_uri()
     svg = _svg(page.annotations, page.screenshot_size or (1, 1))
     heading = f'<div class="heading">{html.escape(page.heading)}</div>' if page.heading else ""
     body = f'<div class="body">{html.escape(page.text)}</div>' if page.text else ""
+    shot_style, plate_style = _letterbox(page)
     return (
         '<section class="page">'
-        f'<div class="shot"><img src="{uri}"/>{svg}</div>'
+        f'<div class="shot"{shot_style}>'
+        f'<div class="plate"{plate_style}><img src="{uri}"/>{svg}</div></div>'
         f'<div class="side">{heading}{body}</div>'
         "</section>"
     )

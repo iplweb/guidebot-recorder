@@ -38,7 +38,17 @@ class Annotation:
 
 @dataclass
 class GuidePage:
-    """One PDF page: a screenshot (or none) plus its description and annotations."""
+    """One PDF page: a screenshot (or none) plus its description and annotations.
+
+    ``screenshot_size`` is the still's own pixel size — the coordinate system every
+    :class:`Annotation` on this page is expressed in. ``canvas_size`` is the size
+    the page is *presented* at, which for the main window is the same thing and for
+    a popup window is not: a popup opens at whatever size the site asked for.
+
+    A popup page is not flagged as one anywhere; the two sizes differing IS the
+    flag. That is deliberate — a separate boolean could disagree with the sizes,
+    and then the layout would have two sources of truth for one question.
+    """
 
     kind: Literal["step", "navigate", "slide", "text"]
     screenshot: Path | None
@@ -46,6 +56,7 @@ class GuidePage:
     heading: str | None
     annotations: list[Annotation] = field(default_factory=list)
     screenshot_size: tuple[int, int] | None = None
+    canvas_size: tuple[int, int] | None = None
 
 
 def page_text(step: Step) -> str:

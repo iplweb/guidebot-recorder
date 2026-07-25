@@ -94,6 +94,74 @@ def test_a_select_steps_marks_render_through_the_one_shared_arrowhead():
     assert '<line class="arrow" x1="10.0" y1="10.0" x2="200.0" y2="300.0"/>' in html
 
 
+def test_main_window_page_is_not_letterboxed():
+    """Zrzut wypełniający płótno renderuje się dokładnie jak przed zmianą.
+
+    Letterboxing włącza się wyłącznie przy różnicy rozmiarów, więc każda strona
+    okna głównego musi zostać bez stylów inline — inaczej zmiana „dla popupów"
+    po cichu przesunęłaby wszystkie dotychczasowe strony.
+    """
+
+    page = GuidePage(
+        kind="step",
+        screenshot=Path("/tmp/shot.png"),
+        text="t",
+        heading=None,
+        annotations=[],
+        screenshot_size=(1376, 800),
+        canvas_size=(1376, 800),
+    )
+    html = render_html([page], title="x")
+    assert 'class="shot"' in html
+    assert "aspect-ratio" not in html
+    assert 'class="plate"' in html
+
+
+def test_popup_page_is_centred_on_the_main_window_canvas():
+    """Mniejszy zrzut dostaje płótno o proporcjach okna głównego i własną skalę.
+
+    600/1376 ≈ 43.605%, 700/800 = 87.5% — obie liczby muszą wyjść z jednego
+    stosunku, bo inaczej obrazek zostałby rozciągnięty względem sąsiednich stron.
+    """
+
+    page = GuidePage(
+        kind="step",
+        screenshot=Path("/tmp/popup.png"),
+        text="t",
+        heading=None,
+        annotations=[],
+        screenshot_size=(600, 700),
+        canvas_size=(1376, 800),
+    )
+    html = render_html([page], title="x")
+    assert 'style="aspect-ratio:1376/800"' in html
+    assert 'style="width:43.605%;height:87.5%"' in html
+
+
+def test_annotations_stay_in_the_stills_own_coordinate_system():
+    """Adnotacje popupu opisują piksele zrzutu, nie płótna.
+
+    To jest powód, dla którego `img` i `svg` siedzą we wspólnym `.plate`, a nie
+    w `.shot`: viewBox musi zostać rozmiarem zrzutu (600×700), a warstwa SVG musi
+    leżeć na obrazku, nie na całym płótnie. Gdyby SVG został przypięty do `.shot`,
+    każda strzałka i gwiazdka przesunęłaby się o szerokość marginesu.
+    """
+
+    page = GuidePage(
+        kind="step",
+        screenshot=Path("/tmp/popup.png"),
+        text="t",
+        heading=None,
+        annotations=[Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0)],
+        screenshot_size=(600, 700),
+        canvas_size=(1376, 800),
+    )
+    html = render_html([page], title="x")
+    assert 'viewBox="0 0 600 700"' in html
+    assert ".plate svg {" in html
+    assert ".shot svg {" not in html
+
+
 def test_text_page_has_no_svg():
     pages = [
         GuidePage(kind="text", screenshot=None, text="tylko tekst", heading=None, annotations=[])

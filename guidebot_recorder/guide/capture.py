@@ -37,6 +37,7 @@ from guidebot_recorder.guide.replay import (
     _approach_target,
     _Capture,
     _click_or_hover_frame,
+    _close_window_page,
     _gate_page,
     _navigate_page,
     _scroll_page,
@@ -95,6 +96,7 @@ _PAGES: dict[str, Callable[[_StepRun], Awaitable[None]]] = {
     "text": _text_page,
     "scroll": _scroll_page,
     "wait": _wait_page,
+    "closeWindow": _close_window_page,
 }
 
 
@@ -161,6 +163,7 @@ def _append_step_page(run: _StepRun) -> None:
                 bounds=bounds,
             ),
             screenshot_size=run.size,
+            canvas_size=cap.canvas,
         )
     )
 
@@ -181,6 +184,11 @@ async def _action_page(run: _StepRun) -> None:
         return
     await cap.recorder.apply_readiness(run.action.expect)
     _append_step_page(run)
+    # Last, and the order is the point: this step's page shows the window the
+    # reader clicked *in*, photographed before the click. Only once that page is
+    # built does the popup become the window the following steps are read against.
+    if run.popup is not None:
+        cap.enter_popup(run.popup)
 
 
 async def capture_pages(
@@ -195,6 +203,7 @@ async def capture_pages(
     pause_on_error: bool = False,
     sensitive_values: Iterable[str] = (),
     selects: Selects | None = None,
+    make_recorder: Callable[[Page], Recorder] | None = None,
 ) -> list[GuidePage]:
     """Replay the compiled scenario, keeping one annotated frame per step.
 
@@ -203,6 +212,11 @@ async def capture_pages(
     — the guide's half of the readiness barrier compile and render also take.
     See :meth:`~guidebot_recorder.guide.replay._Capture.await_selects_ready` for
     where it is taken and why.
+
+    ``make_recorder`` builds the ``Recorder`` for a popup window; omit it for a
+    scenario that never opens one. It is injected rather than built here because a
+    ``Recorder`` needs the caller's ``Overlay`` — see
+    :meth:`~guidebot_recorder.guide.replay._Capture.enter_popup`.
     """
 
     cap = _Capture(
@@ -216,6 +230,7 @@ async def capture_pages(
         pause_on_error=pause_on_error,
         sensitive_values=sensitive_values,
         selects=selects,
+        make_recorder=make_recorder,
     )
     # Wrapping the iterator (rather than `bar.update(1)` as render does) is what
     # keeps the count honest here: this loop leaves through a dozen early returns

@@ -1,6 +1,11 @@
 import pytest
 
-from guidebot_recorder.guide.prolog import GuideError, classify, scan_for_blockers
+from guidebot_recorder.guide.prolog import (
+    NARRATION_ONLY_KINDS,
+    GuideError,
+    classify,
+    scan_for_blockers,
+)
 from guidebot_recorder.models.action import CachedAction, Fingerprint, PendingAction
 from guidebot_recorder.models.config import Config, TtsConfig, Viewport
 from guidebot_recorder.models.scenario import FlatStep, Scenario, Step, WhenBlock
@@ -79,10 +84,29 @@ def test_scan_allows_a_visual_only_command():
     scan_for_blockers(scen.flat_steps(), [None])  # no raise
 
 
-def test_scan_raises_on_popup():
+def test_scan_allows_a_click_that_opens_a_popup():
+    """Popup nie jest już blokadą — `guide` przełącza się na nowe okno.
+
+    Ten przypadek odwraca dawne `test_scan_raises_on_popup`. Zamrożona flaga
+    `opens_popup` przestała być powodem odmowy, a stała się instrukcją: krok
+    otwiera okno, a kolejne kroki czyta się względem niego.
+    """
+
     scen = Scenario(config=_cfg(), steps=[Step(click="opens something")])
-    with pytest.raises(GuideError, match="popup"):
-        scan_for_blockers(scen.flat_steps(), [_cached(opens_popup=True)])
+    scan_for_blockers(scen.flat_steps(), [_cached(opens_popup=True)])  # no raise
+
+
+def test_close_window_is_its_own_kind_not_narration():
+    """`closeWindow` wykonuje pracę w przeglądarce, więc ma własny rodzaj strony.
+
+    Dopóki popup był odrzucany, `closeWindow` nie miał czego zamykać i siedział
+    w `NARRATION_ONLY_KINDS`. Gdyby tam został, przełączenie z powrotem na okno
+    główne nigdy by nie nastąpiło, a dalsze kroki fotografowałyby zamknięty popup.
+    """
+
+    assert classify_step_of(Step(close_window=True)) == "closeWindow"
+    assert classify_step_of(Step(close_window=True, say="wracamy")) == "closeWindow"
+    assert "closeWindow" not in NARRATION_ONLY_KINDS
 
 
 def test_scan_raises_on_mandatory_pending():

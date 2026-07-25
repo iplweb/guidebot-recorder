@@ -9,22 +9,27 @@ from guidebot_recorder.models.scenario import FlatStep
 
 
 class GuideError(Exception):
-    """A scenario the guide cannot render (popup, unresolved mandatory step)."""
+    """A scenario the guide cannot render (unresolved mandatory step, broken sidecar)."""
 
 
-PageKind = Literal["gate", "navigate", "slide", "action", "scroll", "text", "wait"]
+PageKind = Literal["gate", "navigate", "slide", "action", "scroll", "text", "wait", "closeWindow"]
 
 #: Commands the guide replays in the browser off a frozen target. `highlight` is
 #: one of them even though it performs nothing: the guide still has to resolve the
 #: target to know where to draw its ellipse.
 ACTION_KINDS = frozenset({"click", "hover", "enterText", "teach", "select", "highlight"})
 #: Commands with no browser work in a still-image pass: a film-only flourish
-#: (`desktop`), popup bookkeeping the guide already rejects (`closeWindow`),
-#: and a bare `say`. All that survives into the PDF is their narration.
-NARRATION_ONLY_KINDS = frozenset({"desktop", "closeWindow", "say"})
+#: (`desktop`) and a bare `say`. All that survives into the PDF is their narration.
+#:
+#: `closeWindow` used to sit here, back when a popup was rejected outright and the
+#: command therefore had nothing to close. It now drives the window switch back to
+#: the main page, so it is browser work and has a page kind of its own.
+NARRATION_ONLY_KINDS = frozenset({"desktop", "say"})
 #: Every command `classify` knows how to place. A command outside this set is a
 #: gap in the guide, not a no-op — see :func:`scan_for_blockers`.
-SUPPORTED_KINDS = ACTION_KINDS | NARRATION_ONLY_KINDS | {"navigate", "slide", "scroll", "wait"}
+SUPPORTED_KINDS = (
+    ACTION_KINDS | NARRATION_ONLY_KINDS | {"navigate", "slide", "scroll", "wait", "closeWindow"}
+)
 
 
 def classify(flat_step: FlatStep) -> PageKind:
@@ -38,6 +43,8 @@ def classify(flat_step: FlatStep) -> PageKind:
         return "slide"
     if kind == "scroll":
         return "scroll"
+    if kind == "closeWindow":
+        return "closeWindow"
     if kind in ACTION_KINDS:
         return "action"
     if kind == "wait":
@@ -47,7 +54,7 @@ def classify(flat_step: FlatStep) -> PageKind:
 
 
 def scan_for_blockers(flat: list[FlatStep], actions: list) -> None:
-    """Raise GuideError for popups, unsupported commands, or a mandatory unresolved step."""
+    """Raise GuideError for unsupported commands or a mandatory unresolved step."""
 
     for flat_step, action in zip(flat, actions, strict=True):
         kind = flat_step.step.command_kind()
@@ -58,10 +65,6 @@ def scan_for_blockers(flat: list[FlatStep], actions: list) -> None:
             # browser never saw the action, and the failure surfaced steps later
             # as an identity mismatch against a page the compiler never saw.
             raise GuideError(f"komenda `{kind}` nie jest obsługiwana w `guide`")
-        if isinstance(action, CachedAction) and action.opens_popup:
-            raise GuideError(
-                "scenariusze z popupem nie są obsługiwane w `guide` v1 (krok otwiera nowe okno)"
-            )
         pending = action is not None and not isinstance(action, CachedAction)
         mandatory = (
             flat_step.branch is None
