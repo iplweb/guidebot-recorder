@@ -309,6 +309,40 @@ async def test_pause_on_error_stops_on_the_window_that_failed(tmp_path, monkeypa
     assert paused == [popup]
 
 
+async def test_a_click_paints_its_frame_into_the_page_around_the_shutter(tmp_path, monkeypatch):
+    """Ramka celu powstaje w stronie, a nie w SVG — i znika zaraz po migawce.
+
+    Kolejność jest tu całą treścią: pomaluj, zrób zdjęcie, posprzątaj. Ramka,
+    która przetrwałaby migawkę, obrysowałaby zły element na każdym kolejnym
+    zrzucie; ramka rysowana po migawce (jako SVG) przykryłaby kursor.
+    """
+
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    events: list[str] = []
+    main, _popup = _windows(events)
+    recorder = FakeRecorder(events)
+    scenario = Scenario(config=_cfg(), steps=[Step(click="przycisk zapisu")])
+
+    pages = await capture_pages(
+        scenario,
+        _compiled([_click()]),
+        main,
+        recorder,
+        tmp_path / "shots",
+        timeout=15.0,
+    )
+
+    assert [e for e in events if e in ("frame", "shot:main", "clear_frame")] == [
+        "frame",
+        "shot:main",
+        "clear_frame",
+    ]
+    # The box `Recorder.point` reported, outlined verbatim.
+    assert recorder.overlay.frames == [(0.0, 0.0, 10.0, 10.0)]
+    # And nothing about it leaks into the SVG layer.
+    assert "frame" not in {a.kind for a in pages[0].annotations}
+
+
 async def test_close_window_without_a_popup_is_a_no_op(tmp_path):
     """`closeWindow` w scenariuszu bez popupu nie ma czego zamykać.
 

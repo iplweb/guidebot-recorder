@@ -77,6 +77,28 @@ FAKE_CONTROL = {"x": 30.0, "y": 60.0, "width": 220.0, "height": 21.0}
 FAKE_CONTROL_CENTER = (140.0, 70.5)
 
 
+class FakeOverlay:
+    """Records the outlines a capture paints into the page.
+
+    The red frame is no longer an SVG annotation — it is drawn in the live page
+    before the shutter so the cursor stays on top of it — so this is where a test
+    now checks *that a step framed its target*, and with which box.
+    """
+
+    def __init__(self, events: list[str] | None = None):
+        self.events = events if events is not None else []
+        self.frames: list[tuple[float, float, float, float]] = []
+        self.clears = 0
+
+    async def frame(self, page, x, y, width, height):
+        self.frames.append((x, y, width, height))
+        self.events.append("frame")
+
+    async def clear_frame(self, page):
+        self.clears += 1
+        self.events.append("clear_frame")
+
+
 class FakeRecorder:
     #: The row a `select` reports to its `on_revealed` hook; `None` stands for
     #: `mode: native`, which unfurls nothing and so has no row to mark.
@@ -84,6 +106,7 @@ class FakeRecorder:
 
     def __init__(self, events: list[str] | None = None):
         self.frame = object()
+        self.overlay = FakeOverlay(events)
         self.events = events if events is not None else []
         self.wait_for_calls: list[tuple] = []
         self.wait_seconds_calls: list[float] = []

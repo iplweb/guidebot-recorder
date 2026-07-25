@@ -222,3 +222,85 @@ async def test_hidden_flag_survives_ensure(page: Page) -> None:
         "getComputedStyle(document.querySelector('[data-guidebot-cursor]')).display"
     )
     assert disp2 == "block"
+
+
+# --- the target outline, and the one property that is the whole point ---------
+
+
+async def test_frame_is_stacked_below_the_cursor(page: Page) -> None:
+    """Ramka musi mieć NIŻSZY z-index niż kursor. To jest cała ta funkcja.
+
+    Ramka przeniosła się z SVG (rysowanego nad gotowym PNG) do strony właśnie po
+    to, żeby kursor został na wierzchu — zrzut nie ma warstw, więc później już
+    nic się pod niego nie wsunie. Gdyby ktoś podniósł ten z-index do maksimum,
+    obie warstwy zrównałyby się i o wyniku decydowałaby kolejność dopisania do
+    DOM — czyli błąd wracałby losowo. Porównanie liczbowe, nie dosłowna wartość:
+    test ma pilnować relacji, a nie utrwalać stałej.
+    """
+
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    z = await page.evaluate(
+        "() => { window.__guidebot_cursor.frame(10, 20, 100, 40);"
+        " const zi = (sel) => Number(getComputedStyle(document.querySelector(sel)).zIndex);"
+        " return [zi('[data-guidebot-frame]'), zi('[data-guidebot-cursor]')]; }"
+    )
+    assert z[0] < z[1], f"ramka {z[0]} musi być pod kursorem {z[1]}"
+
+
+async def test_frame_straddles_the_targets_edge_like_the_svg_stroke_it_replaced(
+    page: Page,
+) -> None:
+    """Obrys ma leżeć okrakiem na krawędzi celu, tak jak robił to `stroke` w SVG.
+
+    CSS rysuje `border` do wewnątrz, a `stroke` w SVG centruje na ścieżce — więc
+    bez rozsunięcia pudełka o połowę grubości ramka byłaby ciaśniejsza niż przed
+    przenosinami. Sprawdzamy prostokąt zewnętrzny: 4 px obrysu ma wystawać po
+    2 px na stronę.
+    """
+
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    rect = await page.evaluate(
+        "() => { window.__guidebot_cursor.frame(10, 20, 100, 40);"
+        " const r = document.querySelector('[data-guidebot-frame]').getBoundingClientRect();"
+        " return [r.x, r.y, r.width, r.height]; }"
+    )
+    assert rect == [8, 18, 104, 44]
+
+
+async def test_a_second_frame_replaces_the_first(page: Page) -> None:
+    """Jeden krok obrysowuje jeden cel — resztka po poprzednim kłamałaby na zdjęciu."""
+
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    count = await page.evaluate(
+        "() => { window.__guidebot_cursor.frame(0, 0, 10, 10);"
+        " window.__guidebot_cursor.frame(50, 50, 20, 20);"
+        " return document.querySelectorAll('[data-guidebot-frame]').length; }"
+    )
+    assert count == 1
+
+
+async def test_clear_frame_takes_the_outline_down_and_tolerates_no_frame(page: Page) -> None:
+    """Sprzątanie musi być idempotentne: `_framed_screenshot` woła je z `finally`."""
+
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    left = await page.evaluate(
+        "() => { window.__guidebot_cursor.frame(10, 20, 100, 40);"
+        " window.__guidebot_cursor.clearFrame();"
+        " window.__guidebot_cursor.clearFrame();"
+        " return document.querySelectorAll('[data-guidebot-frame]').length; }"
+    )
+    assert left == 0
+
+
+async def test_frame_rejects_bounds_that_would_silently_draw_nothing(page: Page) -> None:
+    """Ujemny rozmiar albo NaN to błąd wywołania, nie niewidzialny prostokąt."""
+
+    await page.set_content("<div></div>")
+    await _inject(page, {})
+    for args in ("10, 20, -1, 40", "NaN, 0, 10, 10"):
+        with pytest.raises(Exception, match="frame bounds"):
+            await page.evaluate(f"() => window.__guidebot_cursor.frame({args})")

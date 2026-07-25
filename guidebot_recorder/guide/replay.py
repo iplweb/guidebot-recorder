@@ -27,9 +27,10 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from tqdm import tqdm
 
 from guidebot_recorder.diagnostics import step_banner
+from guidebot_recorder.guide.annotate import FRAMED_ACTIONS
 from guidebot_recorder.guide.model import GuidePage, page_text
 from guidebot_recorder.guide.prolog import GuideError
-from guidebot_recorder.guide.stills import _OpenListFrame, _screenshot
+from guidebot_recorder.guide.stills import _framed_screenshot, _OpenListFrame, _screenshot
 from guidebot_recorder.guide.trail import _CursorTrail
 from guidebot_recorder.models.action import CachedAction
 from guidebot_recorder.models.compiled import CompiledAction
@@ -360,6 +361,33 @@ async def _wait_page(run: _StepRun) -> None:
         tqdm.write(run.banner("pomijam: oczekiwanie nierozwiązane — uruchom `compile`"))
 
 
+def _frame_rect(run: _StepRun) -> dict | None:
+    """The box this step outlines in the page, or ``None`` when it outlines none."""
+
+    return run.box if run.act in FRAMED_ACTIONS else None
+
+
+async def _still(run: _StepRun) -> tuple[Path, tuple[int, int]]:
+    """This step's screenshot, with its target outlined *beneath* the cursor.
+
+    The overlay is read off the recorder, which already owns it, rather than
+    carried a second time on the capture. Read by plain attribute access and not
+    ``getattr(..., None)``: every recorder has the attribute (the real one always
+    assigns it, ``None`` included), so a default could only ever paper over a
+    rename — and it would do so by quietly dropping the outline from every
+    screenshot while the suite stayed green.
+    """
+
+    cap = run.capture
+    return await _framed_screenshot(
+        cap.page,
+        cap.shots_dir,
+        run.index,
+        overlay=cap.recorder.overlay,
+        rect=_frame_rect(run),
+    )
+
+
 async def _approach_target(run: _StepRun) -> bool:
     """Point the cursor at the target, reporting whether the step can go on.
 
@@ -387,12 +415,12 @@ async def _approach_target(run: _StepRun) -> bool:
 
 
 async def _type_frame(run: _StepRun) -> bool:
-    cap, step = run.capture, run.step
+    step = run.step
     text = (step.enter_text.text if step.enter_text else None) or run.action.input_text
     if text is None:
         raise GuideError(run.banner("brak zamrożonego tekstu — uruchom `compile`"))
     await run.locator.fill(text)
-    run.shot, run.size = await _screenshot(cap.page, cap.shots_dir, run.index)  # frame AFTER typing
+    run.shot, run.size = await _still(run)  # frame AFTER typing
     return True
 
 
@@ -411,7 +439,7 @@ async def _select_frame(run: _StepRun) -> bool:
     await cap.await_selects_ready(run)
     # Named `still`, not `frame`: in this codebase `frame` means a
     # Playwright frame everywhere else.
-    still = _OpenListFrame(cap.page, cap.shots_dir, run.index)
+    still = _OpenListFrame(cap.page, cap.shots_dir, run.index, overlay=cap.recorder.overlay)
     try:
         # `ripple=False` for the same reason `_approach_target` uses it: a still
         # capture wants a clean frame, not a click ring frozen mid-animation.
@@ -448,7 +476,7 @@ async def _select_frame(run: _StepRun) -> bool:
 
 
 async def _highlight_frame(run: _StepRun) -> bool:
-    cap, step = run.capture, run.step
+    step = run.step
     if step.highlight is None:
         raise GuideError(
             run.banner(
@@ -459,8 +487,8 @@ async def _highlight_frame(run: _StepRun) -> bool:
     # Deliberately no action on the element: `highlight` never touches the page,
     # and `_click_or_hover_frame` would click it. The mark itself is drawn onto
     # the page by the annotation, not by the browser.
-    run.mark = step.highlight.resolved(cap.scenario.config.highlight)
-    run.shot, run.size = await _screenshot(cap.page, cap.shots_dir, run.index)
+    run.mark = step.highlight.resolved(run.capture.scenario.config.highlight)
+    run.shot, run.size = await _still(run)
     return True
 
 
@@ -495,9 +523,8 @@ async def _click_into_popup(run: _StepRun) -> Page:
 
 
 async def _click_or_hover_frame(run: _StepRun) -> bool:
-    cap = run.capture
     # frame BEFORE click/hover
-    run.shot, run.size = await _screenshot(cap.page, cap.shots_dir, run.index)
+    run.shot, run.size = await _still(run)
     if run.act == "hover":
         await run.locator.hover()
     elif _opens_popup(run.action):

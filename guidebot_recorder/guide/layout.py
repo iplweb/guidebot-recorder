@@ -39,7 +39,9 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
 .slide .subtitle { font-size: 24px; color: #555; margin-top: 4mm; }
 .arrow { stroke: #e11; stroke-width: 4; fill: none; marker-end: url(#ah); }
 .star { stroke: #e11; stroke-width: 4; fill: none; stroke-linecap: round; }
-.frame { stroke: #e11; stroke-width: 4; fill: rgba(238,17,17,0.08); }
+/* No `.frame` rule: the target outline is painted into the page before the
+   screenshot (see `stills._framed_screenshot`), because an SVG rectangle over
+   the finished PNG would cover the cursor. */
 /* The marker colour is per step, so only the shape lives here — `stroke` is set
    on the element itself. */
 .highlight { stroke-width: 5; fill: none; stroke-linecap: round; }
@@ -86,10 +88,6 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
             parts.append(f'<line class="arrow" x1="{a.x1}" y1="{a.y1}" x2="{a.x2}" y2="{a.y2}"/>')
         elif a.kind == "click":
             parts.extend(_star(a))
-        elif a.kind == "frame":
-            parts.append(
-                f'<rect class="frame" x="{a.x}" y="{a.y}" width="{a.w}" height="{a.h}" rx="4"/>'
-            )
         elif a.kind == "highlight":
             # The colour comes from the scenario, so it is escaped like any other
             # author-supplied text before it lands in an attribute.

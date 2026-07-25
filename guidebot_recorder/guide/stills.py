@@ -19,6 +19,7 @@ from pathlib import Path
 
 from playwright.async_api import Page
 
+from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import SelectReveal
 
 
@@ -28,6 +29,40 @@ async def _screenshot(page: Page, shots_dir: Path, index: int) -> tuple[Path, tu
     await page.screenshot(path=str(path))
     size = page.viewport_size or {"width": 1280, "height": 720}
     return path, (size["width"], size["height"])
+
+
+async def _framed_screenshot(
+    page: Page,
+    shots_dir: Path,
+    index: int,
+    *,
+    overlay: Overlay | None,
+    rect: dict | None,
+) -> tuple[Path, tuple[int, int]]:
+    """Photograph the page with ``rect`` outlined in it, then take the outline down.
+
+    The outline is painted into the live page rather than drawn over the finished
+    image, and that is the only way round to get it *under* the cursor: a PNG is
+    flat pixels, so an SVG rectangle added afterwards covers everything below it,
+    the cursor included. In the page the browser composites the two, and the
+    cursor's own maximal z-index still wins.
+
+    ``rect`` is ``None`` for a step that gets no frame (``highlight`` draws an
+    ellipse instead) and for a page with no target at all, and then this is a
+    plain :func:`_screenshot`.
+
+    The take-down is in a ``finally`` because the frame lives in the page, not in
+    this process: an exception between paint and clear would leave it standing in
+    every screenshot that followed, silently marking the wrong element.
+    """
+
+    if rect is None or overlay is None:
+        return await _screenshot(page, shots_dir, index)
+    await overlay.frame(page, rect["x"], rect["y"], rect["width"], rect["height"])
+    try:
+        return await _screenshot(page, shots_dir, index)
+    finally:
+        await overlay.clear_frame(page)
 
 
 class _OpenListFrame:
@@ -48,14 +83,26 @@ class _OpenListFrame:
     screen.
     """
 
-    def __init__(self, page: Page, shots_dir: Path, index: int) -> None:
+    def __init__(
+        self, page: Page, shots_dir: Path, index: int, *, overlay: Overlay | None = None
+    ) -> None:
         self._page = page
         self._shots_dir = shots_dir
         self._index = index
+        self._overlay = overlay
         self.shot: Path | None = None
         self.size: tuple[int, int] | None = None
         self.reveal: SelectReveal | None = None
 
     async def __call__(self, reveal: SelectReveal) -> None:
         self.reveal = reveal
-        self.shot, self.size = await _screenshot(self._page, self._shots_dir, self._index)
+        # The frame goes on the *control*, and only this callback knows where that
+        # is: the box measured before the choreography belongs to the collapsed
+        # control, which for a page-enhanced select was never on screen at all.
+        self.shot, self.size = await _framed_screenshot(
+            self._page,
+            self._shots_dir,
+            self._index,
+            overlay=self._overlay,
+            rect=reveal.control_box,
+        )

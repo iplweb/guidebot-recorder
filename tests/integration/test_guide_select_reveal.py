@@ -30,6 +30,8 @@ from guidebot_recorder.resolver.reasoner import ReasonerResult
 from guidebot_recorder.scenario.loader import load_scenario
 from guidebot_recorder.selects import install_selects
 
+from ._frame_spy import FramedBox, record_frames
+
 pytestmark = pytest.mark.integration
 
 FIXTURE = Path(__file__).parent / "fixtures" / "guide-select.html"
@@ -258,6 +260,13 @@ def _only(annotations: list[Annotation], kind: str) -> Annotation:
     return matching[0]
 
 
+def _only_frame(painted: list[FramedBox]) -> FramedBox:
+    """The one outline the run painted — same shape of assertion as :func:`_only`."""
+
+    assert len(painted) == 1, f"expected exactly one painted frame, got {painted}"
+    return painted[0]
+
+
 async def _measure_open_list(browser: Browser, path: Path) -> tuple[dict, dict, Path]:
     """Measure the fixture independently of the run under test.
 
@@ -364,6 +373,7 @@ async def test_the_select_page_frames_the_control_and_points_the_arrow_at_the_ro
         browser = await playwright.chromium.launch(headless=True)
         try:
             await run_compile_in_browser(path, browser, SelectReasoner())
+            painted = record_frames(monkeypatch)
             pages = await _guide_with_pages(path, tmp_path / "marks.pdf", browser, monkeypatch)
             row, _backdrop, _closed = await _measure_open_list(browser, path)
             context = await browser.new_context(
@@ -378,7 +388,9 @@ async def test_the_select_page_frames_the_control_and_points_the_arrow_at_the_ro
             await browser.close()
 
     assert control is not None
-    framed = _only(pages[1].annotations, "frame")
+    # The outline is painted into the page, beneath the cursor, so it is the spy
+    # and not the annotation list that says which box got marked.
+    framed = _only_frame(painted)
     assert (framed.x, framed.y) == pytest.approx((control["x"], control["y"]), abs=1.0)
     assert (framed.w, framed.h) == pytest.approx((control["width"], control["height"]), abs=1.0)
     # The arrow starts at the previous cursor position, which the navigate step
@@ -413,6 +425,7 @@ async def test_a_display_none_widget_is_driven_instead_of_timing_out(
         browser = await playwright.chromium.launch(headless=True)
         try:
             await run_compile_in_browser(path, browser, SelectReasoner())
+            painted = record_frames(monkeypatch)
             pages = await _guide_with_pages(path, tmp_path / "enhanced.pdf", browser, monkeypatch)
         finally:
             await browser.close()
@@ -424,8 +437,8 @@ async def test_a_display_none_widget_is_driven_instead_of_timing_out(
     assert click.cx is not None and click.cy is not None
     # The widget stands where the hidden original is, so the framed control must
     # be the widget's box — a `display: none` element has no box to frame.
-    framed = _only(pages[1].annotations, "frame")
-    assert framed.w is not None and framed.w > 8
+    framed = _only_frame(painted)
+    assert framed.w > 8
 
 
 async def test_native_mode_keeps_todays_collapsed_frame(
@@ -439,6 +452,7 @@ async def test_native_mode_keeps_todays_collapsed_frame(
         browser = await playwright.chromium.launch(headless=True)
         try:
             await run_compile_in_browser(path, browser, SelectReasoner())
+            painted = record_frames(monkeypatch)
             pages = await _guide_with_pages(path, tmp_path / "native.pdf", browser, monkeypatch)
             _row, _backdrop, closed = await _measure_open_list(browser, path)
         finally:
@@ -447,8 +461,10 @@ async def test_native_mode_keeps_todays_collapsed_frame(
     select_page = pages[1]
     assert select_page.screenshot is not None
     # Marked like any other framed action: the control is framed and nothing is
-    # starred, because under `native` nothing visible is clicked.
-    assert {a.kind for a in select_page.annotations} == {"frame"}
+    # starred, because under `native` nothing visible is clicked. The frame lives
+    # in the page now, so the annotation list is empty and the spy holds the mark.
+    assert {a.kind for a in select_page.annotations} == set()
+    assert len(painted) == 1
     # And nothing was unfurled over the backdrop.
     _width, _height, rows = _read_png(select_page.screenshot)
     reference = _read_png(closed)[2]
@@ -475,12 +491,13 @@ async def test_the_marks_are_page_coordinates_when_the_site_runs_in_the_chrome_s
         browser = await playwright.chromium.launch(headless=True)
         try:
             await run_compile_in_browser(path, browser, SelectReasoner())
+            painted = record_frames(monkeypatch)
             pages = await _guide_with_pages(path, tmp_path / "chrome.pdf", browser, monkeypatch)
         finally:
             await browser.close()
 
     click = _only(pages[1].annotations, "click")
-    framed = _only(pages[1].annotations, "frame")
+    framed = _only_frame(painted)
     # The control sits at the very top of the fixture, so an un-offset mark would
     # land above the bar; both marks must be below it and inside the viewport.
     assert framed.y > CHROME_HEIGHT

@@ -11,11 +11,15 @@ from playwright.async_api import BrowserContext, Page
 from guidebot_recorder.models.config import CursorConfig, Viewport
 from guidebot_recorder.overlay.geometry import Ellipse, ellipse_perimeter
 
+#: Names that must all be callable for the injected script to count as current.
+#: A page still carrying an older script fails this and gets re-injected, so a
+#: newly added effect is the thing that makes the check notice — which is why
+#: every new API name belongs in this list, not just the original five.
 _API_IS_READY = """() => {
     const api = window.__guidebot_cursor;
-    return !!api && ["ensure", "moveTo", "ripple", "highlight", "encircle"].every(
-        (name) => typeof api[name] === "function"
-    );
+    return !!api && [
+        "ensure", "moveTo", "ripple", "highlight", "frame", "clearFrame", "encircle"
+    ].every((name) => typeof api[name] === "function");
 }"""
 
 #: Bounds on one lap of the `highlight` ellipse. Deliberately NOT the cursor's
@@ -133,6 +137,30 @@ class Overlay:
             [target[0], target[1], duration],
         )
         self.pos = target
+
+    async def frame(self, page: Page, x: float, y: float, width: float, height: float) -> None:
+        """Outline ``(x, y, width, height)`` in the page, beneath the cursor.
+
+        Viewport coordinates, the same space :meth:`move_to` takes and the same
+        space ``Recorder.point`` reports its boxes in — so a caller can outline
+        exactly what it just pointed at without converting anything.
+
+        Drawn in the page rather than composed over the finished screenshot
+        because a screenshot has no layers: an outline added afterwards covers
+        the cursor, and the cursor is what the reader is meant to follow.
+        """
+
+        await self.ensure(page)
+        await page.evaluate(
+            "([x, y, w, h]) => window.__guidebot_cursor.frame(x, y, w, h)",
+            [float(x), float(y), float(width), float(height)],
+        )
+
+    async def clear_frame(self, page: Page) -> None:
+        """Remove the outline, if one is up. Safe to call when none is."""
+
+        await self.ensure(page)
+        await page.evaluate("() => window.__guidebot_cursor.clearFrame()")
 
     def lap_duration(self, rx: float, ry: float) -> float:
         """Duration (ms) of one lap around an ellipse, at the cursor's own speed."""

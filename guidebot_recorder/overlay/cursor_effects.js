@@ -293,6 +293,73 @@
     return true;
   }
 
+  //: Stroke width of the target outline, in px — the same 4 the guide's SVG
+  //: `.frame` rule used, so the mark did not change size when it moved layers.
+  const FRAME_BORDER = 4;
+
+  //: Deliberately one below `cursor.js`'s MAX_Z_INDEX (2147483647). That single
+  //: digit IS the feature: it is what puts the outline under the cursor instead
+  //: of over it. Raise it to the max and the two tie, with paint order — and so
+  //: the bug — decided by which element happens to be appended last.
+  const FRAME_Z_INDEX = "2147483645";
+
+  /**
+   * A persistent outline around a target box, drawn BELOW the cursor.
+   *
+   * Not a variant of `highlight()` above, despite the similar shape: that one is
+   * the film's one-off pulse and removes itself after ~900 ms. This one stays
+   * until `clearFrame()`, because its whole job is to be standing there when the
+   * PDF guide takes its screenshot.
+   *
+   * The z-index is the entire point of drawing it here at all. The guide used to
+   * draw this rectangle as SVG *over* the finished PNG, which necessarily put it
+   * over the cursor too — a PNG is flat pixels, so nothing can slip underneath
+   * part of it after the fact. Drawn into the live page it is composited by the
+   * browser, where the cursor's `MAX_Z_INDEX` still wins.
+   *
+   * The box is grown by half the border width so the outline straddles the
+   * target's edge exactly like the SVG `stroke` it replaces — CSS borders are
+   * drawn inside the box, an SVG stroke is centred on the path.
+   *
+   * The look is fixed rather than configurable: these are the very values the
+   * guide's `.frame` stylesheet rule used, and nothing has ever wanted a second
+   * set. An options bag here would be four branches no caller reaches.
+   */
+  function frame(x, y, width, height) {
+    const values = [x, y, width, height].map(Number);
+    if (!values.every(Number.isFinite) || values[2] < 0 || values[3] < 0) {
+      throw new TypeError("frame bounds must be finite with non-negative size");
+    }
+    const root = mountRoot();
+    if (!root) {
+      scheduleMount();
+      return false;
+    }
+    // One frame at a time: a step marks one target, and a leftover from an
+    // earlier step would be photographed as if it belonged to this one.
+    clearFrame();
+
+    const half = FRAME_BORDER / 2;
+    const box = document.createElement("div");
+    box.setAttribute("data-guidebot-frame", "");
+    styleTransient(box, FRAME_Z_INDEX);
+    setImportant(box, "left", `${values[0] - half}px`);
+    setImportant(box, "top", `${values[1] - half}px`);
+    setImportant(box, "width", `${values[2] + FRAME_BORDER}px`);
+    setImportant(box, "height", `${values[3] + FRAME_BORDER}px`);
+    setImportant(box, "border", `${FRAME_BORDER}px solid #e11`);
+    setImportant(box, "border-radius", "4px");
+    setImportant(box, "background", "rgba(238, 17, 17, .08)");
+    root.appendChild(box);
+    return true;
+  }
+
+  function clearFrame() {
+    for (const box of document.querySelectorAll("[data-guidebot-frame]")) {
+      box.remove();
+    }
+  }
+
   function hide() {
     hidden = true;
     const cursor = document.querySelector(CURSOR_SELECTOR);
@@ -312,6 +379,8 @@
     moveTo,
     ripple,
     highlight,
+    frame,
+    clearFrame,
     encircle,
     hide,
     show,
