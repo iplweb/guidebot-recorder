@@ -268,6 +268,47 @@ async def test_entering_a_popup_without_a_recorder_factory_blames_the_caller(tmp
         )
 
 
+async def test_pause_on_error_stops_on_the_window_that_failed(tmp_path, monkeypatch):
+    """`--pause-on-error` zostawia otwarte okno, w którym krok padł.
+
+    Zanim `_Capture.page` stało się „oknem aktywnym", była tylko jedna możliwa
+    odpowiedź i pauza dostawała parametr `page` funkcji. Teraz błąd w popupie
+    zostawiłby dewelopera przed oknem głównym, na którym nic złego nie widać.
+    """
+
+    paused: list[object] = []
+
+    async def _pause(page, *_args, **_kwargs):
+        paused.append(page)
+
+    monkeypatch.setattr(capture, "pause_for_inspection", _pause)
+    monkeypatch.setattr(capture, "reuse_failure", _async_none)
+    events: list[str] = []
+    main, popup = _windows(events)
+
+    class ExplodingRecorder(FakeRecorder):
+        async def point(self, target, ripple=False):
+            raise RuntimeError("krok padł w popupie")
+
+    scenario = Scenario(
+        config=_cfg(),
+        steps=[Step(click="ikona profilu"), Step(click="pole w wyskakującym oknie")],
+    )
+    with pytest.raises(RuntimeError, match="padł w popupie"):
+        await capture_pages(
+            scenario,
+            _compiled([_click(opens_popup=True), _click()]),
+            main,
+            FakeRecorder(events),
+            tmp_path / "shots",
+            timeout=15.0,
+            pause_on_error=True,
+            make_recorder=lambda page: ExplodingRecorder(events),
+        )
+
+    assert paused == [popup]
+
+
 async def test_close_window_without_a_popup_is_a_no_op(tmp_path):
     """`closeWindow` w scenariuszu bez popupu nie ma czego zamykać.
 

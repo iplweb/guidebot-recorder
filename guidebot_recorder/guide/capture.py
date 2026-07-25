@@ -254,7 +254,10 @@ async def capture_pages(
         except Exception as exc:
             if pause_on_error:
                 await pause_for_inspection(
-                    page,
+                    # The window that failed, not the one the run started in.
+                    # A step inside a popup that leaves the main window paused
+                    # shows the developer a page with nothing wrong on it.
+                    cap.page,
                     "guide",
                     index,
                     run.kind,
