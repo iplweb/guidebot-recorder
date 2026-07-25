@@ -15,6 +15,7 @@ from guidebot_recorder.guide.prolog import GuideError, scan_for_blockers
 from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder._debug import scenario_sensitive_values
 from guidebot_recorder.recorder.recorder import Recorder
+from guidebot_recorder.recorder.session import ensure_session
 from guidebot_recorder.scenario.compiled import compiled_path, load_compiled
 from guidebot_recorder.scenario.loader import load_scenario, scenario_env_references
 from guidebot_recorder.selects import install_selects
@@ -30,7 +31,7 @@ async def run_guide(
     verbose: bool = False,
     pause_on_error: bool = False,
 ) -> int:
-    """Compiled scenario -> step-by-step PDF guide. Returns the page count.
+    """Compiled scenario -> step-by-step PDF guide. Returns the scene count.
 
     Replays the scenario with Playwright exactly like `run_render` does (same
     context/overlay/chrome-shell setup), minus video recording and TTS — and
@@ -58,11 +59,24 @@ async def run_guide(
     scan_for_blockers(flat, compiled.actions)
 
     cfg = scenario.config
-    # Same context recipe as run_render (recorder/render/_run.py), minus
+    # Pre-recording setup, exactly as `_open_context` does it for render
+    # (recorder/render/stage.py): when the target declares `config.setup` its
+    # preparation steps were removed from the scenario, so a context that starts
+    # without the prepared session replays a *different* page than the film — a
+    # login wall, or a consent banner whose modal swallows the first hover. The
+    # guide is the documented way to verify that a scenario still shows what it
+    # narrates, so it has to replay against the same starting state.
+    setup_state = (
+        await ensure_session(browser, path, Path(".guidebot/sessions"), env, timeout=timeout)
+        if cfg.setup is not None
+        else None
+    )
+    # Same context recipe as run_render (recorder/render/stage.py), minus
     # record_video_dir/record_video_size: PDF capture never records video.
     context = await browser.new_context(
         viewport={"width": cfg.viewport.width, "height": cfg.viewport.height},
         locale=cfg.locale,
+        **({"storage_state": setup_state} if setup_state is not None else {}),
         **({"bypass_csp": True, "service_workers": "block"} if cfg.chrome.enabled else {}),
     )
     overlay = Overlay(cfg.cursor, cfg.viewport)
@@ -121,9 +135,13 @@ async def run_guide(
         await context.close()
 
     # Fold before rendering *and* before counting: narration with no still of its
-    # own rides on the previous picture, so it stops being a page. Counting the
-    # unfolded list here is what made `guide` report eight pages of a five-page PDF.
-    sheets = fold_narration(pages)
-    html = render_html(sheets, title=cfg.title)
+    # own rides on the previous picture, so it stops being a scene. Counting the
+    # unfolded list here is what made `guide` report eight of a five-scene PDF.
+    #
+    # This is a count of SCENES, not sheets of paper — two scenes share an
+    # A4-landscape sheet and a long one pushes its neighbour over, so only the
+    # printer knows the sheet count. The caller's wording has to match.
+    scenes = fold_narration(pages)
+    html = render_html(scenes, title=cfg.title)
     await html_to_pdf(browser, html, out_pdf)
-    return len(sheets)
+    return len(scenes)
