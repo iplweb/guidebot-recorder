@@ -370,9 +370,12 @@ def _frame_rect(run: _StepRun) -> dict | None:
 async def _still(run: _StepRun) -> tuple[Path, tuple[int, int]]:
     """This step's screenshot, with its target outlined *beneath* the cursor.
 
-    ``overlay`` is read off the recorder rather than carried on the capture: the
-    recorder already owns it, and a stand-in recorder without one simply gets an
-    unframed still instead of an attribute error.
+    The overlay is read off the recorder, which already owns it, rather than
+    carried a second time on the capture. Read by plain attribute access and not
+    ``getattr(..., None)``: every recorder has the attribute (the real one always
+    assigns it, ``None`` included), so a default could only ever paper over a
+    rename — and it would do so by quietly dropping the outline from every
+    screenshot while the suite stayed green.
     """
 
     cap = run.capture
@@ -380,7 +383,7 @@ async def _still(run: _StepRun) -> tuple[Path, tuple[int, int]]:
         cap.page,
         cap.shots_dir,
         run.index,
-        overlay=getattr(cap.recorder, "overlay", None),
+        overlay=cap.recorder.overlay,
         rect=_frame_rect(run),
     )
 
@@ -436,9 +439,7 @@ async def _select_frame(run: _StepRun) -> bool:
     await cap.await_selects_ready(run)
     # Named `still`, not `frame`: in this codebase `frame` means a
     # Playwright frame everywhere else.
-    still = _OpenListFrame(
-        cap.page, cap.shots_dir, run.index, overlay=getattr(cap.recorder, "overlay", None)
-    )
+    still = _OpenListFrame(cap.page, cap.shots_dir, run.index, overlay=cap.recorder.overlay)
     try:
         # `ripple=False` for the same reason `_approach_target` uses it: a still
         # capture wants a clean frame, not a click ring frozen mid-animation.

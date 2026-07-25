@@ -293,6 +293,16 @@
     return true;
   }
 
+  //: Stroke width of the target outline, in px — the same 4 the guide's SVG
+  //: `.frame` rule used, so the mark did not change size when it moved layers.
+  const FRAME_BORDER = 4;
+
+  //: Deliberately one below `cursor.js`'s MAX_Z_INDEX (2147483647). That single
+  //: digit IS the feature: it is what puts the outline under the cursor instead
+  //: of over it. Raise it to the max and the two tie, with paint order — and so
+  //: the bug — decided by which element happens to be appended last.
+  const FRAME_Z_INDEX = "2147483645";
+
   /**
    * A persistent outline around a target box, drawn BELOW the cursor.
    *
@@ -310,8 +320,12 @@
    * The box is grown by half the border width so the outline straddles the
    * target's edge exactly like the SVG `stroke` it replaces — CSS borders are
    * drawn inside the box, an SVG stroke is centred on the path.
+   *
+   * The look is fixed rather than configurable: these are the very values the
+   * guide's `.frame` stylesheet rule used, and nothing has ever wanted a second
+   * set. An options bag here would be four branches no caller reaches.
    */
-  function frame(x, y, width, height, options = {}) {
+  function frame(x, y, width, height) {
     const values = [x, y, width, height].map(Number);
     if (!values.every(Number.isFinite) || values[2] < 0 || values[3] < 0) {
       throw new TypeError("frame bounds must be finite with non-negative size");
@@ -325,20 +339,17 @@
     // earlier step would be photographed as if it belonged to this one.
     clearFrame();
 
-    const width_ = Number.isFinite(Number(options.borderWidth))
-      ? Number(options.borderWidth)
-      : 4;
-    const half = width_ / 2;
+    const half = FRAME_BORDER / 2;
     const box = document.createElement("div");
     box.setAttribute("data-guidebot-frame", "");
-    styleTransient(box, "2147483645");
+    styleTransient(box, FRAME_Z_INDEX);
     setImportant(box, "left", `${values[0] - half}px`);
     setImportant(box, "top", `${values[1] - half}px`);
-    setImportant(box, "width", `${values[2] + width_}px`);
-    setImportant(box, "height", `${values[3] + width_}px`);
-    setImportant(box, "border", `${width_}px solid ${options.color || "#e11"}`);
-    setImportant(box, "border-radius", `${options.radius ?? 4}px`);
-    setImportant(box, "background", options.fill || "rgba(238, 17, 17, .08)");
+    setImportant(box, "width", `${values[2] + FRAME_BORDER}px`);
+    setImportant(box, "height", `${values[3] + FRAME_BORDER}px`);
+    setImportant(box, "border", `${FRAME_BORDER}px solid #e11`);
+    setImportant(box, "border-radius", "4px");
+    setImportant(box, "background", "rgba(238, 17, 17, .08)");
     root.appendChild(box);
     return true;
   }

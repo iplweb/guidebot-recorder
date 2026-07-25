@@ -19,6 +19,7 @@ from pathlib import Path
 
 from playwright.async_api import Page
 
+from guidebot_recorder.overlay.overlay import Overlay
 from guidebot_recorder.recorder.recorder import SelectReveal
 
 
@@ -35,7 +36,7 @@ async def _framed_screenshot(
     shots_dir: Path,
     index: int,
     *,
-    overlay,
+    overlay: Overlay | None,
     rect: dict | None,
 ) -> tuple[Path, tuple[int, int]]:
     """Photograph the page with ``rect`` outlined in it, then take the outline down.
@@ -82,7 +83,9 @@ class _OpenListFrame:
     screen.
     """
 
-    def __init__(self, page: Page, shots_dir: Path, index: int, *, overlay=None) -> None:
+    def __init__(
+        self, page: Page, shots_dir: Path, index: int, *, overlay: Overlay | None = None
+    ) -> None:
         self._page = page
         self._shots_dir = shots_dir
         self._index = index
