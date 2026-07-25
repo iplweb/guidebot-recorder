@@ -48,6 +48,12 @@ class GuidePage:
     A popup page is not flagged as one anywhere; the two sizes differing IS the
     flag. That is deliberate — a separate boolean could disagree with the sizes,
     and then the layout would have two sources of truth for one question.
+
+    ``folded_text`` is narration from later steps that had nothing of their own to
+    photograph, and so rides along in this page's side panel under a rule. It is
+    filled by the layout, never by the capture pass: one step still produces one
+    :class:`GuidePage`, and how those pages are composed onto sheets of paper is
+    a question only the document asks.
     """
 
     kind: Literal["step", "navigate", "slide", "text"]
@@ -57,6 +63,7 @@ class GuidePage:
     annotations: list[Annotation] = field(default_factory=list)
     screenshot_size: tuple[int, int] | None = None
     canvas_size: tuple[int, int] | None = None
+    folded_text: list[str] = field(default_factory=list)
 
 
 def page_text(step: Step) -> str:

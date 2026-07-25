@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from guidebot_recorder.guide.layout import render_html
+from guidebot_recorder.guide.layout import fold_narration, render_html
 from guidebot_recorder.guide.model import Annotation, GuidePage
 
 
@@ -160,6 +160,96 @@ def test_annotations_stay_in_the_stills_own_coordinate_system():
     assert 'viewBox="0 0 600 700"' in html
     assert ".plate svg {" in html
     assert ".shot svg {" not in html
+
+
+def _text(text):
+    return GuidePage(kind="text", screenshot=None, text=text, heading=None, annotations=[])
+
+
+def _slide(heading):
+    return GuidePage(kind="slide", screenshot=None, text="", heading=heading, annotations=[])
+
+
+def test_narration_after_a_picture_folds_onto_it_under_a_rule():
+    """`say:` między akcjami opisuje to, na co czytelnik patrzy.
+
+    Nie zasłużyło na osobną kartkę z jednym zdaniem na środku — ląduje w panelu
+    bocznym poprzedniego kadru, oddzielone poziomą kreską.
+    """
+
+    html = render_html(
+        fold_narration([_shot_page([]), _text("Okno otwiera się osobno.")]), title="x"
+    )
+    assert html.count('class="page"') == 1
+    assert '<hr class="fold"/>' in html
+    assert "Okno otwiera się osobno." in html
+
+
+def test_narration_with_no_picture_before_it_keeps_its_own_page():
+    """Nie ma czego dosiąść — zostaje pełnowymiarowa strona tekstowa."""
+
+    html = render_html(fold_narration([_text("Zanim zaczniemy.")]), title="x")
+    assert html.count('class="page"') == 1
+    assert '<hr class="fold"/>' not in html
+    assert "Zanim zaczniemy." in html
+
+
+def test_a_slide_neither_absorbs_narration_nor_is_absorbed():
+    """Slajd to celowa plansza pełnoekranowa, więc nie zwija się z niczym.
+
+    Slajd tytułowy z narracją zaraz za nim dawałby inaczej stronę tytułową
+    z doklejonym zdaniem — a to jest przerywnik, nie kadr do opisania.
+    """
+
+    html = render_html(fold_narration([_slide("Logowanie"), _text("Witaj.")]), title="x")
+    assert html.count('class="page"') == 2
+    assert '<hr class="fold"/>' not in html
+
+
+def test_several_narrations_fold_onto_one_picture_each_under_its_own_rule():
+    pages = [_shot_page([]), _text("Pierwsze zdanie."), _text("Drugie zdanie.")]
+    html = render_html(fold_narration(pages), title="x")
+    assert html.count('class="page"') == 1
+    assert html.count('<hr class="fold"/>') == 2
+
+
+def test_empty_narration_folds_to_nothing_rather_than_a_bare_rule():
+    """Pusta narracja nie ma czego wnieść, a kreska bez tekstu to śmieć na stronie.
+
+    To zarazem koniec pustych kartek: krok narracyjny bez tekstu drukował dotąd
+    stronę z niczym.
+    """
+
+    html = render_html(fold_narration([_shot_page([]), _text("")]), title="x")
+    assert html.count('class="page"') == 1
+    assert '<hr class="fold"/>' not in html
+
+
+def test_fold_narration_is_what_the_document_is_counted_by():
+    """Zwinięta lista to jedna i ta sama lista, którą się drukuje i liczy.
+
+    `run_guide` zwraca długość listy jako liczbę stron, więc gdy zwijanie siedziało
+    wewnątrz `render_html`, CLI ogłaszało osiem stron pięciostronicowego PDF-a.
+    Ten test pilnuje, że zwijanie jest krokiem wywołującego, a nie efektem ubocznym
+    renderowania.
+    """
+
+    pages = [_slide("Tytuł"), _shot_page([]), _text("dopisek"), _text("i jeszcze")]
+    sheets = fold_narration(pages)
+    html = render_html(sheets, title="x")
+
+    assert len(sheets) == 2
+    assert html.count('class="page"') == len(sheets)
+    # A gdyby renderer nadal zwijał sam, podwójne zwinięcie byłoby niewykrywalne.
+    assert render_html(pages, title="x").count('class="page"') == 4
+
+
+def test_folding_does_not_mutate_the_caller_s_pages():
+    """`render_html` nie może przepisywać wejścia — to lista wywołującego."""
+
+    shot, text = _shot_page([]), _text("dopisek")
+    fold_narration([shot, text])
+    assert shot.folded_text == []
 
 
 def test_text_page_has_no_svg():

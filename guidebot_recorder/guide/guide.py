@@ -9,7 +9,7 @@ from playwright.async_api import Browser, Frame, Page
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.guide.capture import capture_pages
-from guidebot_recorder.guide.layout import render_html
+from guidebot_recorder.guide.layout import fold_narration, render_html
 from guidebot_recorder.guide.pdf import html_to_pdf
 from guidebot_recorder.guide.prolog import GuideError, scan_for_blockers
 from guidebot_recorder.overlay.overlay import Overlay
@@ -120,6 +120,10 @@ async def run_guide(
     finally:
         await context.close()
 
-    html = render_html(pages, title=cfg.title)
+    # Fold before rendering *and* before counting: narration with no still of its
+    # own rides on the previous picture, so it stops being a page. Counting the
+    # unfolded list here is what made `guide` report eight pages of a five-page PDF.
+    sheets = fold_narration(pages)
+    html = render_html(sheets, title=cfg.title)
     await html_to_pdf(browser, html, out_pdf)
-    return len(pages)
+    return len(sheets)
