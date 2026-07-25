@@ -23,6 +23,7 @@ from urllib.parse import urljoin
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from tqdm import tqdm
 
 from guidebot_recorder.diagnostics import step_banner
@@ -65,8 +66,14 @@ class _Capture:
     """What outlives one step of the capture pass.
 
     :attr:`pages` is the document being built, :attr:`skipped_branch` the gate
-    that turned out to be absent, and :attr:`trail` the cursor memory. The rest
-    is settled before the loop starts and only read.
+    that turned out to be absent, and :attr:`trail` the cursor memory.
+
+    :attr:`page` and :attr:`recorder` are the **active window**, not the main one.
+    A step that opens a popup swaps both (:meth:`enter_popup`) and ``closeWindow``
+    swaps them back (:meth:`leave_popup`); every ``_screenshot(cap.page, ...)`` in
+    this module photographs whichever window is active at the time, which is the
+    whole of the popup support. The main pair is kept aside in ``__post_init__``
+    so leaving never has to reconstruct it.
     """
 
     scenario: object
@@ -79,9 +86,62 @@ class _Capture:
     pause_on_error: bool
     sensitive_values: Iterable[str]
     selects: Selects | None
+    #: Builds the popup's own ``Recorder``. Injected rather than constructed here
+    #: because a ``Recorder`` needs the ``Overlay``, which belongs to the caller's
+    #: browser context — and because a test can hand over a fake without a browser.
+    #: ``None`` in a capture that never meets a popup.
+    make_recorder: Callable[[Page], Recorder] | None = None
     pages: list[GuidePage] = field(default_factory=list)
     trail: _CursorTrail = field(default_factory=_CursorTrail)
     skipped_branch: int | None = None
+    popup: Page | None = None
+
+    def __post_init__(self) -> None:
+        self._main_page = self.page
+        self._main_recorder = self.recorder
+
+    @property
+    def canvas(self) -> tuple[int, int]:
+        """The size every page is presented at — the main window's viewport.
+
+        A popup still is smaller than this and gets centred on it by the layout;
+        see :func:`~guidebot_recorder.guide.layout._letterbox`.
+        """
+
+        viewport = self.scenario.config.viewport
+        return (viewport.width, viewport.height)
+
+    def enter_popup(self, popup: Page) -> None:
+        """Make ``popup`` the active window for the steps that follow."""
+
+        if self.make_recorder is None:
+            raise RuntimeError(
+                "guide nie ma fabryki Recordera, a krok otworzył popup — "
+                "to błąd wywołania `capture_pages`, nie scenariusza"
+            )
+        self.popup = popup
+        self.page = popup
+        self.recorder = self.make_recorder(popup)
+        # A new window is a new coordinate system: an arrow drawn from the last
+        # target in the other window would point at nothing on this picture.
+        self.trail.reset()
+
+    async def leave_popup(self) -> None:
+        """Close the popup, if one is open, and go back to the main window.
+
+        A no-op when no popup is open: `closeWindow` in a scenario that never
+        opened one is bookkeeping the author wrote for the film, and the guide has
+        nothing to undo.
+        """
+
+        if self.popup is None:
+            return
+        if not self.popup.is_closed():
+            await self.popup.close()
+        self.popup = None
+        self.page = self._main_page
+        self.recorder = self._main_recorder
+        self.trail.reset()
 
     def banner(self, entry: FlatStep, entry_index: int, message: str) -> str:
         """Komunikat kroku z `plik:linia` i fragmentem YAML; sekrety zredagowane."""
@@ -170,6 +230,11 @@ class _StepRun:
     row_box: dict | None = None
     row_center: _Point | None = None
     mark: object = None
+    #: The window this step's click opened, filled by :func:`_click_or_hover_frame`
+    #: for a frozen ``opens_popup`` click. The switch itself happens one phase
+    #: later, in ``capture._action_page``: this step's own page still belongs to
+    #: the window the reader was looking at when they clicked.
+    popup: Page | None = None
 
     @property
     def step(self) -> Step:
@@ -222,6 +287,7 @@ async def _navigate_page(run: _StepRun) -> None:
             heading=f"Otwórz adres: {url}",
             annotations=[],
             screenshot_size=size,
+            canvas_size=cap.canvas,
         )
     )
     cap.trail.reset()
@@ -274,6 +340,7 @@ async def _scroll_page(run: _StepRun) -> None:
             heading=None,
             annotations=[],
             screenshot_size=size,
+            canvas_size=cap.canvas,
         )
     )
 
@@ -397,15 +464,65 @@ async def _highlight_frame(run: _StepRun) -> bool:
     return True
 
 
+def _opens_popup(action: CompiledAction | None) -> bool:
+    """Whether ``compile`` froze this action as the one that opens a new window."""
+
+    return isinstance(action, CachedAction) and action.opens_popup
+
+
+async def _click_into_popup(run: _StepRun) -> Page:
+    """Click, and hand back the window that click opened.
+
+    The wait wraps the click rather than following it: a popup that opens fast
+    would have fired its event before a bare ``wait_for_event`` started listening,
+    and the guide would then blame the site for its own race.
+    """
+
+    cap = run.capture
+    try:
+        async with cap.page.context.expect_page(timeout=cap.timeout * 1000) as opened:
+            await run.locator.click()
+        popup = await opened.value
+    except PlaywrightTimeoutError as exc:
+        # The frozen flag says a window opens here, so its absence is a broken
+        # guide, not a branch to skip: a PDF missing the popup's steps would read
+        # as a complete set of instructions while omitting half of them.
+        raise GuideError(
+            run.banner("krok miał otworzyć nowe okno, a żadne się nie pojawiło")
+        ) from exc
+    await popup.wait_for_load_state("domcontentloaded")
+    return popup
+
+
 async def _click_or_hover_frame(run: _StepRun) -> bool:
     cap = run.capture
     # frame BEFORE click/hover
     run.shot, run.size = await _screenshot(cap.page, cap.shots_dir, run.index)
     if run.act == "hover":
         await run.locator.hover()
+    elif _opens_popup(run.action):
+        run.popup = await _click_into_popup(run)
     else:
         await run.locator.click()
     return True
+
+
+async def _close_window_page(run: _StepRun) -> None:
+    """Close the popup, go back to the main window, and narrate if the step does.
+
+    No screenshot of its own: the closing is not a thing the reader does, it is
+    the film's way of getting back — and the next step photographs the main window
+    anyway.
+    """
+
+    cap = run.capture
+    await cap.leave_popup()
+    text = page_text(run.step)
+    if not text:
+        return
+    cap.pages.append(
+        GuidePage(kind="text", screenshot=None, text=text, heading=None, annotations=[])
+    )
 
 
 #: How each frozen action gets photographed. `click` and `hover` share the

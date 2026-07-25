@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from playwright.async_api import Browser, Frame
+from playwright.async_api import Browser, Frame, Page
 
 from guidebot_recorder.chrome import SHELL_URL, Chrome
 from guidebot_recorder.chrome.framing import install_framing
 from guidebot_recorder.guide.capture import capture_pages
-from guidebot_recorder.guide.layout import render_html
+from guidebot_recorder.guide.layout import fold_narration, render_html
 from guidebot_recorder.guide.pdf import html_to_pdf
 from guidebot_recorder.guide.prolog import GuideError, scan_for_blockers
 from guidebot_recorder.overlay.overlay import Overlay
@@ -92,6 +92,17 @@ async def run_guide(
         # otherwise the recorder drives the page directly (frame=None -> page).
         recorder = Recorder(page, overlay, frame=site_frame, type_delay_ms=None)
 
+        def make_popup_recorder(popup: Page) -> Recorder:
+            """The popup's recorder — deliberately without a ``frame``.
+
+            The shell iframe belongs to the main window only; a popup is its own
+            top-level document, so the recorder drives the page directly. Its
+            chrome bar, if any, is the legacy in-DOM one that ``chrome.js`` mounts
+            on popup-site documents under ``bare_popups=False``.
+            """
+
+            return Recorder(popup, overlay, frame=None, type_delay_ms=None)
+
         shots_dir = out_pdf.parent / (out_pdf.stem + "_shots")
         pages = await capture_pages(
             scenario,
@@ -104,10 +115,15 @@ async def run_guide(
             pause_on_error=pause_on_error,
             sensitive_values=sensitive_values,
             selects=selects,
+            make_recorder=make_popup_recorder,
         )
     finally:
         await context.close()
 
-    html = render_html(pages, title=cfg.title)
+    # Fold before rendering *and* before counting: narration with no still of its
+    # own rides on the previous picture, so it stops being a page. Counting the
+    # unfolded list here is what made `guide` report eight pages of a five-page PDF.
+    sheets = fold_narration(pages)
+    html = render_html(sheets, title=cfg.title)
     await html_to_pdf(browser, html, out_pdf)
-    return len(pages)
+    return len(sheets)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import math
+from dataclasses import replace
 from pathlib import Path
 
 from guidebot_recorder.guide.model import Annotation, GuidePage
@@ -16,12 +17,22 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
         page-break-after: always; align-items: start; }
 .page:last-child { page-break-after: auto; }
 .shot { position: relative; width: 100%; border: 1px solid #ddd; border-radius: 6px;
-        overflow: hidden; }
-.shot img { width: 100%; display: block; }
-.shot svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+        overflow: hidden; display: flex; align-items: center; justify-content: center;
+        background: #eceef2; }
+/* The still and its annotation layer share one box, so the SVG's viewBox
+   coordinates and the image's pixels line up. That box is `.plate`, not `.shot`:
+   a popup still does not fill `.shot`, and an overlay pinned to `.shot` would sit
+   off the picture by the width of the letterbox margin. At `width: 100%` (every
+   main-window page) the two boxes coincide and this renders as it always did. */
+.plate { position: relative; width: 100%; }
+.plate img { width: 100%; display: block; }
+.plate svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .side { padding-top: 2mm; }
 .side .heading { font-size: 20px; font-weight: 700; margin: 0 0 4mm; }
 .side .body { font-size: 16px; line-height: 1.5; white-space: pre-wrap; }
+/* Separates this step's own description from narration folded in from steps
+   that had nothing to photograph — see `_fold_narration`. */
+.side hr.fold { border: 0; border-top: 1px solid #d6d6d6; margin: 4mm 0; }
 .slide { grid-column: 1 / -1; display: flex; flex-direction: column; justify-content: center;
          height: 100vh; text-align: center; }
 .slide .title { font-size: 40px; font-weight: 800; }
@@ -91,15 +102,53 @@ def _svg(anns: list[Annotation], size: tuple[int, int]) -> str:
     return "".join(parts)
 
 
+def _letterbox(page: GuidePage) -> tuple[str, str]:
+    """Inline styles that centre a smaller still on the page's canvas.
+
+    Returns ``(shot_style, plate_style)``, both empty when the still already fills
+    the canvas — which is every main-window page, so the common case adds no
+    markup at all. A popup opens at its own size, and the two sizes differing is
+    the only signal that it is one (see :class:`GuidePage`).
+
+    ``.shot`` gets the canvas aspect ratio rather than a pixel height so it keeps
+    scaling with the print column, and ``.plate`` is sized as a percentage of it —
+    the same ratio the still has to the canvas, so the picture lands unscaled
+    relative to its neighbours and a 600px-wide popup reads as narrower than the
+    1376px window it came from, which is the honest depiction.
+    """
+
+    shot, canvas = page.screenshot_size, page.canvas_size
+    if not shot or not canvas or shot == canvas or not all(canvas):
+        return "", ""
+    width = round(100 * shot[0] / canvas[0], 3)
+    height = round(100 * shot[1] / canvas[1], 3)
+    return (
+        f' style="aspect-ratio:{canvas[0]}/{canvas[1]}"',
+        f' style="width:{width}%;height:{height}%"',
+    )
+
+
+def _side(page: GuidePage) -> str:
+    """The right-hand column: this step's description, then anything folded in."""
+
+    heading = f'<div class="heading">{html.escape(page.heading)}</div>' if page.heading else ""
+    body = f'<div class="body">{html.escape(page.text)}</div>' if page.text else ""
+    folded = "".join(
+        f'<hr class="fold"/><div class="body">{html.escape(text)}</div>'
+        for text in page.folded_text
+    )
+    return f"{heading}{body}{folded}"
+
+
 def _shot_page(page: GuidePage) -> str:
     uri = Path(page.screenshot).absolute().as_uri()
     svg = _svg(page.annotations, page.screenshot_size or (1, 1))
-    heading = f'<div class="heading">{html.escape(page.heading)}</div>' if page.heading else ""
-    body = f'<div class="body">{html.escape(page.text)}</div>' if page.text else ""
+    shot_style, plate_style = _letterbox(page)
     return (
         '<section class="page">'
-        f'<div class="shot"><img src="{uri}"/>{svg}</div>'
-        f'<div class="side">{heading}{body}</div>'
+        f'<div class="shot"{shot_style}>'
+        f'<div class="plate"{plate_style}><img src="{uri}"/>{svg}</div></div>'
+        f'<div class="side">{_side(page)}</div>'
         "</section>"
     )
 
@@ -115,14 +164,72 @@ def _slide_page(page: GuidePage) -> str:
 
 
 def _text_page(page: GuidePage) -> str:
-    heading = f'<div class="heading">{html.escape(page.heading)}</div>' if page.heading else ""
+    """Narration that found no picture to join — full width, still its own sheet.
+
+    Reached only when :func:`_fold_narration` declined to fold it: nothing came
+    before it, or what came before was a slide.
+    """
+
     return (
         '<section class="page"><div class="side" style="grid-column:1/-1">'
-        f'{heading}<div class="body">{html.escape(page.text)}</div></div></section>'
+        f"{_side(page)}</div></section>"
     )
 
 
+def _folds_into_previous(page: GuidePage, previous: GuidePage | None) -> bool:
+    """Whether ``page`` is narration that belongs on the picture before it.
+
+    Three conditions, and each excludes a page that must keep its own sheet: a
+    narration page with nothing before it has no picture to join; a page with a
+    still of its own is the thing being described, not a description; and a slide
+    is a deliberate full-page interstitial, so it neither absorbs nor is absorbed.
+    """
+
+    return (
+        previous is not None
+        and previous.screenshot is not None
+        and page.screenshot is None
+        and page.kind != "slide"
+    )
+
+
+def fold_narration(pages: list[GuidePage]) -> list[GuidePage]:
+    """Move picture-less narration onto the page of the still it was spoken over.
+
+    A `say:` between two actions describes what the reader is looking at — it did
+    not earn a sheet of paper with a sentence marooned on it. Folding happens here
+    and not in the capture pass on purpose: one step still produces one
+    :class:`GuidePage`, and pagination is the document's question alone.
+
+    Empty narration folds to nothing rather than to a bare rule, which is also how
+    a text page that never had any text stops printing a blank sheet.
+
+    **Public, and called by ``run_guide`` rather than by :func:`render_html`.**
+    Folding inside the renderer would leave the caller holding the *unfolded* list
+    as its only measure of the document — and `guide` reports that length as the
+    page count, so the CLI would cheerfully announce eight pages of a five-page
+    PDF. One list, counted and rendered, is the only shape that cannot drift.
+    """
+
+    folded: list[GuidePage] = []
+    for page in pages:
+        previous = folded[-1] if folded else None
+        if not _folds_into_previous(page, previous):
+            folded.append(page)
+            continue
+        carried = [*previous.folded_text, page.text] if page.text else previous.folded_text
+        folded[-1] = replace(previous, folded_text=carried)
+    return folded
+
+
 def render_html(pages: list[GuidePage], *, title: str) -> str:
+    """Render exactly the pages given — one ``<section class="page">`` each.
+
+    Does **not** fold; run :func:`fold_narration` first if you want that. Keeping
+    the renderer free of pagination is what lets the caller count the same list it
+    prints.
+    """
+
     body_parts: list[str] = []
     for page in pages:
         if page.kind == "slide":
