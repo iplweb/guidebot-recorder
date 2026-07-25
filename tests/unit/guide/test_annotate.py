@@ -7,6 +7,7 @@ import pytest
 from guidebot_recorder.guide.annotate import (
     CLICK_INNER,
     CLICK_OUTER,
+    FRAMED_ACTIONS,
     annotations_for,
     cursor_shape,
     target_shape,
@@ -33,10 +34,19 @@ def _kinds(anns):
     return [a.kind for a in anns]
 
 
-def test_click_frames_the_target_and_stars_the_cursor():
+def test_click_stars_the_cursor_and_leaves_the_frame_to_the_page():
+    """Ramka nie jest adnotacją — maluje ją strona, pod kursorem.
+
+    Adnotacje to warstwa SVG nad gotowym PNG-iem, więc ramka narysowana tutaj
+    zawsze przykryłaby kursor. Geometrię nadal wyznacza `target_shape`, tyle że
+    konsumuje ją `stills._framed_screenshot`, a nie `layout`.
+    """
+
     anns = annotations_for("click", prev_cursor=(5.0, 5.0), center=CENTER, box=BOX)
 
-    assert set(_kinds(anns)) == {"arrow", "frame", "click"}
+    assert set(_kinds(anns)) == {"arrow", "click"}
+    assert "click" in FRAMED_ACTIONS
+    assert target_shape("click", box=BOX) == Rect(x=10.0, y=20.0, w=100.0, h=40.0)
     star = next(a for a in anns if a.kind == "click")
     assert (star.cx, star.cy) == CENTER
     assert (star.r_inner, star.r_outer) == (CLICK_INNER, CLICK_OUTER)
@@ -45,16 +55,18 @@ def test_click_frames_the_target_and_stars_the_cursor():
 def test_no_arrow_without_prev_cursor():
     anns = annotations_for("click", prev_cursor=None, center=CENTER, box=BOX)
 
-    assert _kinds(anns) == ["frame", "click"]
+    assert _kinds(anns) == ["click"]
 
 
 @pytest.mark.parametrize("action", ["type", "hover", "select"])
 def test_every_targeted_action_frames_its_box(action):
+    """Ramka zniknęła z adnotacji, ale nie z przewodnika — przeniosła się do strony."""
+
     anns = annotations_for(action, prev_cursor=None, center=CENTER, box=BOX)
 
-    assert _kinds(anns) == ["frame"]
-    frame = anns[0]
-    assert (frame.x, frame.y, frame.w, frame.h) == (10.0, 20.0, 100.0, 40.0)
+    assert _kinds(anns) == []
+    assert action in FRAMED_ACTIONS
+    assert target_shape(action, box=BOX) == Rect(x=10.0, y=20.0, w=100.0, h=40.0)
 
 
 def test_missing_box_omits_rect_marks():
@@ -81,9 +93,8 @@ def test_select_without_a_row_is_marked_like_any_other_framed_action():
 
     anns = annotations_for("select", prev_cursor=(5.0, 5.0), center=CENTER, box=BOX)
 
-    assert set(_kinds(anns)) == {"arrow", "frame"}
-    frame = next(a for a in anns if a.kind == "frame")
-    assert (frame.x, frame.y, frame.w, frame.h) == (10.0, 20.0, 100.0, 40.0)
+    assert set(_kinds(anns)) == {"arrow"}
+    assert target_shape("select", box=BOX) == Rect(x=10.0, y=20.0, w=100.0, h=40.0)
 
 
 def test_select_with_an_open_list_stars_the_row_and_frames_the_control():
@@ -91,13 +102,13 @@ def test_select_with_an_open_list_stars_the_row_and_frames_the_control():
         "select", prev_cursor=(5.0, 5.0), center=CENTER, box=BOX, row_box=ROW, row_center=ROW_CENTER
     )
 
-    assert set(_kinds(anns)) == {"arrow", "frame", "click"}
+    assert set(_kinds(anns)) == {"arrow", "click"}
     # the star marks the option about to be clicked...
     star = next(a for a in anns if a.kind == "click")
     assert (star.cx, star.cy) == ROW_CENTER
-    # ...the frame stays on the control, so the field is still legible...
-    frame = next(a for a in anns if a.kind == "frame")
-    assert (frame.x, frame.y, frame.w, frame.h) == (10.0, 20.0, 100.0, 40.0)
+    # ...the frame stays on the control, so the field is still legible (drawn in
+    # the page, so it is `target_shape` and not an annotation that says where)...
+    assert target_shape("select", box=BOX) == Rect(x=10.0, y=20.0, w=100.0, h=40.0)
     # ...and the arrow stops at the *row's* rim, not the control's: coming from
     # the top-left it enters through the row's top edge.
     arrow = next(a for a in anns if a.kind == "arrow")

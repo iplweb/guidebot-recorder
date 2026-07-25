@@ -49,21 +49,27 @@ def test_click_star_arms_run_from_inner_to_outer_radius():
     assert '<line class="star" x1="111.31" y1="211.31" x2="121.21" y2="221.21"/>' in html
 
 
-def test_frame_annotation_renders_rounded_rect():
-    pages = [_shot_page([Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0)])]
-    html = render_html(pages, title="x")
-    assert '<rect class="frame" x="10.0" y="20.0" width="300.0" height="40.0" rx="4"/>' in html
-    assert '<rect class="rect"' not in html
+def test_no_frame_is_ever_drawn_over_the_still():
+    """Ramka celu nie może powstać w SVG — zawsze przykryłaby kursor.
+
+    Maluje ją strona przed migawką (`stills._framed_screenshot`), więc w PDF-ie
+    nie ma po niej ani reguły CSS, ani prostokąta. Ten test jest zamkiem na
+    powrót: gdyby ktoś „przywrócił" rysowanie ramki w `_svg`, kursor znowu
+    wylądowałby pod czerwonym wypełnieniem.
+    """
+
+    html = render_html([_shot_page([])], title="x")
+    assert '<rect class="frame"' not in html
+    assert ".frame {" not in html
 
 
-def test_stylesheet_defines_the_star_and_frame_rules():
-    # A `<line>`/`<rect>` with no `stroke` is invisible: the arms and frames get
-    # their red stroke only from the `.star` / `.frame` CSS rules. Rename either
-    # class in the stylesheet and every PDF silently loses its stars or frames,
-    # with the whole suite still green — so pin the rules by name here.
+def test_stylesheet_defines_the_star_rule():
+    # A `<line>` with no `stroke` is invisible: the star's arms get their red
+    # stroke only from the `.star` CSS rule. Rename the class in the stylesheet
+    # and every PDF silently loses its stars with the whole suite still green —
+    # so pin the rule by name here.
     html = render_html([_shot_page([])], title="x")
     assert ".star {" in html
-    assert ".frame {" in html
 
 
 def test_a_select_steps_marks_render_through_the_one_shared_arrowhead():
@@ -81,7 +87,6 @@ def test_a_select_steps_marks_render_through_the_one_shared_arrowhead():
         _shot_page(
             [
                 Annotation(kind="arrow", x1=10.0, y1=10.0, x2=200.0, y2=300.0),
-                Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0),
                 Annotation(kind="click", cx=100.0, cy=200.0, r_inner=16.0, r_outer=30.0),
             ]
         )
@@ -152,7 +157,7 @@ def test_annotations_stay_in_the_stills_own_coordinate_system():
         screenshot=Path("/tmp/popup.png"),
         text="t",
         heading=None,
-        annotations=[Annotation(kind="frame", x=10.0, y=20.0, w=300.0, h=40.0)],
+        annotations=[Annotation(kind="click", cx=100.0, cy=200.0, r_inner=16.0, r_outer=30.0)],
         screenshot_size=(600, 700),
         canvas_size=(1376, 800),
     )

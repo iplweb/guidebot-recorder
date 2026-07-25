@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from guidebot_recorder.guide.geometry import Rect, Shape, clipped_arrow, rect_from_box
+from guidebot_recorder.guide.geometry import Shape, clipped_arrow, rect_from_box
 from guidebot_recorder.guide.model import Annotation
 from guidebot_recorder.models.scenario import ResolvedHighlight
 from guidebot_recorder.overlay.geometry import Ellipse, ellipse_around, fit_to_bounds
@@ -15,7 +15,15 @@ CLICK_INNER = 16.0
 CLICK_OUTER = 30.0
 
 #: Actions whose target box gets a red frame. `highlight` keeps its own ellipse.
-_FRAMED = frozenset({"click", "type", "hover", "select"})
+#:
+#: The frame itself is **not** an :class:`Annotation`. Every other mark is drawn
+#: as SVG over the finished screenshot, but that layer necessarily covers the
+#: cursor — a PNG is flat pixels, and nothing can slip under part of one after
+#: the fact. So the frame is drawn into the live page before the shutter, where
+#: the browser composites it beneath the cursor. :mod:`~guidebot_recorder.guide.stills`
+#: does the drawing; this set and :func:`target_shape` still decide *whether* and
+#: *where*, so the policy lives in one place regardless of who paints it.
+FRAMED_ACTIONS = frozenset({"click", "type", "hover", "select"})
 
 _Point = tuple[float, float]
 
@@ -101,7 +109,7 @@ def annotations_for(
 
     ``row_box``/``row_center`` describe the option row of a ``select:`` step whose
     list was photographed **open**, and they are what splits that one action's
-    marks across two boxes: the **frame** stays on the control, so the reader sees
+    marks across two boxes: the frame stays on the control, so the reader sees
     which field they are in, while the **star** and the arrow's tip go to the row,
     because clicking that row is literally what happens next. Every other action
     puts all three on the same box. The row is fed through the same
@@ -110,9 +118,12 @@ def annotations_for(
     — rather than a select-only variant that could drift from them.
 
     With no row geometry — ``mode: native``, where the option list is an OS popup
-    no screenshot can hold — a ``select`` is marked like any other framed action:
-    an arrow to the control's frame and the frame itself, with no star, because
-    nothing visible is being clicked.
+    no screenshot can hold — a ``select`` gets an arrow to the control and no
+    star, because nothing visible is being clicked.
+
+    The frame is deliberately absent from the list this returns: it is painted
+    into the page before the screenshot so the cursor stays on top of it. See
+    :data:`FRAMED_ACTIONS`.
     """
 
     anns: list[Annotation] = []
@@ -129,9 +140,6 @@ def annotations_for(
         if segment is not None:
             (x1, y1), (x2, y2) = segment
             anns.append(Annotation(kind="arrow", x1=x1, y1=y1, x2=x2, y2=y2))
-
-    if action in _FRAMED and isinstance(shape, Rect):
-        anns.append(Annotation(kind="frame", x=shape.x, y=shape.y, w=shape.w, h=shape.h))
 
     if action == "click" and center is not None:
         anns.append(_star(center))

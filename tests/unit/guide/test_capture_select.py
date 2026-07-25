@@ -63,7 +63,9 @@ async def test_select_step_is_photographed_while_its_list_is_open(tmp_path, monk
     pages = await capture_pages(
         scenario, _compiled([action]), page, recorder, tmp_path / "shots", timeout=15.0
     )
-    assert events == ["open", "screenshot", "select:Zakres lat"]
+    # The outline goes up and comes down around the shutter, and the whole
+    # bracket sits between opening the list and choosing from it.
+    assert events == ["open", "frame", "screenshot", "clear_frame", "select:Zakres lat"]
     assert len(pages) == 1
     assert pages[0].screenshot is not None
 
@@ -71,25 +73,32 @@ async def test_select_step_is_photographed_while_its_list_is_open(tmp_path, monk
 async def test_select_marks_the_option_row_and_frames_the_control(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "reuse_failure", _async_none)
     scenario, action = _select_scenario_and_action()
+    recorder = FakeRecorder()
     pages = await capture_pages(
         scenario,
         _compiled([action]),
         FakePage(),
-        FakeRecorder(),
+        recorder,
         tmp_path / "shots",
         timeout=15.0,
     )
     annotations = {a.kind: a for a in pages[0].annotations}
-    assert set(annotations) == {"frame", "click"}
-    # The frame is the control the reader is in — NOT the row, and not the box
-    # the cursor approach measured, which by frame time is stale.
-    rect = annotations["frame"]
-    assert (rect.x, rect.y, rect.w, rect.h) == (
-        FAKE_CONTROL["x"],
-        FAKE_CONTROL["y"],
-        FAKE_CONTROL["width"],
-        FAKE_CONTROL["height"],
-    )
+    assert set(annotations) == {"click"}
+    # The frame is painted into the page, under the cursor, so it is the overlay
+    # — not the annotation list — that records it. It outlines the control the
+    # reader is in: NOT the row, and not the box the cursor approach measured,
+    # which by frame time is stale.
+    assert recorder.overlay.frames == [
+        (
+            FAKE_CONTROL["x"],
+            FAKE_CONTROL["y"],
+            FAKE_CONTROL["width"],
+            FAKE_CONTROL["height"],
+        )
+    ]
+    # ...and it does not survive the shutter: left standing it would mark the
+    # wrong element in every screenshot that followed.
+    assert recorder.overlay.clears == 1
     assert (annotations["click"].cx, annotations["click"].cy) == FAKE_ROW_CENTER
 
 
@@ -138,7 +147,10 @@ async def test_native_mode_keeps_the_collapsed_frame_and_its_single_mark(tmp_pat
         scenario, _compiled([action]), FakePage(), recorder, tmp_path / "shots", timeout=15.0
     )
     assert [call[2] for call in recorder.select_calls] == [True]  # `native=True`
-    assert {a.kind for a in pages[0].annotations} == {"frame"}
+    assert {a.kind for a in pages[0].annotations} == set()
+    # Nothing visible is clicked under `native`, so the frame is the only mark —
+    # and it lives in the page now.
+    assert len(recorder.overlay.frames) == 1
 
 
 async def test_the_still_capture_asks_for_no_click_ring(tmp_path, monkeypatch):
