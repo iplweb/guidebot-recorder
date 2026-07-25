@@ -4,6 +4,18 @@ from guidebot_recorder.guide.layout import fold_narration, render_html
 from guidebot_recorder.guide.model import Annotation, GuidePage
 
 
+def _sections(html: str) -> int:
+    """Ile `<section>`-ów wyszło z renderera — po jednym na `GuidePage`.
+
+    Kadr i tekst dają `.scene` (dwie mieszczą się na kartce), slajd `.slide`
+    (zajmuje kartkę sam). Liczymy oba, bo te testy pytają „ile stron modelu
+    trafiło do dokumentu", a nie „ile kartek wypluje drukarka" — tego drugiego
+    nie wie nikt poza silnikiem druku.
+    """
+
+    return html.count('class="scene"') + html.count('class="slide"')
+
+
 def test_one_section_per_page_and_title():
     pages = [
         GuidePage(kind="slide", screenshot=None, text="", heading="Sekcja 1", annotations=[]),
@@ -17,7 +29,7 @@ def test_one_section_per_page_and_title():
         ),
     ]
     html = render_html(pages, title="Mój przewodnik")
-    assert html.count('class="page"') == 2
+    assert _sections(html) == 2
     assert "Mój przewodnik" in html
 
 
@@ -185,7 +197,7 @@ def test_narration_after_a_picture_folds_onto_it_under_a_rule():
     html = render_html(
         fold_narration([_shot_page([]), _text("Okno otwiera się osobno.")]), title="x"
     )
-    assert html.count('class="page"') == 1
+    assert _sections(html) == 1
     assert '<hr class="fold"/>' in html
     assert "Okno otwiera się osobno." in html
 
@@ -194,7 +206,7 @@ def test_narration_with_no_picture_before_it_keeps_its_own_page():
     """Nie ma czego dosiąść — zostaje pełnowymiarowa strona tekstowa."""
 
     html = render_html(fold_narration([_text("Zanim zaczniemy.")]), title="x")
-    assert html.count('class="page"') == 1
+    assert _sections(html) == 1
     assert '<hr class="fold"/>' not in html
     assert "Zanim zaczniemy." in html
 
@@ -207,14 +219,14 @@ def test_a_slide_neither_absorbs_narration_nor_is_absorbed():
     """
 
     html = render_html(fold_narration([_slide("Logowanie"), _text("Witaj.")]), title="x")
-    assert html.count('class="page"') == 2
+    assert _sections(html) == 2
     assert '<hr class="fold"/>' not in html
 
 
 def test_several_narrations_fold_onto_one_picture_each_under_its_own_rule():
     pages = [_shot_page([]), _text("Pierwsze zdanie."), _text("Drugie zdanie.")]
     html = render_html(fold_narration(pages), title="x")
-    assert html.count('class="page"') == 1
+    assert _sections(html) == 1
     assert html.count('<hr class="fold"/>') == 2
 
 
@@ -226,7 +238,7 @@ def test_empty_narration_folds_to_nothing_rather_than_a_bare_rule():
     """
 
     html = render_html(fold_narration([_shot_page([]), _text("")]), title="x")
-    assert html.count('class="page"') == 1
+    assert _sections(html) == 1
     assert '<hr class="fold"/>' not in html
 
 
@@ -244,9 +256,9 @@ def test_fold_narration_is_what_the_document_is_counted_by():
     html = render_html(sheets, title="x")
 
     assert len(sheets) == 2
-    assert html.count('class="page"') == len(sheets)
+    assert _sections(html) == len(sheets)
     # A gdyby renderer nadal zwijał sam, podwójne zwinięcie byłoby niewykrywalne.
-    assert render_html(pages, title="x").count('class="page"') == 4
+    assert _sections(render_html(pages, title="x")) == 4
 
 
 def test_folding_does_not_mutate_the_caller_s_pages():
@@ -264,3 +276,47 @@ def test_text_page_has_no_svg():
     html = render_html(pages, title="x")
     assert "<svg" not in html
     assert "tylko tekst" in html
+
+
+def test_scenes_are_numbered_by_position_in_the_pdf_not_by_step_index():
+    """Numerek na marginesie liczy scenki, które czytelnik widzi na papierze.
+
+    Kroki `say:`-only zwijają się na poprzedni kadr, a slajd jest przerywnikiem —
+    numerowanie indeksem kroku ze scenariusza dawałoby czytelnikowi dziury
+    w numeracji, których nie ma jak wytłumaczyć patrząc na wydruk.
+    """
+
+    pages = fold_narration(
+        [_slide("Tytuł"), _shot_page([]), _text("dopisek"), _shot_page([]), _shot_page([])]
+    )
+    html = render_html(pages, title="x")
+
+    # Cztery GuidePage po zwinięciu: slajd + trzy kadry (dopisek wsiąkł w pierwszy).
+    assert len(pages) == 4
+    assert [n for n in ("1", "2", "3", "4") if f'<div class="num">{n}</div>' in html] == [
+        "1",
+        "2",
+        "3",
+    ]
+    # Slajd numeru nie dostaje — nie jest scenką.
+    assert html.count('<div class="num">') == 3
+
+
+def test_slide_is_not_numbered_even_when_it_comes_first():
+    html = render_html([_slide("Tytuł")], title="x")
+    assert '<div class="num">' not in html
+
+
+def test_narration_column_track_cannot_overflow_the_sheet():
+    """Ostatnia kolumna to `minmax(0, 1fr)`, nigdy procent.
+
+    Regresja: `62% 38%` sumowało się do 100%, a `gap` dochodził PONAD to, więc
+    prawa kolumna wychodziła poza papier o całą szerokość odstępu i Chromium
+    obcinało po 2–3 znaki z każdego wiersza narracji — po cichu, bez żadnego
+    ostrzeżenia. Pomiar w przeglądarce robi `test_layout_print.py`; tutaj
+    pilnujemy samej deklaracji, bo to ona jest przyczyną.
+    """
+
+    html = render_html([_shot_page([])], title="x")
+    assert "minmax(0, 1fr)" in html
+    assert "grid-template-columns: 62% 38%" not in html

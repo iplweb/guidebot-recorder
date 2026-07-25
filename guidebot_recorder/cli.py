@@ -439,7 +439,9 @@ def guide_cmd(
         except GuideError as exc:
             typer.echo(f"BŁĄD: {exc}", err=True)
             raise typer.Exit(code=2) from None
-    typer.echo(f"zbudowano przewodnik: {out} ({count} stron)")
+    # Scenek, nie stron: dwie scenki dzielą kartkę A4 poziomo, a długa narracja
+    # spycha sąsiadkę na następną — liczbę kartek zna dopiero drukarka.
+    typer.echo(f"zbudowano przewodnik: {out} ({count} scenek)")
 
 
 if __name__ == "__main__":

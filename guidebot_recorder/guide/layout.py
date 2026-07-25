@@ -1,4 +1,10 @@
-"""Compose GuidePage list into one landscape HTML document for Chromium page.pdf()."""
+"""Compose GuidePage list into one landscape HTML document for Chromium page.pdf().
+
+Each :class:`GuidePage` becomes one ``.scene`` — a margin number, the still, and
+the narration beside it. Scenes flow rather than each claiming a sheet: two fit
+on an A4-landscape page, and a scene whose text runs long pushes its neighbour to
+the next sheet instead of being cut.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,41 @@ _STYLE = """
 @page { size: A4 landscape; margin: 12mm; }
 * { box-sizing: border-box; }
 body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a; margin: 0; }
-.page { display: grid; grid-template-columns: 62% 38%; gap: 6mm; height: 100vh;
-        page-break-after: always; align-items: start; }
-.page:last-child { page-break-after: auto; }
+/* Two scenes to a sheet, stacked, rather than one scene per sheet.
+   Columns: the margin number, the still, then the narration.
+
+   The last track is `minmax(0, 1fr)` and NOT a percentage on purpose. The
+   previous `62% 38%` summed to 100% and then `gap` was added on top, so the
+   right-hand column ran off the paper by exactly the gap and Chromium clipped
+   whatever text crossed the edge — two or three characters off every line, and
+   silently ("Ze względów bezpieczeństw" for "…bezpieczeństwa"). A `fr` track
+   absorbs what the fixed tracks and the gaps leave, so the row cannot overflow.
+   The `0` floor matters too: plain `1fr` means `minmax(auto, 1fr)`, whose
+   min-content floor a long unbreakable word would push past the same edge.
+
+   The still takes half the row's width. A 16:9 still then prints about 36% of
+   the printable height — not the 40-50% the width sits at, because on a
+   landscape sheet those two bounds cannot both hold for 16:9: a still 45% of
+   the height would have to be ~60% of the width. Width is the one that decides
+   whether a reader can read the screenshot, so width is the one pinned.
+
+   `min-height` exists only to cap the sheet at two scenes; it is deliberately
+   just above a third of the printable height, not half of it. Half would pad
+   every short scene with a band of white as tall as a quarter of the picture. */
+.scene { display: grid; grid-template-columns: 9mm 50% minmax(0, 1fr); gap: 0 4mm;
+         align-items: start; min-height: 78mm; padding-bottom: 4mm;
+         break-inside: avoid; page-break-inside: avoid; }
+/* Separator between two scenes sharing a sheet. It rides on the *second* scene,
+   so a scene that got pushed to a fresh sheet carries a rule along its top —
+   cosmetic, and the alternative (a rule under the first) would instead strand
+   one at the foot of a sheet whose partner moved on. */
+.scene + .scene { border-top: 1px solid #d0d0d0; padding-top: 4mm; }
+/* Sequential position of this scene in the finished PDF — deliberately not the
+   scenario's step index, which counts `say:`-only steps and other things that
+   never became a picture. Set by `render_html`, which is the only place that
+   knows what actually got rendered. */
+.num { font-size: 15px; font-weight: 700; color: #8a8a8a; padding-top: 1mm;
+       text-align: right; }
 .shot { position: relative; width: 100%; border: 1px solid #ddd; border-radius: 6px;
         overflow: hidden; display: flex; align-items: center; justify-content: center;
         background: #eceef2; }
@@ -27,14 +65,20 @@ body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1a1a;
 .plate { position: relative; width: 100%; }
 .plate img { width: 100%; display: block; }
 .plate svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.side { padding-top: 2mm; }
-.side .heading { font-size: 20px; font-weight: 700; margin: 0 0 4mm; }
-.side .body { font-size: 16px; line-height: 1.5; white-space: pre-wrap; }
+.side { padding-top: 1mm; }
+/* A hair smaller than the one-scene-per-sheet layout these replaced: two scenes
+   share the height that one used to have, and the narration column is now the
+   wider of the two (~128mm against the old ~104mm), so the lines still break in
+   roughly the same places. */
+.side .heading { font-size: 18px; font-weight: 700; margin: 0 0 3mm; }
+.side .body { font-size: 15px; line-height: 1.45; white-space: pre-wrap; }
 /* Separates this step's own description from narration folded in from steps
    that had nothing to photograph — see `_fold_narration`. */
-.side hr.fold { border: 0; border-top: 1px solid #d6d6d6; margin: 4mm 0; }
-.slide { grid-column: 1 / -1; display: flex; flex-direction: column; justify-content: center;
-         height: 100vh; text-align: center; }
+.side hr.fold { border: 0; border-top: 1px solid #d6d6d6; margin: 3mm 0; }
+/* A slide is a full-sheet interstitial: it keeps a page to itself and pushes
+   whatever follows onto the next one. */
+.slide { display: flex; flex-direction: column; justify-content: center;
+         height: 100vh; text-align: center; break-after: page; page-break-after: always; }
 .slide .title { font-size: 40px; font-weight: 800; }
 .slide .subtitle { font-size: 24px; color: #555; margin-top: 4mm; }
 .arrow { stroke: #e11; stroke-width: 4; fill: none; marker-end: url(#ah); }
@@ -138,12 +182,13 @@ def _side(page: GuidePage) -> str:
     return f"{heading}{body}{folded}"
 
 
-def _shot_page(page: GuidePage) -> str:
+def _shot_scene(page: GuidePage, number: int) -> str:
     uri = Path(page.screenshot).absolute().as_uri()
     svg = _svg(page.annotations, page.screenshot_size or (1, 1))
     shot_style, plate_style = _letterbox(page)
     return (
-        '<section class="page">'
+        '<section class="scene">'
+        f'<div class="num">{number}</div>'
         f'<div class="shot"{shot_style}>'
         f'<div class="plate"{plate_style}><img src="{uri}"/>{svg}</div></div>'
         f'<div class="side">{_side(page)}</div>'
@@ -158,19 +203,22 @@ def _slide_page(page: GuidePage) -> str:
         if page.heading and page.text
         else ""
     )
-    return f'<section class="page"><div class="slide">{title}{sub}</div></section>'
+    return f'<section class="slide">{title}{sub}</section>'
 
 
-def _text_page(page: GuidePage) -> str:
-    """Narration that found no picture to join — full width, still its own sheet.
+def _text_scene(page: GuidePage, number: int) -> str:
+    """Narration that found no picture to join — spans the still and text columns.
 
-    Reached only when :func:`_fold_narration` declined to fold it: nothing came
-    before it, or what came before was a slide.
+    Reached only when :func:`fold_narration` declined to fold it: nothing came
+    before it, or what came before was a slide. It keeps its margin number, so the
+    numbering stays the count of scenes a reader can actually see.
     """
 
     return (
-        '<section class="page"><div class="side" style="grid-column:1/-1">'
-        f"{_side(page)}</div></section>"
+        '<section class="scene">'
+        f'<div class="num">{number}</div>'
+        f'<div class="side" style="grid-column:2/-1">{_side(page)}</div>'
+        "</section>"
     )
 
 
@@ -221,21 +269,32 @@ def fold_narration(pages: list[GuidePage]) -> list[GuidePage]:
 
 
 def render_html(pages: list[GuidePage], *, title: str) -> str:
-    """Render exactly the pages given — one ``<section class="page">`` each.
+    """Render exactly the pages given — one ``<section class="scene">`` each.
 
-    Does **not** fold; run :func:`fold_narration` first if you want that. Keeping
-    the renderer free of pagination is what lets the caller count the same list it
-    prints.
+    Scenes *flow*: two fit on an A4-landscape sheet, and one whose narration runs
+    long simply takes the room it needs and pushes its neighbour onto the next
+    sheet (``break-inside: avoid`` keeps a scene whole). Sheet count is therefore
+    the printer's answer, not this function's — which is why the caller counts
+    scenes and says so.
+
+    Numbering runs over the scenes this renderer actually emits, skipping slides:
+    a reader counting pictures on paper has no way to see a `say:`-only step, so
+    numbering by scenario step index would visibly skip.
+
+    Does **not** fold; run :func:`fold_narration` first if you want that.
     """
 
     body_parts: list[str] = []
+    number = 0
     for page in pages:
         if page.kind == "slide":
             body_parts.append(_slide_page(page))
-        elif page.screenshot is not None:
-            body_parts.append(_shot_page(page))
+            continue
+        number += 1
+        if page.screenshot is not None:
+            body_parts.append(_shot_scene(page, number))
         else:
-            body_parts.append(_text_page(page))
+            body_parts.append(_text_scene(page, number))
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head>"
