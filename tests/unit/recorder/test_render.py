@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from guidebot_recorder.chrome import Chrome
@@ -23,11 +24,13 @@ from guidebot_recorder.recorder.render import (
     POPUP_BBOX_DEGENERATE_RATIO,
     RenderError,
     _assemble_audio_tracks,
+    _closing_window_guard,
     _mux_tracks_for_timeline,
     _parse_content_box,
     _parse_window_request,
     _popup_content_box,
     _popup_window_request,
+    _PopupSession,
     _prime_visuals,
     _publish_render_artifacts,
     _resolve_popup_crop,
@@ -993,7 +996,7 @@ async def test_render_does_not_attribute_popup_opened_before_actual_click(tmp_pa
         await browser.close()
 
 
-async def test_render_fails_when_popup_closes_during_narration(tmp_path):
+async def test_render_fails_when_popup_closes_during_narration(tmp_path, monkeypatch):
     popup_html = tmp_path / "popup.html"
     popup_html.write_text("<h1>Popup</h1>", encoding="utf-8")
     main_html = tmp_path / "main.html"
@@ -1024,10 +1027,34 @@ async def test_render_fails_when_popup_closes_during_narration(tmp_path):
 
         # Keep the compiled target/lifecycle metadata, then simulate runtime drift
         # that closes the popup independently of a scenario action.
-        popup_html.write_text(
-            "<h1>Popup</h1><script>setTimeout(() => close(), 300)</script>",
-            encoding="utf-8",
-        )
+        #
+        # The close is driven off the render's own narration wait, not off a
+        # wall-clock timer inside the popup. A fixed delay races the popup-open
+        # handshake, whose duration is unbounded because it waits on the browser:
+        # on a loaded machine the timer fires while the render is still adopting
+        # the popup, and the render then fails for a different — equally correct —
+        # reason ("popup zamknął się podczas otwierania", or the click's popup
+        # never being seen at all). Anchoring the close to the first narration
+        # wait *after* the popup was adopted pins the phase by construction, so
+        # this test asserts the async-close path itself rather than a race.
+        prepared_popups: list = []
+        real_prepare_popup = render_module._prepare_popup
+        real_wait_for_narration = render_module._wait_for_step_narration
+
+        async def spy_prepare_popup(popup_page, *args, **kwargs):
+            prepared = await real_prepare_popup(popup_page, *args, **kwargs)
+            prepared_popups.append(popup_page)
+            return prepared
+
+        async def close_popup_during_narration(segments):
+            # The first narration wait once a popup is adopted is the `say` step.
+            if prepared_popups and not prepared_popups[0].is_closed():
+                await prepared_popups[0].close()
+            await real_wait_for_narration(segments)
+
+        monkeypatch.setattr(render_module, "_prepare_popup", spy_prepare_popup)
+        monkeypatch.setattr(render_module, "_wait_for_step_narration", close_popup_during_narration)
+
         with pytest.raises(RenderError, match="asynchronicznie"):
             await run_render(path, tmp_path / "out.mp4", SlowTts(), tmp_path / "cache", browser)
         await browser.close()
@@ -2259,6 +2286,72 @@ def test_resolve_popup_crop_does_not_run_cropdetect_when_a_level_answered(tmp_pa
         )[1]
         == "bbox"
     )
+
+
+# --- a window that closes mid-call ------------------------------------------
+# `_active_page` can only sample liveness. A popup that closes itself can still
+# die between that sample and the next await on it, and Playwright then fails
+# with an opaque "Target page, context or browser has been closed". That raw
+# error used to escape `run_render` and replace the scenario's own, precise
+# lifecycle diagnosis — an intermittent CI failure in the popup-close test.
+
+
+class _StubPage:
+    def __init__(self, closed=False):
+        self._closed = closed
+
+    def is_closed(self):
+        return self._closed
+
+
+def _popup_session(page, *, close_handled=False):
+    return _PopupSession(
+        page=page,
+        video=None,
+        opened_at=0.0,
+        close_handled=close_handled,
+    )
+
+
+async def test_closing_window_guard_reports_a_popup_that_died_mid_call():
+    main_page = _StubPage()
+    popup = _popup_session(_StubPage(closed=True))
+    original = PlaywrightError("Target page, context or browser has been closed")
+
+    with pytest.raises(RenderError, match="asynchronicznie podczas narracji") as caught:
+        async with _closing_window_guard(main_page, popup, {}, 0.0, "podczas narracji"):
+            raise original
+
+    # The raw cause stays attached, so the real failure is never lost.
+    assert caught.value.__cause__ is original
+
+
+async def test_closing_window_guard_reports_a_dead_main_window():
+    main_page = _StubPage(closed=True)
+
+    with pytest.raises(RenderError, match="główne okno zostało zamknięte"):
+        async with _closing_window_guard(main_page, None, {}, 0.0, "na końcu scenariusza"):
+            raise PlaywrightError("Target page, context or browser has been closed")
+
+
+async def test_closing_window_guard_leaves_an_unexplained_error_alone():
+    """Both windows alive: the error is about something else and must not be masked."""
+    main_page = _StubPage()
+    popup = _popup_session(_StubPage())
+
+    with pytest.raises(PlaywrightError, match="strict mode violation"):
+        async with _closing_window_guard(main_page, popup, {}, 0.0, "podczas narracji"):
+            raise PlaywrightError("strict mode violation")
+
+
+async def test_closing_window_guard_ignores_an_already_handled_close():
+    """A close the scenario deliberately performed is not an async death."""
+    main_page = _StubPage()
+    popup = _popup_session(_StubPage(closed=True), close_handled=True)
+
+    with pytest.raises(PlaywrightError, match="boom"):
+        async with _closing_window_guard(main_page, popup, {}, 0.0, "podczas narracji"):
+            raise PlaywrightError("boom")
 
 
 class _CursorPage:

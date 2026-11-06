@@ -16,7 +16,8 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -615,6 +616,40 @@ def _active_page(main_page: Page, popup: _PopupSession | None) -> Page:
     if popup is not None and not popup.page.is_closed():
         return popup.page
     return main_page
+
+
+@asynccontextmanager
+async def _closing_window_guard(
+    main_page: Page,
+    popup: _PopupSession | None,
+    observed_pages: dict[Page, _PageObservation],
+    anchor: float,
+    where: str,
+) -> AsyncIterator[None]:
+    """Report a window that dies mid-call as a lifecycle error, not a raw one.
+
+    ``_active_page`` can only *sample* liveness. A popup that closes itself
+    (``window.close()``, a redirect back to the opener, a site's own timer) can
+    still die between that sample and the very next ``await`` on it, and every
+    Playwright call then fails with an opaque ``Target page, context or browser
+    has been closed``. That is the same close the scenario's own checkpoints
+    describe precisely — so classify it here instead of letting the raw error
+    escape and lose the explanation.
+
+    Liveness is re-read from the pages themselves rather than sniffed out of the
+    exception message: the state is what the checkpoints act on, and it does not
+    depend on Playwright's wording.
+    """
+
+    try:
+        yield
+    except PlaywrightError as exc:
+        _sync_popup_close(popup, observed_pages, anchor)
+        if main_page.is_closed():
+            raise RenderError(f"główne okno zostało zamknięte {where}") from exc
+        if popup is not None and popup.page.is_closed() and not popup.close_handled:
+            raise RenderError(f"popup zamknął się asynchronicznie {where}") from exc
+        raise
 
 
 def _expect_chrome(chrome: Chrome | None, bare_popups: bool) -> bool:
@@ -1590,8 +1625,11 @@ async def run_render(
             if verbose:
                 tqdm.write(f"[{index + 1}/{len(flat)}] {kind}")
 
-            active_page = _active_page(page, popup)
-            await active_page.bring_to_front()
+            async with _closing_window_guard(
+                page, popup, observed_pages, anchor, f"na starcie kroku {index}"
+            ):
+                active_page = _active_page(page, popup)
+                await active_page.bring_to_front()
             # Card-aware visual prep, ahead of the narration block: a `slide`
             # step paints (replacing any prior card); a `say` step keeps a live
             # card up while it narrates; any other step dismisses the card
@@ -1717,22 +1755,27 @@ async def run_render(
             active_page = _active_page(page, popup)
             if _unexpected_pages(observed_pages, page, popup):
                 raise RenderError(f"krok {index}: nieoczekiwany popup — uruchom `compile --force`")
-            await active_page.bring_to_front()
-            # Card-aware post-narration re-assert: a navigation that destroyed the
-            # card DURING the narration wait (a say/slide over a live card) must
-            # fail loud here — this is the checkpoint that catches a mid-wait
-            # destruction even when the say is the LAST step (the loop still fully
-            # processes that step before exiting). When no card is active this is
-            # exactly today's unconditional `_ensure_visuals` (back-compat).
-            if card_active:
-                await _ensure_card(active_page)
-            else:
-                await _ensure_visuals(
-                    active_page,
-                    overlay,
-                    chrome,
-                    expect_chrome=_expect_chrome(chrome, bare_popups),
-                )
+            # The narration above ran unattended, so this whole re-assert touches
+            # a window that may have closed itself meanwhile.
+            async with _closing_window_guard(
+                page, popup, observed_pages, anchor, "podczas narracji"
+            ):
+                await active_page.bring_to_front()
+                # Card-aware post-narration re-assert: a navigation that destroyed
+                # the card DURING the narration wait (a say/slide over a live card)
+                # must fail loud here — this is the checkpoint that catches a
+                # mid-wait destruction even when the say is the LAST step (the loop
+                # still fully processes that step before exiting). When no card is
+                # active this is exactly today's unconditional `_ensure_visuals`.
+                if card_active:
+                    await _ensure_card(active_page)
+                else:
+                    await _ensure_visuals(
+                        active_page,
+                        overlay,
+                        chrome,
+                        expect_chrome=_expect_chrome(chrome, bare_popups),
+                    )
             if isinstance(cached, CachedAction) and cached.opens_popup and popup is not None:
                 raise RenderError("v1 obsługuje co najwyżej jeden popup w całej sesji")
             # Main window drives the site iframe (a Frame); popups drive the page.
@@ -1829,8 +1872,11 @@ async def run_render(
         # this post-roll, a static last page can leave the VFR recording a fraction
         # shorter than the audio timeline and make the final syllable trimmable.
         await asyncio.sleep(_VIDEO_POSTROLL_SECONDS)
-        postroll_page = _active_page(page, popup)
-        await postroll_page.screenshot()
+        async with _closing_window_guard(
+            page, popup, observed_pages, anchor, "na końcu scenariusza"
+        ):
+            postroll_page = _active_page(page, popup)
+            await postroll_page.screenshot()
         _sync_popup_close(popup, observed_pages, anchor)
         if page.is_closed():
             raise RenderError("główne okno zostało zamknięte na końcu scenariusza")
